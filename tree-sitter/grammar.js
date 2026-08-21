@@ -7,8 +7,6 @@ module.exports = grammar({
   ],
 
   conflicts: $ => [
-    [$.type, $.primary],
-    [$.primary, $.struct_literal],
     [$.lvalue, $.primary]
   ],
 
@@ -113,7 +111,7 @@ module.exports = grammar({
     return_stmt: $ => seq('return', optional($.expr), ';'),
     expr_stmt: $ => seq($.expr, ';'),
 
-    // --- EXPRESSIONS (Precedencia léptetés) ---
+    // --- EXPRESSIONS ---
     expr: $ => $.logic_or,
 
     logic_or: $ => prec.left(1, seq($.logic_and, repeat(seq('||', $.logic_and)))),
@@ -169,8 +167,8 @@ module.exports = grammar({
     ),
 
     integer_literal: $ => choice(
-      token(/\d+n[0-9a-fA-F]+/), // based_form (pl. 10n11)
-      token(/\d+/)               // decimal_form
+      token(/\d+n[0-9a-fA-F]+/),
+      token(/\d+/)
     ),
 
     bool_literal: $ => choice('true', 'false'),
@@ -185,12 +183,17 @@ module.exports = grammar({
     ),
 
     type: $ => choice(
-      seq('*', $.base_type, '[', $.integer_literal, ']'),
-      seq('*', $.type),
-      seq($.base_type, '[', $.integer_literal, ']'),
+      $.pointer_type,
+      $.array_type,
       seq('(', $.type, ')'),
       $.base_type
     ),
+
+    // A tömbképzés erősebb (precedencia: 2)
+    array_type: $ => prec(2, seq($.type, '[', $.integer_literal, ']')),
+
+    // A mutatóképzés gyengébb (precedencia: 1)
+    pointer_type: $ => prec(1, seq('*', $.type)),
 
     // --- IDENTIFIERS & COMMENTS ---
     identifier: $ => /[a-zA-Z_][a-zA-Z0-9_]*/,

@@ -1,0 +1,23 @@
+{
+  "name": "postulate-vscode",
+  "displayName": "Postulate Language Support",
+  "description": "Syntax highlighting and language support for Postulate",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [{
+      "id": "postulate",
+      "aliases": ["Postulate", "ptl"],
+      "extensions": [".ptl"],
+      "configuration": "./language-configuration.json"
+    }],
+    "grammars": [{
+      "language": "postulate",
+      "scopeName": "source.postulate",
+      "path": "./tree-sitter-postulate.wasm"
+    }]
+  }
+}
