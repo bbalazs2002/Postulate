@@ -1,0 +1,1 @@
+(extern_decl sys_exit (params (param code (base int64))) void)

@@ -1,0 +1,1 @@
+(program (struct_decl Node (fields (field_decl value (base int32)))) (function get_value (params (param n (base Node))) (base int32) (func_block (decls) (stmts (return (field (ident n) value))))))

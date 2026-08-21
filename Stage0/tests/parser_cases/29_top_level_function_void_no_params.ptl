@@ -1,0 +1,4 @@
+TOP_LEVEL_DECL
+function noop() : void {
+  return;
+}

@@ -1,0 +1,4 @@
+TOP_LEVEL_DECL
+struct Node {
+  value : int32;
+}

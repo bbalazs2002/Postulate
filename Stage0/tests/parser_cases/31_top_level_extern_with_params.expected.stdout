@@ -1,0 +1,1 @@
+(extern_decl sys_write (params (param fd (base int64)) (param buf (ptr (base uint8))) (param count (base uint64))) (base int64))

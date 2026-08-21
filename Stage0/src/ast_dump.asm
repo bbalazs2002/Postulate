@@ -16,6 +16,8 @@ global dump_expr
 global dump_stmt
 global dump_decl
 global dump_func_block
+global dump_top_level_decl
+global dump_program
 global emit_dec
 
 section .data
@@ -77,6 +79,25 @@ lp_decls:      db "(decls"
 lp_decls_len equ $ - lp_decls
 lp_stmts:      db "(stmts"
 lp_stmts_len equ $ - lp_stmts
+
+lp_param:      db "(param "
+lp_param_len equ $ - lp_param
+lp_field_decl: db "(field_decl "
+lp_field_decl_len equ $ - lp_field_decl
+lp_function:   db "(function "
+lp_function_len equ $ - lp_function
+lp_extern_decl: db "(extern_decl "
+lp_extern_decl_len equ $ - lp_extern_decl
+lp_struct_decl: db "(struct_decl "
+lp_struct_decl_len equ $ - lp_struct_decl
+lp_params:     db "(params"
+lp_params_len equ $ - lp_params
+lp_fields:     db "(fields"
+lp_fields_len equ $ - lp_fields
+lp_program:    db "(program"
+lp_program_len equ $ - lp_program
+kw_void:       db "void"
+kw_void_len equ $ - kw_void
 
 ; operator symbol spellings, indexed by (kind - TOK_ASSIGN), matching
 ; TOK_ASSIGN..TOK_PIPE's contiguous order in tokens.inc (60-79)
@@ -781,4 +802,223 @@ emit_dec:
     pop     r13
     pop     r12
     pop     rbx
+    ret
+
+; ===========================================================================
+; dump_param: in rdi = AST_PARAM node ptr; appends "(param <name> <type>)".
+; Only ever reached via dump_node_list from a signature's params array --
+; parallel to dump_field_init/dump_assign_pair.
+; ===========================================================================
+dump_param:
+    push    rbx
+    mov     rbx, rdi
+    mov     rsi, lp_param
+    mov     rdx, lp_param_len
+    call    emit_str
+    mov     rax, [rbx + AST_A_OFF]
+    mov     rsi, [parser_src_buf]
+    add     rsi, rax
+    mov     rdx, [rbx + AST_B_OFF]
+    call    emit_str
+    mov     rsi, space
+    mov     rdx, 1
+    call    emit_str
+    mov     rdi, [rbx + AST_C_OFF]
+    call    dump_type
+    mov     rsi, rparen
+    mov     rdx, 1
+    call    emit_str
+    pop     rbx
+    ret
+
+; ===========================================================================
+; dump_field_decl: in rdi = AST_FIELD_DECL node ptr; appends "(field_decl
+; <name> <type>)". Only ever reached via dump_node_list from a struct_decl's
+; fields array. Same shape as dump_param -- distinct label, distinct future
+; semantic role (struct layout vs. calling convention).
+; ===========================================================================
+dump_field_decl:
+    push    rbx
+    mov     rbx, rdi
+    mov     rsi, lp_field_decl
+    mov     rdx, lp_field_decl_len
+    call    emit_str
+    mov     rax, [rbx + AST_A_OFF]
+    mov     rsi, [parser_src_buf]
+    add     rsi, rax
+    mov     rdx, [rbx + AST_B_OFF]
+    call    emit_str
+    mov     rsi, space
+    mov     rdx, 1
+    call    emit_str
+    mov     rdi, [rbx + AST_C_OFF]
+    call    dump_type
+    mov     rsi, rparen
+    mov     rdx, 1
+    call    emit_str
+    pop     rbx
+    ret
+
+; ===========================================================================
+; dump_return_type: in rdi = type node ptr, or 0 for "void" -- same "0 =
+; absent" idiom as dump_stmt's if/return-expr handling. Shared by
+; dump_top_level_decl's function/extern_decl cases. Both branches are tail
+; calls -- no register to save.
+; ===========================================================================
+dump_return_type:
+    cmp     rdi, 0
+    jne     .type
+    mov     rsi, kw_void
+    mov     rdx, kw_void_len
+    jmp     emit_str
+.type:
+    jmp     dump_type
+
+; ===========================================================================
+; dump_top_level_decl: in rdi = AST_FUNCTION/AST_STRUCT_DECL/AST_EXTERN_DECL
+; node ptr; appends its S-expression. This is AST_PROGRAM's per-element dump
+; routine (parallel to how dump_stmt serves AST_BLOCK) -- one routine with
+; inline per-kind case labels, same shape as dump_stmt itself, not three
+; separate named dump routines.
+; Field reads that follow a nested emit_str call are always re-derived from
+; [rbx + OFF] rather than trusted in a register -- emit_str clobbers rax
+; (and any other caller-saved reg holding a stale value), see spec section
+; 9.7's dump_stmt if/return bug from last phase.
+; ===========================================================================
+dump_top_level_decl:
+    push    rbx
+    mov     rbx, rdi
+    mov     rax, [rbx + AST_KIND_OFF]
+
+    cmp     rax, AST_FUNCTION
+    je      .function
+    cmp     rax, AST_STRUCT_DECL
+    je      .struct_decl
+    cmp     rax, AST_EXTERN_DECL
+    je      .extern_decl
+    pop     rbx
+    ret                          ; unknown kind: defensive no-op
+
+.function:
+    mov     rsi, lp_function
+    mov     rdx, lp_function_len
+    call    emit_str
+    mov     rax, [rbx + AST_A_OFF]   ; signature ptr
+    mov     rcx, [rax + AST_A_OFF]   ; name_offset
+    mov     rdx, [rax + AST_B_OFF]   ; name_len
+    mov     rsi, [parser_src_buf]
+    add     rsi, rcx
+    call    emit_str
+    mov     rsi, space
+    mov     rdx, 1
+    call    emit_str
+    mov     rsi, lp_params
+    mov     rdx, lp_params_len
+    call    emit_str
+    mov     rax, [rbx + AST_A_OFF]   ; signature ptr (re-derived)
+    mov     rdi, [rax + AST_C_OFF]   ; params ptr
+    mov     rsi, [rax + AST_D_OFF]   ; param_count
+    mov     rcx, dump_param
+    call    dump_node_list
+    mov     rsi, rparen
+    mov     rdx, 1
+    call    emit_str
+    mov     rsi, space
+    mov     rdx, 1
+    call    emit_str
+    mov     rdi, [rbx + AST_B_OFF]   ; return_type ptr, 0 = void
+    call    dump_return_type
+    mov     rsi, space
+    mov     rdx, 1
+    call    emit_str
+    mov     rdi, [rbx + AST_C_OFF]   ; body (func_block)
+    call    dump_func_block
+    mov     rsi, rparen
+    mov     rdx, 1
+    call    emit_str
+    pop     rbx
+    ret
+
+.extern_decl:
+    mov     rsi, lp_extern_decl
+    mov     rdx, lp_extern_decl_len
+    call    emit_str
+    mov     rax, [rbx + AST_A_OFF]   ; signature ptr
+    mov     rcx, [rax + AST_A_OFF]   ; name_offset
+    mov     rdx, [rax + AST_B_OFF]   ; name_len
+    mov     rsi, [parser_src_buf]
+    add     rsi, rcx
+    call    emit_str
+    mov     rsi, space
+    mov     rdx, 1
+    call    emit_str
+    mov     rsi, lp_params
+    mov     rdx, lp_params_len
+    call    emit_str
+    mov     rax, [rbx + AST_A_OFF]   ; signature ptr (re-derived)
+    mov     rdi, [rax + AST_C_OFF]   ; params ptr
+    mov     rsi, [rax + AST_D_OFF]   ; param_count
+    mov     rcx, dump_param
+    call    dump_node_list
+    mov     rsi, rparen
+    mov     rdx, 1
+    call    emit_str
+    mov     rsi, space
+    mov     rdx, 1
+    call    emit_str
+    mov     rdi, [rbx + AST_B_OFF]   ; return_type ptr, 0 = void
+    call    dump_return_type
+    mov     rsi, rparen
+    mov     rdx, 1
+    call    emit_str
+    pop     rbx
+    ret
+
+.struct_decl:
+    mov     rsi, lp_struct_decl
+    mov     rdx, lp_struct_decl_len
+    call    emit_str
+    mov     rax, [rbx + AST_A_OFF]   ; name_offset
+    mov     rsi, [parser_src_buf]
+    add     rsi, rax
+    mov     rdx, [rbx + AST_B_OFF]   ; name_len
+    call    emit_str
+    mov     rsi, space
+    mov     rdx, 1
+    call    emit_str
+    mov     rsi, lp_fields
+    mov     rdx, lp_fields_len
+    call    emit_str
+    mov     rdi, [rbx + AST_C_OFF]   ; fields ptr
+    mov     rsi, [rbx + AST_D_OFF]   ; field_count
+    mov     rcx, dump_field_decl
+    call    dump_node_list
+    mov     rsi, rparen
+    mov     rdx, 1
+    call    emit_str
+    mov     rsi, rparen
+    mov     rdx, 1
+    call    emit_str
+    pop     rbx
+    ret
+
+; ===========================================================================
+; dump_program: in rdi = AST_PROGRAM node ptr; appends "(program <decl0>
+; <decl1> ...)".
+; ===========================================================================
+dump_program:
+    push    rbx
+    mov     rbx, rdi
+    mov     rsi, lp_program
+    mov     rdx, lp_program_len
+    call    emit_str
+    mov     rdi, [rbx + AST_A_OFF]   ; decls ptr
+    mov     rsi, [rbx + AST_B_OFF]   ; decl_count
+    mov     rcx, dump_top_level_decl
+    call    dump_node_list
+    mov     rsi, rparen
+    mov     rdx, 1
+    call    emit_str
+    pop     rbx
+    ret
     ret

@@ -29,6 +29,14 @@ AST_STMT_EXPR     equ 29
 AST_BLOCK         equ 30
 AST_FUNC_BLOCK    equ 31
 
+AST_PARAM         equ 32
+AST_FIELD_DECL    equ 33
+AST_SIGNATURE     equ 34
+AST_STRUCT_DECL   equ 35
+AST_FUNCTION      equ 36
+AST_EXTERN_DECL   equ 37
+AST_PROGRAM       equ 38
+
 ; 4 generic qword fields (a/b/c/d) -- meaning depends on `kind`, see the
 ; parser spec's node-layout table. kind + 4 qwords = 40 bytes.
 AST_NODE_SIZE equ 40

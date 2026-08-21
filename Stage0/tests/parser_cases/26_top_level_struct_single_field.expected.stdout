@@ -1,0 +1,1 @@
+(struct_decl Node (fields (field_decl value (base int32))))

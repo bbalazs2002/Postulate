@@ -1,0 +1,2 @@
+TOP_LEVEL_DECL
+extern function sys_exit(code: int64) : void;

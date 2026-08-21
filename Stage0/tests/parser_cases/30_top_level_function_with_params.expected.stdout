@@ -1,0 +1,1 @@
+(function add (params (param a (base int32)) (param b (base int32))) (base int32) (func_block (decls) (stmts (return (binary + (ident a) (ident b))))))

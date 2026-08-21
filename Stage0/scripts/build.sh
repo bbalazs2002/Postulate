@@ -17,9 +17,10 @@ nasm -f elf64 -I src/ -o build/parser_tokens.o src/parser_tokens.asm
 nasm -f elf64 -I src/ -o build/type_parser.o src/type_parser.asm
 nasm -f elf64 -I src/ -o build/expr_parser.o src/expr_parser.asm
 nasm -f elf64 -I src/ -o build/stmt_parser.o src/stmt_parser.asm
+nasm -f elf64 -I src/ -o build/top_parser.o src/top_parser.asm
 nasm -f elf64 -I src/ -o build/ast_dump.o src/ast_dump.asm
 
 ld -static -no-pie -e _start -o build/parser \
     build/parser_main.o build/lexer.o build/runtime.o build/ast.o \
     build/parser_tokens.o build/type_parser.o build/expr_parser.o \
-    build/stmt_parser.o build/ast_dump.o
+    build/stmt_parser.o build/top_parser.o build/ast_dump.o

@@ -1,0 +1,1 @@
+parse error: struct declaration requires at least one field at line 3, col 1 (byte offset 30), found RBRACE

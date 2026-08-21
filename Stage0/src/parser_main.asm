@@ -17,11 +17,15 @@ extern parse_expr
 extern parse_stmt
 extern parse_decl
 extern parse_func_block
+extern parse_top_level_decl
+extern parse_program
 extern dump_type
 extern dump_expr
 extern dump_stmt
 extern dump_decl
 extern dump_func_block
+extern dump_top_level_decl
+extern dump_program
 
 global _start
 
@@ -36,6 +40,10 @@ str_DECL: db "DECL"
 str_DECL_len equ $ - str_DECL
 str_FUNC_BLOCK: db "FUNC_BLOCK"
 str_FUNC_BLOCK_len equ $ - str_FUNC_BLOCK
+str_TOP_LEVEL_DECL: db "TOP_LEVEL_DECL"
+str_TOP_LEVEL_DECL_len equ $ - str_TOP_LEVEL_DECL
+str_PROGRAM: db "PROGRAM"
+str_PROGRAM_len equ $ - str_PROGRAM
 msg_expected_eof:    db "expected end of input"
 msg_expected_eof_len equ $ - msg_expected_eof
 nl: db 10
@@ -106,6 +114,24 @@ _start:
     cmp     rax, 1
     je      .is_func_block
 .not_func_block:
+    cmp     rbx, str_TOP_LEVEL_DECL_len
+    jne     .not_top_level_decl
+    mov     rdi, src_buf
+    mov     rsi, str_TOP_LEVEL_DECL
+    mov     rdx, str_TOP_LEVEL_DECL_len
+    call    bytes_equal
+    cmp     rax, 1
+    je      .is_top_level_decl
+.not_top_level_decl:
+    cmp     rbx, str_PROGRAM_len
+    jne     .not_program
+    mov     rdi, src_buf
+    mov     rsi, str_PROGRAM
+    mov     rdx, str_PROGRAM_len
+    call    bytes_equal
+    cmp     rax, 1
+    je      .is_program
+.not_program:
 
 .bad_directive:
     ; malformed test-harness input (missing/unknown directive line) -- a
@@ -225,6 +251,54 @@ _start:
 
     mov     rdi, r13
     call    dump_func_block
+    mov     rsi, nl
+    mov     rdx, 1
+    call    emit_str
+    call    flush_out
+
+    mov     rax, 60
+    xor     rdi, rdi
+    syscall
+
+.is_top_level_decl:
+    lea     rsi, [rbx + 1]        ; parse starts right after the '\n'
+    mov     rdi, src_buf
+    mov     rdx, r12
+    call    parser_init
+    call    parse_top_level_decl
+    mov     r13, rax              ; AST root
+
+    mov     rdi, TOK_EOF
+    mov     rsi, msg_expected_eof
+    mov     rdx, msg_expected_eof_len
+    call    parser_expect
+
+    mov     rdi, r13
+    call    dump_top_level_decl
+    mov     rsi, nl
+    mov     rdx, 1
+    call    emit_str
+    call    flush_out
+
+    mov     rax, 60
+    xor     rdi, rdi
+    syscall
+
+.is_program:
+    lea     rsi, [rbx + 1]        ; parse starts right after the '\n'
+    mov     rdi, src_buf
+    mov     rdx, r12
+    call    parser_init
+    call    parse_program
+    mov     r13, rax              ; AST root
+
+    mov     rdi, TOK_EOF
+    mov     rsi, msg_expected_eof
+    mov     rdx, msg_expected_eof_len
+    call    parser_expect
+
+    mov     rdi, r13
+    call    dump_program
     mov     rsi, nl
     mov     rdx, 1
     call    emit_str
