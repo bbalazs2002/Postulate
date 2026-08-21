@@ -1,0 +1,1 @@
+(assign (pair (ident x) (int 5)))

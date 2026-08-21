@@ -1,0 +1,6 @@
+FUNC_BLOCK
+{
+  mut x : int32 := 1;
+  x := 2;
+  mut y : int32 := 3;
+}

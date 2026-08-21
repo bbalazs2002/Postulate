@@ -1,0 +1,1 @@
+(assign (pair (unary * (ident p)) (binary + (unary * (ident p)) (int 1))))

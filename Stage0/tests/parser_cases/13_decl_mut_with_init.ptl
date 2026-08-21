@@ -1,0 +1,2 @@
+DECL
+mut x : int32 := 5;

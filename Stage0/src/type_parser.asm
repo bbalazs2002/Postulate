@@ -53,8 +53,15 @@ token_starts_base_type:
 ; parse_base_type: consumes exactly one token (tok_cur must already satisfy
 ; token_starts_base_type -- callers check this before calling). out: rax =
 ; AST_TY_BASE node.
+; r12/r13/r14 are treated as callee-saved everywhere in this codebase --
+; pushed/popped here even though no *recursive* call happens inside this
+; routine, because a caller several frames up (e.g. a future top-level
+; parser) may hold live state in them across this call.
 ; ===========================================================================
 parse_base_type:
+    push    r12
+    push    r13
+    push    r14
     mov     r12, [tok_cur + TOK_KIND_OFF]
     mov     r13, [tok_cur + TOK_OFFSET_OFF]
     mov     r14, [tok_cur + TOK_LENGTH_OFF]
@@ -70,11 +77,19 @@ parse_base_type:
 .common:
     mov     [rax + AST_B_OFF], r13
     mov     [rax + AST_C_OFF], r14
+    pop     r14
+    pop     r13
+    pop     r12
     ret
 
 ; ===========================================================================
 ; parse_type: dispatches purely on tok_cur.kind, zero backtracking (spec
-; section 6). out: rax = node ptr.
+; section 6). out: rax = node ptr. Each branch below pushes r12 (and r13
+; where it uses it) before its first use and pops before every return --
+; not just where a nested call happens to appear within this file, but
+; because ANY caller up the chain may hold live state in these registers
+; across the whole call to parse_type (see expr_parser.asm's parse_primary
+; fix for the bug class this guards against).
 ; ===========================================================================
 parse_type:
     mov     rax, [tok_cur + TOK_KIND_OFF]
@@ -104,6 +119,8 @@ parse_type:
     cmp     rax, TOK_LBRACKET
     jne     .star_general
     ; default form
+    push    r12
+    push    r13
     call    parse_base_type
     mov     r12, rax
     mov     rdi, AST_TY_POINTER
@@ -131,18 +148,23 @@ parse_type:
     call    ast_alloc_node
     mov     [rax + AST_A_OFF], r12
     mov     [rax + AST_B_OFF], r13
+    pop     r13
+    pop     r12
     ret
 .star_general:
+    push    r12
     call    parse_type                      ; recursive: general "pointer to <type>"
     mov     r12, rax
     mov     rdi, AST_TY_POINTER
     call    ast_alloc_node
     mov     [rax + AST_A_OFF], r12
+    pop     r12
     ret
 
 ; --- "(" type ")"  -- transparent grouping, no wrapper node
 .paren:
     call    parser_advance                  ; consume '('
+    push    r12
     call    parse_type                      ; recursive
     mov     r12, rax
     mov     rdi, TOK_RPAREN
@@ -150,15 +172,18 @@ parse_type:
     mov     rdx, msg_expected_rparen_len
     call    parser_expect
     mov     rax, r12
+    pop     r12
     ret
 
 ; --- base_type "[" INT "]"  or  bare base_type
 .based:
+    push    r12
     call    parse_base_type
     mov     r12, rax
     mov     rax, [tok_cur + TOK_KIND_OFF]
     cmp     rax, TOK_LBRACKET
     jne     .based_done
+    push    r13
     call    parser_advance
     mov     rax, [tok_cur + TOK_KIND_OFF]
     cmp     rax, TOK_INT
@@ -177,7 +202,10 @@ parse_type:
     call    ast_alloc_node
     mov     [rax + AST_A_OFF], r12
     mov     [rax + AST_B_OFF], r13
+    pop     r13
+    pop     r12
     ret
 .based_done:
     mov     rax, r12
+    pop     r12
     ret

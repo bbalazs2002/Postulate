@@ -1,0 +1,6 @@
+FUNC_BLOCK
+{
+  mut remainder : int32;
+  remainder := n % 2;
+  return remainder == 0;
+}

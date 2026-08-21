@@ -1,0 +1,1 @@
+(decl_const total (base uint) (int 100))

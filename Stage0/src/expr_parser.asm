@@ -448,6 +448,13 @@ parse_primary:
     mov     rax, [rax + TOK_KIND_OFF]
     cmp     rax, TOK_LBRACE
     je      .struct_lit
+    ; r12/r13 are treated as callee-saved everywhere in this codebase -- push
+    ; them even though no *existing* call site happened to need them to
+    ; survive this particular leaf, since a caller further up the chain
+    ; (e.g. a variable-arity pair/list loop) may hold live state in them
+    ; across a nested call into parse_expr that bottoms out here.
+    push    r12
+    push    r13
     mov     r12, [tok_cur + TOK_OFFSET_OFF]
     mov     r13, [tok_cur + TOK_LENGTH_OFF]
     call    parser_advance
@@ -455,17 +462,21 @@ parse_primary:
     call    ast_alloc_node
     mov     [rax + AST_A_OFF], r12
     mov     [rax + AST_B_OFF], r13
+    pop     r13
+    pop     r12
     ret
 .struct_lit:
     jmp     parse_struct_literal     ; tail call -- consumes ident + '{'..'}' itself
 .array_lit:
     jmp     parse_array_literal      ; tail call -- consumes '{'..'}' itself
 .int:
+    push    r12
     mov     r12, [tok_cur + TOK_VALUE_OFF]
     call    parser_advance
     mov     rdi, AST_EX_INT
     call    ast_alloc_node
     mov     [rax + AST_A_OFF], r12
+    pop     r12
     ret
 .true:
     call    parser_advance

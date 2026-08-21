@@ -13,6 +13,9 @@ extern parser_src_buf
 
 global dump_type
 global dump_expr
+global dump_stmt
+global dump_decl
+global dump_func_block
 global emit_dec
 
 section .data
@@ -49,6 +52,31 @@ lp_struct: db "(struct "
 lp_struct_len equ $ - lp_struct
 lp_array_lit: db "(array_lit"
 lp_array_lit_len equ $ - lp_array_lit
+
+lp_assign:    db "(assign"
+lp_assign_len equ $ - lp_assign
+lp_expr_stmt: db "(expr_stmt "
+lp_expr_stmt_len equ $ - lp_expr_stmt
+lp_pair:      db "(pair "
+lp_pair_len equ $ - lp_pair
+lp_if:        db "(if "
+lp_if_len equ $ - lp_if
+lp_while:     db "(while "
+lp_while_len equ $ - lp_while
+lp_return:    db "(return"
+lp_return_len equ $ - lp_return
+lp_block:     db "(block"
+lp_block_len equ $ - lp_block
+lp_decl_mut:   db "(decl_mut "
+lp_decl_mut_len equ $ - lp_decl_mut
+lp_decl_const: db "(decl_const "
+lp_decl_const_len equ $ - lp_decl_const
+lp_func_block: db "(func_block "
+lp_func_block_len equ $ - lp_func_block
+lp_decls:      db "(decls"
+lp_decls_len equ $ - lp_decls
+lp_stmts:      db "(stmts"
+lp_stmts_len equ $ - lp_stmts
 
 ; operator symbol spellings, indexed by (kind - TOK_ASSIGN), matching
 ; TOK_ASSIGN..TOK_PIPE's contiguous order in tokens.inc (60-79)
@@ -462,6 +490,256 @@ emit_op_symbol:
     mov     rsi, [op_symbol_labels + rcx]
     mov     rdx, [op_symbol_labels + rcx + 8]
     jmp     emit_str
+
+; ===========================================================================
+; dump_stmt: in rdi = AST_STMT_* node ptr; appends its S-expression via
+; emit_str. callee-saved used: rbx. This is AST_BLOCK's per-element dump
+; routine (parallel to how dump_expr serves AST_EX_CALL/AST_EX_ARRAY_LIT).
+; ===========================================================================
+dump_stmt:
+    push    rbx
+    mov     rbx, rdi
+    mov     rax, [rbx + AST_KIND_OFF]
+
+    cmp     rax, AST_STMT_ASSIGN
+    je      .assign
+    cmp     rax, AST_STMT_EXPR
+    je      .expr_stmt
+    cmp     rax, AST_STMT_IF
+    je      .if_stmt
+    cmp     rax, AST_STMT_WHILE
+    je      .while_stmt
+    cmp     rax, AST_STMT_RETURN
+    je      .return_stmt
+    pop     rbx
+    ret                          ; unknown kind: defensive no-op
+
+.if_stmt:
+    mov     rsi, lp_if
+    mov     rdx, lp_if_len
+    call    emit_str
+    mov     rdi, [rbx + AST_A_OFF]   ; cond
+    call    dump_expr
+    mov     rsi, space
+    mov     rdx, 1
+    call    emit_str
+    mov     rdi, [rbx + AST_B_OFF]   ; then_block
+    call    dump_block
+    mov     rax, [rbx + AST_C_OFF]   ; else_block, 0 if absent
+    cmp     rax, 0
+    je      .if_no_else
+    mov     rsi, space
+    mov     rdx, 1
+    call    emit_str                 ; clobbers rax (caller-saved) -- re-read below
+    mov     rdi, [rbx + AST_C_OFF]
+    call    dump_block
+.if_no_else:
+    mov     rsi, rparen
+    mov     rdx, 1
+    call    emit_str
+    pop     rbx
+    ret
+
+.while_stmt:
+    mov     rsi, lp_while
+    mov     rdx, lp_while_len
+    call    emit_str
+    mov     rdi, [rbx + AST_A_OFF]   ; cond
+    call    dump_expr
+    mov     rsi, space
+    mov     rdx, 1
+    call    emit_str
+    mov     rdi, [rbx + AST_B_OFF]   ; body
+    call    dump_block
+    mov     rsi, rparen
+    mov     rdx, 1
+    call    emit_str
+    pop     rbx
+    ret
+
+.return_stmt:
+    mov     rsi, lp_return
+    mov     rdx, lp_return_len
+    call    emit_str
+    mov     rax, [rbx + AST_A_OFF]   ; expr, 0 if absent
+    cmp     rax, 0
+    je      .return_no_expr
+    mov     rsi, space
+    mov     rdx, 1
+    call    emit_str                 ; clobbers rax (caller-saved) -- re-read below
+    mov     rdi, [rbx + AST_A_OFF]
+    call    dump_expr
+.return_no_expr:
+    mov     rsi, rparen
+    mov     rdx, 1
+    call    emit_str
+    pop     rbx
+    ret
+
+.assign:
+    mov     rsi, lp_assign
+    mov     rdx, lp_assign_len
+    call    emit_str
+    mov     rdi, [rbx + AST_A_OFF]   ; pairs ptr
+    mov     rsi, [rbx + AST_B_OFF]   ; pair_count
+    mov     rcx, dump_assign_pair
+    call    dump_node_list
+    mov     rsi, rparen
+    mov     rdx, 1
+    call    emit_str
+    pop     rbx
+    ret
+
+.expr_stmt:
+    mov     rsi, lp_expr_stmt
+    mov     rdx, lp_expr_stmt_len
+    call    emit_str
+    mov     rdi, [rbx + AST_A_OFF]
+    call    dump_expr
+    mov     rsi, rparen
+    mov     rdx, 1
+    call    emit_str
+    pop     rbx
+    ret
+
+; ===========================================================================
+; dump_block: in rdi = AST_BLOCK node ptr; appends "(block <stmt0> ...)".
+; Internal helper (parallel to dump_field_init/dump_assign_pair), used by
+; dump_stmt's if/while cases.
+; ===========================================================================
+dump_block:
+    push    rbx
+    mov     rbx, rdi
+    mov     rsi, lp_block
+    mov     rdx, lp_block_len
+    call    emit_str
+    mov     rdi, [rbx + AST_A_OFF]   ; stmts ptr
+    mov     rsi, [rbx + AST_B_OFF]   ; stmt_count
+    mov     rcx, dump_stmt
+    call    dump_node_list
+    mov     rsi, rparen
+    mov     rdx, 1
+    call    emit_str
+    pop     rbx
+    ret
+
+; ===========================================================================
+; dump_decl: in rdi = AST_DECL_MUT/AST_DECL_CONST node ptr; appends
+; "(decl_mut <name> <type>)" or "(decl_const <name> <type>)", with a
+; trailing "<init>" only if present.
+; ===========================================================================
+dump_decl:
+    push    rbx
+    mov     rbx, rdi
+    mov     rax, [rbx + AST_KIND_OFF]
+    cmp     rax, AST_DECL_MUT
+    je      .mut
+    cmp     rax, AST_DECL_CONST
+    je      .const
+    pop     rbx
+    ret                          ; unknown kind: defensive no-op
+.mut:
+    mov     rsi, lp_decl_mut
+    mov     rdx, lp_decl_mut_len
+    call    emit_str
+    jmp     .common
+.const:
+    mov     rsi, lp_decl_const
+    mov     rdx, lp_decl_const_len
+    call    emit_str
+.common:
+    mov     rax, [rbx + AST_A_OFF]   ; name_offset
+    mov     rsi, [parser_src_buf]
+    add     rsi, rax
+    mov     rdx, [rbx + AST_B_OFF]   ; name_len
+    call    emit_str
+    mov     rsi, space
+    mov     rdx, 1
+    call    emit_str
+    mov     rdi, [rbx + AST_C_OFF]   ; type ptr
+    call    dump_type
+    mov     rax, [rbx + AST_D_OFF]   ; init, 0 if absent
+    cmp     rax, 0
+    je      .no_init
+    mov     rsi, space
+    mov     rdx, 1
+    call    emit_str                 ; clobbers rax -- re-read below
+    mov     rdi, [rbx + AST_D_OFF]
+    call    dump_expr
+.no_init:
+    mov     rsi, rparen
+    mov     rdx, 1
+    call    emit_str
+    pop     rbx
+    ret
+
+; ===========================================================================
+; dump_func_block: in rdi = AST_FUNC_BLOCK node ptr; appends "(func_block
+; (decls <decl0> ...) (stmts <stmt0> ...))" -- its own two-list dump,
+; calling dump_node_list twice (once with dump_decl, once with dump_stmt).
+; ===========================================================================
+dump_func_block:
+    push    rbx
+    mov     rbx, rdi
+    mov     rsi, lp_func_block
+    mov     rdx, lp_func_block_len
+    call    emit_str
+
+    mov     rsi, lp_decls
+    mov     rdx, lp_decls_len
+    call    emit_str
+    mov     rdi, [rbx + AST_A_OFF]   ; decls ptr
+    mov     rsi, [rbx + AST_B_OFF]   ; decl_count
+    mov     rcx, dump_decl
+    call    dump_node_list
+    mov     rsi, rparen
+    mov     rdx, 1
+    call    emit_str
+
+    mov     rsi, space
+    mov     rdx, 1
+    call    emit_str
+
+    mov     rsi, lp_stmts
+    mov     rdx, lp_stmts_len
+    call    emit_str
+    mov     rdi, [rbx + AST_C_OFF]   ; stmts ptr
+    mov     rsi, [rbx + AST_D_OFF]   ; stmt_count
+    mov     rcx, dump_stmt
+    call    dump_node_list
+    mov     rsi, rparen
+    mov     rdx, 1
+    call    emit_str
+
+    mov     rsi, rparen
+    mov     rdx, 1
+    call    emit_str
+    pop     rbx
+    ret
+
+; ===========================================================================
+; dump_assign_pair: in rdi = AST_ASSIGN_PAIR node ptr; appends "(pair
+; <lvalue> <rhs>)". Only ever reached via dump_node_list, parallel to
+; dump_field_init.
+; ===========================================================================
+dump_assign_pair:
+    push    rbx
+    mov     rbx, rdi
+    mov     rsi, lp_pair
+    mov     rdx, lp_pair_len
+    call    emit_str
+    mov     rdi, [rbx + AST_A_OFF]
+    call    dump_expr
+    mov     rsi, space
+    mov     rdx, 1
+    call    emit_str
+    mov     rdi, [rbx + AST_B_OFF]
+    call    dump_expr
+    mov     rsi, rparen
+    mov     rdx, 1
+    call    emit_str
+    pop     rbx
+    ret
 
 ; ===========================================================================
 ; emit_dec: in rax = unsigned value; appends decimal ASCII via emit_str.
