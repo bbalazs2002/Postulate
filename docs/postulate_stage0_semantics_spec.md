@@ -1,8 +1,13 @@
-# Postulate Stage 0 — Szemantikai elemző technikai specifikáció (1. fázis)
+# Postulate Stage 0 — Szemantikai elemző technikai specifikáció
 
 > Ez a dokumentum a Stage 0 bootstrap fordító **szemantikai elemzőjének**
-> technikai specifikációja — az első fázis: **névfeloldás + alap
-> típusellenőrzés**. Előfeltétele a
+> technikai specifikációja — két menetben: **1. fázis** (névfeloldás +
+> alap típusellenőrzés) és **2. fázis** (tömb-/struct-literál teljesség,
+> based-form számjegy-tartomány, "minden végrehajtási út return-nel
+> zárul" vezérlésfolyam-elemzés). A 2. fázissal a fő spec teljes
+> szemantikai szabálylistája lefedésre kerül, a benne magában is
+> kifejezetten Stage 0-n túlinak jelölt két tétel kivételével (ld. 10.
+> fejezet). Előfeltétele a
 > [postulate_stage0_spec.md](postulate_stage0_spec.md) (nyelvtan,
 > szemantikai megkötések 4. fejezete) és a
 > [postulate_stage0_parser_spec.md](postulate_stage0_parser_spec.md) (a
@@ -19,12 +24,10 @@
 
 A fő spec 4. fejezetének "Szemantikai megkötések" táblázata 16+ szabályt
 sorol fel, amiket a parser tudatosan nem ellenőriz (`"parser megenged,
-szemantika utasít el"` elv). Ez a fázis **nem** próbálja mindet egy menetben
-megvalósítani — a parser saját, fokozatos fejlesztési fegyelmét folytatva,
-csak az **alapot**: névfeloldás + szimbólumtáblák + alap típusellenőrzés,
-ami minden további szabály előfeltétele.
+szemantika utasít el"` elv). A parser saját, fokozatos fejlesztési
+fegyelmét folytatva, ez két menetben valósult meg.
 
-**Ebben a fázisban megvalósítva:**
+**1. fázisban megvalósítva** (az alap, amire minden további szabály épül):
 - Felső szintű névregisztráció (struct/function/extern), duplikált név tiltása.
 - Extern-fehérlista validáció (név + pontos aláírás-egyezés).
 - Függvényenkénti lapos helyi szimbólumtábla (param + decl), duplikátum tiltás.
@@ -38,13 +41,19 @@ ami minden további szabály előfeltétele.
 - `const` újraírásának tiltása (pointeren keresztüli írás kivételével).
 - Szimultán értékadás cél-egyediség (szintaktikai azonosság szerint).
 - `if`/`while` feltétel `bool` volta.
-- Tömb-/struct-literál **elemenkénti** típuspropagáció (a teljesség —
-  pontos elemszám, minden mező pontosan egyszer — **elhalasztva**, ld. 8.
-  fejezet).
+- Tömb-/struct-literál **elemenkénti** típuspropagáció (a teljesség
+  ekkor még elhalasztva).
 
-**Tudatosan elhalasztva egy jövőbeli fázisra** (ld. 8. fejezet a teljes
-listáért): tömb-/struct-literál teljesség, based-form számjegy-tartomány,
-"minden végrehajtási út return-nel zárul" vezérlésfolyam-elemzés,
+**2. fázisban megvalósítva** (ld. 7.4/7.5/8.1 fejezet a részletekért):
+- Tömb-literál elemszáma pontosan a deklarált tömbmérettel egyezik.
+- Struct-literál minden mezője pontosan egyszer szerepel (duplikátum és
+  hiányzó mező egyaránt hiba).
+- Based-form számjegy-tartomány: a bázis `{2, 8, 10, 16}` egyike, minden
+  számjegy `< bázis`.
+- "Minden végrehajtási út return-nel zárul" nem-`void` függvényekben.
+
+**Tudatosan Stage 0-n túlra hagyva** (a fő spec is így jelöli, nem
+elhalasztott, hanem kizárt tétel ebből a fordítóból, ld. 10. fejezet):
 "figyelmen kívül hagyott visszatérési érték" figyelmeztetés, előre
 deklarált (test nélküli) függvények.
 
@@ -236,8 +245,82 @@ a másodikat) — ld. 2.1. fejezet. `CALL`: a hívott kizárólag csupasz
 0-ban nincs függvénymutató/first-class function); argumentum-szám és
 -típus egyezés a szignatúra param-jaival. `FIELD`/`INDEX`: alap típusa
 struct/tömb kell legyen, a mező/index érvényessége ellenőrzött.
-`STRUCT_LIT`/`ARRAY_LIT`: elemenkénti típuspropagáció (a teljesség
-elhalasztva).
+`STRUCT_LIT`/`ARRAY_LIT`: elemenkénti típuspropagáció, kiegészítve a 2.
+fázisban a teljesség-ellenőrzéssel (ld. 7.4/7.5).
+
+### 7.1 Tömb-literál elemszám (2. fázis)
+
+`.array_lit`-ben, amikor `expected_type` egy valódi `AST_TY_ARRAY` (a
+gyakorlati eset — minden tömb-típusú pozíció, decl init vagy struct-mező
+init, mindig explicit méretet deklarál): az elemtípus megállapítása után
+azonnal összeveti a literál tényleges elemszámát (`AST_EX_ARRAY_LIT`
+saját `b` mezője) az elvárt típus deklarált méretével (`AST_TY_ARRAY` `b`
+mezője, még mindig `r12`-ben az ág elejétől). A kontextus nélküli eset
+(`.array_lit_no_context`) nem kap ellenőrzést — ritka, defenzív ág, a
+gyakorlatban sosem így ellenőrződik egy valódi program tömb-literálja.
+
+### 7.2 Struct-literál teljesség (2. fázis)
+
+Mezőnkénti "látott" jelző szükséges, hogy mind a **duplikált** (már
+látott mező újra megadva), mind a **hiányzó** (sosem látott mező) esetet
+elkapja. Nem kell új regiszter: a meglévő scratch-terület
+(`.struct_lit_found`-ban `sub rsp, 32`, a stabil `r14` bázison keresztül
+címezve) egyszerűen `MAX_LIST_ARITY` bájttal nő (`sub rsp, 32 +
+MAX_LIST_ARITY`) — egy bájt minden lehetséges mező-indexre, közvetlenül a
+4 meglévő quad-slot után, `[r14 + 32 + mező_index]`-en címezve. Nullázva
+`[0, field_count)`-ra, amint `r13` (a struct decl) ismert — verem-memória,
+nem `.bss`, tehát (a kódbázis eddigi ÖSSZES többi scratch-területétől
+eltérően, amik mind `.bss`-alapúak, tehát eleve nullázottak) explicit
+nullázás kell.
+
+`.struct_field_scan` hurkának saját indexe (`r15`) pontosan a talált mező
+saját indexe a struct mezőlistájában, amikor `.struct_field_found`-ba
+érünk — közvetlenül újrahasznosítva a "látott" tömb indexeként, nincs
+külön könyvelés. Ott: `[r14+32+r15]` ellenőrzése minden más előtt — ha már
+`1`, `"duplicate field initializer 'X'"` a field_init saját pozícióján
+(`find_offset`, ami az 1. fázis óta kezeli az `AST_FIELD_INIT`-et);
+egyébként `1`-re állítva folytatódik, változatlanul.
+
+A `.struct_lit_loop` végén (`.struct_lit_done`, a visszatérési típus
+szintézise előtt) végigscanneli `[r14+32, r14+32+field_count)`-ot bármely
+még-`0` bejegyzésért — `"missing field initializer 'X'"` az adott index
+saját `AST_FIELD_DECL`-jével (a struct mezőlistájából) névre/pozícióra.
+
+### 7.3 Based-form számjegy-tartomány (`validate_int_literal`, 2. fázis)
+
+Önálló, `check_expr`'s `.int` ágából hívott rutin (a kontextustól
+függetlenül, a típus eldöntése előtt fut). Visszaszeleteli a literál nyers
+szövegét `[parser_src_buf + name_offset, name_len)`-ből (`AST_EX_INT`-en
+csak az 1. fázis óta elérhető) és `'n'`-t keres:
+
+- Nincs `'n'` → `decimal_form`, nincs mit ellenőrizni.
+- Van `'n'` → a `'n'` előtti számjegyek (a lexer által már garantáltan
+  decimálisak) adják a bázist — pontosan `2`, `8`, `10` vagy `16` kell
+  legyen (négy `cmp`, nincs szükség táblázatra ennyi értékhez), egyébként
+  `"based-form literal base must be 2, 8, 10, or 16, found N"`. A `'n'`
+  utáni minden számjegy dekódolva (ugyanaz a `0-9`/`a-f`/`A-F` foldolás,
+  amit a `lexer.asm` `lex_handle_number`-je is használ az érték
+  kiszámításához) és `< bázis` ellenőrizve — az első sértés
+  `"based-form literal has a digit that is not valid in base N"`. Mindkét
+  hibaág a literál saját pozícióján jelent (`name_offset` közvetlenül
+  elérhető, nincs szükség `find_offset`-re).
+
+### 7.5 Egy második, talált és javított hiba (szintén a struct-literál útján)
+
+A fenti 7.2 fejezet fixture-jeinek megírása közben (két azonos hosszúságú
+mezőnév, `struct Point { x; y; }`) egy **másik**, korábban rejtve maradt,
+1. fázisból örökölt hiba is előkerült: `.struct_field_scan` a struct
+mezőlistáját és mezőszámát `rcx`/`rdx`-ben tartotta a scan-hurok egésze
+alatt, majd egy beágyazott `call bytes_equal`-t hívott — ami **saját maga
+is `rcx`-et használ belső scratch-ként**, és `rdx`-et is felülírja (a
+hívás 3. argumentuma). Az első olyan összehasonlításnál, ahol a névhossz
+egyezik, de a tényleges bájtok nem (pontosan ez történik "y"-t keresve,
+ha az első jelölt "x" — mindkettő 1 hosszú), a hurok saját felső korlátja
+korrupálódott, és a keresés idő előtt "nincs ilyen mező"-t jelentett —
+annak ellenére, hogy a mező valójában létezett, csak még nem került sorra.
+**Javítás:** a struct mezőlistáját és mezőszámát minden hurok-iterációban
+frissen, `r13`-ból (a struct decl, végig védett) olvassuk vissza, sosem
+`rcx`/`rdx`-ben gyorsítótárazva a hívás felett.
 
 `find_offset(node) -> offset`: mivel a legtöbb összetett csomópont-fajta
 (`BINARY`, `UNARY`, `INDEX`, `CALL`, ...) nem hordoz saját pozíciót, ez a
@@ -246,8 +329,9 @@ csomópontot, ami tényleg hordoz span-t (`IDENT`/`INT`/`BOOL`/`NULL`/
 `FIELD`/`FIELD_INIT`, és a `STMT_RETURN` a saját `return`-kulcsszó
 pozíciójára esik vissza, ha nincs kifejezése).
 
-**Talált és javított hiba (a nagyméretű fekete-doboz programon
-bukott el):** `.struct_field_found` ág — a talált `AST_FIELD_DECL`
+### 7.4 Egy talált és javított hiba (1. fázis, a nagyméretű fekete-doboz programon bukott el)
+
+`.struct_field_found` ág — a talált `AST_FIELD_DECL`
 pointert `rcx`-ben tartotta, majd egy beágyazott `check_expr` hívás
 **után** újra beolvasta `[rcx + ...]`-t a típus lekéréséhez. Az `rcx`
 hívó által mentendő regiszter, a `check_expr` belseje felülírja — ugyanaz
@@ -280,25 +364,65 @@ hívás **előtt**.
   (2. menet). A struct-deklarációknak nincs további teendőjük — az 1b
   menet már ellenőrizte a mezőik típusait.
 
+### 8.1 "Minden végrehajtási út return-nel zárul" (2. fázis)
+
+Az egyetlen tétel ebben a fázisban, ami nem "bővíts egy meglévő ágat" —
+strukturális indukció utasítás-*listákon*, nem egyetlen csomópont saját
+alakjának ellenőrzése.
+
+- **`stmts_always_return(stmts_ptr, count) -> 1/0`** — igaz, ha a
+  listában **bármelyik** utasítás mindig visszatér (nem csak az utolsó:
+  ha egy korábbi utasítás mindig visszatér, minden utána lévő elérhetetlen
+  a saját alakjától függetlenül — ez a fázis nem vezet be külön "elérhetetlen
+  kód" figyelmeztetést, csak nem hagyja, hogy a holt kód alakja
+  befolyásolja a döntést). Szó szerint megosztva `AST_BLOCK` (`a`=stmts,
+  `b`=count) és `AST_FUNC_BLOCK` (`c`=stmts, `d`=stmt_count) között — azonos
+  csomópont-pointer-tömb alak, csak más mező-offszet a két hívási helyen.
+- **`stmt_always_returns(stmt) -> 1/0`** — kind szerint diszpatcher:
+  - `AST_STMT_RETURN` → mindig `1`.
+  - `AST_STMT_IF` → csak akkor `1`, ha **van** `else`-ága **és** mindkét ág
+    (`stmts_always_return` rájuk) mindig visszatér. `else` nélkül mindig
+    `0` (az `else` nélküli út definíció szerint átesik).
+  - `AST_STMT_WHILE` → általában `0` (Stage 0-ban nincs `break`, de egy
+    hurok törzse nulla alkalommal is lefuthat, hacsak a feltétel nem
+    feltétlenül igaz — ez az elemzés nem következtet tetszőleges
+    kifejezésekre). **Egy megalapozott speciális eset**: ha a feltétel
+    szó szerint az `AST_EX_BOOL` `true` literál, a hurok csakis
+    `return`-nel léphet ki (vagy örökké fut — mindkettő elfogadható módja
+    annak, hogy "sosem esik át ezen a ponton", ugyanúgy, mint pl. a Rust
+    `loop {}`-ja) — ez az eset `1`, a törzstől függetlenül.
+  - `AST_STMT_ASSIGN` / `AST_STMT_EXPR` → mindig `0`.
+- **Bekötés**: `check_function_body`-ban, a `check_func_block` sikeres
+  lefutása után, ha a függvény deklarált visszatérési típusa nem `void`,
+  `stmts_always_return` a func_block saját utasítás-listáján; ha `0`,
+  `"function 'X' may not return a value on every execution path"` a
+  függvény saját nevének span-ján (a szignatúrájából — ez az egyetlen
+  diagnosztika ebben az egész fázisban, ami egy felső szintű deklarációra
+  horgonyoz, nem kifejezésre/utasításra, tehát nincs szüksége
+  `find_offset`-re, egyenesen `err_append_span` a szignatúra nevén).
+
 ---
 
 ## 9. Tesztkészlet
 
 Három, egymást kiegészítő verifikáció:
 
-1. **`tests/checker_cases/`** + `scripts/run_checker_tests.sh` — 24
-   helyes/hibás pár (48 fixture), egy-egy a fent felsorolt szabályokhoz,
+1. **`tests/checker_cases/`** + `scripts/run_checker_tests.sh` — 31
+   helyes/hibás pár (62 fixture: 24 pár/48 fixture az 1. fázisból, 7
+   pár/14 fixture a 2.-ból), egy-egy a fent felsorolt szabályokhoz,
    mindegyik hiba **pontosan egy** eltérést tartalmaz a helyes párjához
    képest. Nincs irányjelző-sor (a `build/checker` mindig a teljes fájlt
    egy `program`-ként dolgozza fel).
 2. A **12 helyes fekete doboz program** (`tests/blackbox_cases/*_valid.ptl`,
    a parser fázisból) újrafuttatva `build/checker`-en keresztül — valós,
    nem minimalizált kód a tervezés igazolására, nem csak célzott
-   mini-fixture-ökön. Ez fedte fel a fenti `rcx` hibát, és egy valódi
-   hibát is a saját teszt-programban: `sys_exit(common)` `common: int32`
-   argumentummal `int64` paraméter ellen — mivel a nyelvnek nincs explicit
-   típuskonverziós szintaxisa, ez tényleg érvénytelen volt, a fixture lett
-   javítva (`sys_exit(0)`), nem a checker.
+   mini-fixture-ökön. Az 1. fázisban ez fedte fel a 7.4. fejezet `rcx`
+   hibáját és egy valódi hibát a saját teszt-programban
+   (`sys_exit(common)` `common: int32` argumentummal `int64` paraméter
+   ellen — mivel a nyelvnek nincs explicit típuskonverziós szintaxisa, ez
+   tényleg érvénytelen volt, a fixture lett javítva, nem a checker). A 2.
+   fázisban mind a 12 program változatlanul, hiba nélkül ment át az új
+   teljesség-/vezérlésfolyam-szabályokon is.
 3. A teljes `docker build` — mind a négy csomag (lexer, fehér doboz
    parser, fekete doboz parser, checker) egyetlen kapun át.
 
@@ -307,20 +431,16 @@ kimenetéből — sosem kézzel kitalálva.
 
 ---
 
-## 10. Elhalasztott szabályok (jövőbeli fázisok)
+## 10. Stage 0-n kívül eső tételek
 
-- `array_literal`/`struct_literal` **teljesség** (pontos elemszám, minden
-  mező pontosan egyszer) — jelenleg csak elemenkénti típuspropagáció fut.
-- Based-form számjegy-tartomány (`{2,8,10,16}` bázis, számjegy < bázis) —
-  megköveteli, hogy `AST_EX_INT` a nyers span-t is megőrizze (ami most már
-  megvan, ld. 4. fejezet), de a bázis/számjegyek tényleges validálása még
-  nincs implementálva.
-- "Minden végrehajtási út return-nel zárul" — vezérlésfolyam-elemzés,
-  algoritmikusan különálló, saját fázist érdemel.
+Ez a két tétel a fő spec szerint is **nem** Stage 0 követelmény (nem
+"elhalasztott", hanem kifejezetten kizárt ebből a fordítóból):
+
 - "Figyelmen kívül hagyott visszatérési érték" figyelmeztetés — a fő
-  spec is csak egy jövőbeli/végleges fordítói funkcióként jegyzi, nem
-  Stage 0 követelmény.
+  spec is csak egy jövőbeli/végleges fordítói funkcióként jegyzi.
 - Előre deklarált (test nélküli) függvények — külön, még meg sem írt
-  nyelvtani bővítés.
-- Kódgenerálás (LLVM IR vagy natív kód) — ez a szemantikai elemzőn túli,
-  saját fázis.
+  nyelvtani bővítés (nem azonos az `extern function`-nel).
+
+Ezeken túl a szemantikai elemzőn kívüli, saját fázist igénylő munka:
+**kódgenerálás** (LLVM IR vagy natív kód) — ez a következő, érdemben más
+jellegű lépés a bootstrap-láncban.

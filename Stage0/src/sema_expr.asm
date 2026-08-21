@@ -79,8 +79,18 @@ msg_unknown_type:                                                  db "unknown t
 msg_unknown_type_len                                               equ $ - msg_unknown_type
 msg_field_type_mismatch:                                              db "field initializer type mismatch"
 msg_field_type_mismatch_len                                          equ $ - msg_field_type_mismatch
+msg_duplicate_field_init:                                                db "duplicate field initializer '"
+msg_duplicate_field_init_len                                             equ $ - msg_duplicate_field_init
+msg_missing_field_init:                                                     db "missing field initializer '"
+msg_missing_field_init_len                                                  equ $ - msg_missing_field_init
 msg_array_elem_type_mismatch:                                            db "array element type mismatch"
 msg_array_elem_type_mismatch_len                                         equ $ - msg_array_elem_type_mismatch
+msg_array_count_mismatch:                                                   db "array literal element count does not match the declared array size"
+msg_array_count_mismatch_len                                                equ $ - msg_array_count_mismatch
+msg_bad_based_form_base:                                                       db "based-form literal base must be 2, 8, 10, or 16, found "
+msg_bad_based_form_base_len                                                    equ $ - msg_bad_based_form_base
+msg_bad_based_form_digit:                                                         db "based-form literal has a digit that is not valid in base "
+msg_bad_based_form_digit_len                                                      equ $ - msg_bad_based_form_digit
 
 section .text
 
@@ -216,6 +226,108 @@ is_valid_lvalue:
     ret
 
 ; ===========================================================================
+; validate_int_literal: in rdi = AST_EX_INT node ptr. Reports a semantic
+; error and never returns if this is a based-form literal (contains 'n')
+; whose base isn't exactly 2, 8, 10, or 16, or whose value digits aren't
+; all < base; returns normally otherwise, including for plain
+; decimal_form literals (nothing to validate there at all). Re-slices the
+; literal's own raw text via its b/c fields (name_offset/name_len) --
+; only available on AST_EX_INT since phase 1's offset/length addition;
+; the lexer already guarantees the shape (digits, 'n', value-digits) is
+; well-formed, this only re-checks the *range*, deliberately deferred
+; from the lexer/parser per the main spec's "more permissive grammar than
+; semantics" precedent for this exact rule.
+; ===========================================================================
+validate_int_literal:
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    mov     rbx, rdi
+    mov     r12, [rbx + AST_B_OFF]      ; name_offset
+    mov     r13, [rbx + AST_C_OFF]      ; name_len
+    mov     r14, [parser_src_buf]
+    add     r14, r12                    ; r14 = ptr to the literal's raw text
+
+    ; find 'n' within [0, r13) -- absent means decimal_form, nothing to do
+    xor     rcx, rcx
+.find_n:
+    cmp     rcx, r13
+    jae     .done
+    cmp     byte [r14 + rcx], 'n'
+    je      .found_n
+    inc     rcx
+    jmp     .find_n
+.found_n:
+    ; rcx = index of 'n'. Decode the base from [0, rcx) -- decimal
+    ; digits, already lexer-guaranteed.
+    xor     rax, rax
+    xor     rdx, rdx
+.base_loop:
+    cmp     rdx, rcx
+    jae     .base_done
+    movzx   r8, byte [r14 + rdx]
+    imul    rax, rax, 10
+    sub     r8, '0'
+    add     rax, r8
+    inc     rdx
+    jmp     .base_loop
+.base_done:
+    cmp     rax, 2
+    je      .base_ok
+    cmp     rax, 8
+    je      .base_ok
+    cmp     rax, 10
+    je      .base_ok
+    cmp     rax, 16
+    je      .base_ok
+    mov     r9, rax
+    call    sema_report_begin
+    mov     rsi, msg_bad_based_form_base
+    mov     rdx, msg_bad_based_form_base_len
+    call    err_append_str
+    mov     rax, r9
+    call    err_append_dec
+    mov     rdi, r12
+    jmp     sema_report_finish
+.base_ok:
+    mov     r9, rax                     ; validated base
+    lea     rdx, [rcx + 1]              ; index into the value-digit run
+.digit_loop:
+    cmp     rdx, r13
+    jae     .done
+    movzx   r8, byte [r14 + rdx]
+    cmp     r8b, '9'
+    jg      .digit_alpha
+    sub     r8, '0'
+    jmp     .digit_have_value
+.digit_alpha:
+    or      r8b, 0x20                   ; fold to lowercase, mirrors
+                                         ; lexer.asm's own folding
+    sub     r8, 'a'
+    add     r8, 10
+.digit_have_value:
+    cmp     r8, r9
+    jl      .digit_ok
+    call    sema_report_begin
+    mov     rsi, msg_bad_based_form_digit
+    mov     rdx, msg_bad_based_form_digit_len
+    call    err_append_str
+    mov     rax, r9
+    call    err_append_dec
+    mov     rdi, r12
+    jmp     sema_report_finish
+.digit_ok:
+    inc     rdx
+    jmp     .digit_loop
+.done:
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+; ===========================================================================
 ; check_expr: in rdi = AST_EX_* node ptr, rsi = expected type ptr (0 =
 ; none). out: rax = resolved type ptr. Reports a semantic error and never
 ; returns on any violation found along the way.
@@ -284,6 +396,8 @@ check_expr:
 ; init, assignment, return, argument, ...) reports the mismatch with
 ; better context than a literal-specific message could.
 .int:
+    mov     rdi, rbx
+    call    validate_int_literal
     cmp     r12, 0
     je      .int_default
     mov     rdi, r12
@@ -741,8 +855,11 @@ check_expr:
 
 ; --- STRUCT_LIT: name must resolve to a known struct; each field_init's
 ; value checked against that field's declared type; unknown field names
-; rejected. (Completeness -- every field present exactly once -- is
-; deferred, ld. plan/spec scope.)
+; rejected. Completeness (every field present exactly once) is enforced
+; via a "seen" flag per struct field, packed into the same scratch
+; allocation as the 4 existing quad-slots (one extra byte per possible
+; field index, right after them) -- no extra register needed, since it's
+; addressed off the same stable r14 base the quad-slots already use.
 .struct_lit:
     mov     rdi, [rbx + AST_A_OFF]
     mov     rsi, [rbx + AST_B_OFF]
@@ -763,16 +880,31 @@ check_expr:
     jmp     sema_report_finish
 .struct_lit_found:
     mov     r13, [rax + STE_DECL_PTR]   ; AST_STRUCT_DECL
-    sub     rsp, 32                     ; stable scratch region -- addressed
+    sub     rsp, 32 + MAX_LIST_ARITY    ; stable scratch region -- addressed
                                          ; only via r14 below, never via
                                          ; raw rsp, so it survives any
-                                         ; number of nested calls unharmed
+                                         ; number of nested calls unharmed.
+                                         ; Bytes [32, 32+MAX_LIST_ARITY) are
+                                         ; the per-field "seen" flags, one
+                                         ; byte per possible field index.
     mov     r14, rsp
     mov     rax, [rbx + AST_C_OFF]
     mov     [r14 + 0], rax              ; field_inits ptr
     mov     rax, [rbx + AST_D_OFF]
     mov     [r14 + 8], rax              ; count
     mov     qword [r14 + 16], 0         ; index
+
+    ; zero the seen-flags for this struct's actual field_count -- unlike
+    ; every other scratch region in this codebase (all .bss-backed, so
+    ; pre-zeroed), this is stack memory and needs an explicit clear.
+    mov     rcx, [r13 + AST_D_OFF]      ; struct's field_count
+    xor     rax, rax
+.struct_lit_zero_seen:
+    cmp     rax, rcx
+    jae     .struct_lit_loop
+    mov     byte [r14 + 32 + rax], 0
+    inc     rax
+    jmp     .struct_lit_zero_seen
 .struct_lit_loop:
     mov     rax, [r14 + 16]
     cmp     rax, [r14 + 8]
@@ -780,13 +912,23 @@ check_expr:
     mov     rcx, [r14 + 0]
     mov     rax, [rcx + rax*8]          ; AST_FIELD_INIT ptr
     mov     [r14 + 24], rax             ; current field_init ptr
-    mov     rcx, [r13 + AST_C_OFF]      ; struct's fields ptr
-    mov     rdx, [r13 + AST_D_OFF]      ; struct's field_count
     xor     r15, r15
 .struct_field_scan:
-    cmp     r15, rdx
+    ; struct's fields ptr / field_count are re-derived fresh from r13
+    ; every iteration, never cached in rcx/rdx across the loop -- the
+    ; nested `call bytes_equal` below clobbers both (bytes_equal uses rcx
+    ; as its own scratch internally, and rdx is the 3rd argument register
+    ; besides), so caching them here silently corrupted the scan's own
+    ; bound the moment two same-length field names were compared and
+    ; didn't match (e.g. scanning for "y" in `struct Point { x; y; }` --
+    ; both names length 1 -- would wrongly report "y" as unknown). A
+    ; pre-existing phase-1 bug, exposed by this phase's completeness
+    ; fixtures, not introduced by them.
+    mov     rax, [r13 + AST_D_OFF]      ; struct's field_count
+    cmp     r15, rax
     jae     .struct_field_not_found
-    mov     rax, [rcx + r15*8]          ; AST_FIELD_DECL ptr
+    mov     rax, [r13 + AST_C_OFF]      ; struct's fields ptr
+    mov     rax, [rax + r15*8]          ; AST_FIELD_DECL ptr
     mov     r8, [r14 + 24]
     mov     r9, [rax + AST_B_OFF]       ; field_decl name_len
     cmp     r9, [r8 + AST_B_OFF]        ; field_init name_len
@@ -806,6 +948,26 @@ check_expr:
     inc     r15
     jmp     .struct_field_scan
 .struct_field_found:
+    ; r15 is the matched field's own index in the struct's field list --
+    ; exactly the seen-flags index too, no extra bookkeeping needed.
+    cmp     byte [r14 + 32 + r15], 0
+    je      .struct_field_not_seen_yet
+    call    sema_report_begin
+    mov     rsi, msg_duplicate_field_init
+    mov     rdx, msg_duplicate_field_init_len
+    call    err_append_str
+    mov     rax, [r14 + 24]
+    mov     rdi, [rax + AST_A_OFF]
+    mov     rsi, [rax + AST_B_OFF]
+    call    err_append_span
+    mov     rsi, quote_char
+    mov     rdx, 1
+    call    err_append_str
+    mov     rax, [r14 + 24]
+    mov     rdi, [rax + AST_A_OFF]
+    jmp     sema_report_finish
+.struct_field_not_seen_yet:
+    mov     byte [r14 + 32 + r15], 1
     ; rcx (the matched field_decl ptr) is caller-saved -- save the type
     ; we need from it into r12 (unused anywhere else in this branch)
     ; BEFORE the nested check_expr call, which clobbers rcx along with
@@ -852,7 +1014,38 @@ check_expr:
     mov     rdi, [rax + AST_A_OFF]
     jmp     sema_report_finish
 .struct_lit_done:
-    add     rsp, 32
+    ; completeness: every struct field must have been seen exactly once --
+    ; duplicates were already caught above, so a leftover 0 here means a
+    ; field was never initialized at all.
+    mov     rcx, [r13 + AST_D_OFF]      ; struct's field_count
+    xor     rax, rax
+.struct_lit_completeness_scan:
+    cmp     rax, rcx
+    jae     .struct_lit_complete
+    cmp     byte [r14 + 32 + rax], 0
+    jne     .struct_lit_completeness_next
+    mov     r12, [r13 + AST_C_OFF]      ; struct's fields ptr
+    mov     r12, [r12 + rax*8]          ; the missing AST_FIELD_DECL
+    call    sema_report_begin
+    mov     rsi, msg_missing_field_init
+    mov     rdx, msg_missing_field_init_len
+    call    err_append_str
+    mov     rdi, [r12 + AST_A_OFF]
+    mov     rsi, [r12 + AST_B_OFF]
+    call    err_append_span
+    mov     rsi, quote_char
+    mov     rdx, 1
+    call    err_append_str
+    mov     rdi, [rbx + AST_A_OFF]      ; struct_lit's own type-name span
+                                         ; as the position anchor -- the
+                                         ; missing field has no source
+                                         ; occurrence of its own to point at
+    jmp     sema_report_finish
+.struct_lit_completeness_next:
+    inc     rax
+    jmp     .struct_lit_completeness_scan
+.struct_lit_complete:
+    add     rsp, 32 + MAX_LIST_ARITY
     mov     rdi, AST_TY_BASE
     call    ast_alloc_node
     mov     qword [rax + AST_A_OFF], 0
@@ -863,10 +1056,13 @@ check_expr:
     jmp     .exit
 
 ; --- ARRAY_LIT: each element checked against the array's element type,
-; taken from expected_type (must be an AST_TY_ARRAY). No usable context
-; falls back to `int` per element (best-effort; count/completeness is
-; deferred regardless, ld. plan/spec scope, so this soft spot never
-; produces a wrong *crash*, only a skipped completeness check).
+; taken from expected_type (must be an AST_TY_ARRAY), and the literal's
+; own element count checked against the expected type's declared count.
+; No usable context falls back to `int` per element with no count check
+; at all -- a rare, defensive-only path in practice: every real array-
+; typed position (decl init, struct field init) always carries an
+; explicit declared size, so this is never how a legitimate program's
+; array_literal gets checked.
 .array_lit:
     cmp     r12, 0
     je      .array_lit_no_context
@@ -874,7 +1070,17 @@ check_expr:
     cmp     rax, AST_TY_ARRAY
     jne     .array_lit_no_context
     mov     r13, [r12 + AST_A_OFF]      ; element type
-    jmp     .array_lit_have_type
+    mov     rax, [r12 + AST_B_OFF]      ; expected count
+    cmp     rax, [rbx + AST_B_OFF]      ; actual elem_count
+    je      .array_lit_have_type
+    call    sema_report_begin
+    mov     rsi, msg_array_count_mismatch
+    mov     rdx, msg_array_count_mismatch_len
+    call    err_append_str
+    mov     rdi, rbx
+    call    find_offset
+    mov     rdi, rax
+    jmp     sema_report_finish
 .array_lit_no_context:
     call    get_int_type
     mov     r13, rax

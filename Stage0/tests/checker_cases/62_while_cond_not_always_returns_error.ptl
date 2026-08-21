@@ -1,0 +1,5 @@
+function f(x: int32) : int32 {
+  while (x > 0) {
+    return 1;
+  }
+}

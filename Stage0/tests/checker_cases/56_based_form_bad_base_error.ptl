@@ -1,0 +1,3 @@
+function f() : void {
+  mut x: int32 := 3n1;
+}

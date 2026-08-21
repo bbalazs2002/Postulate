@@ -57,6 +57,10 @@ msg_assign_type_mismatch:                            db "assignment type mismatc
 msg_assign_type_mismatch_len                         equ $ - msg_assign_type_mismatch
 msg_duplicate_assign_target:                            db "duplicate target in simultaneous assignment"
 msg_duplicate_assign_target_len                         equ $ - msg_duplicate_assign_target
+msg_missing_return_path:                                   db "function '"
+msg_missing_return_path_len                                equ $ - msg_missing_return_path
+msg_missing_return_path_2:                                     db "' may not return a value on every execution path"
+msg_missing_return_path_2_len                                  equ $ - msg_missing_return_path_2
 msg_extern_not_whitelisted:                                db "extern function '"
 msg_extern_not_whitelisted_len                             equ $ - msg_extern_not_whitelisted
 msg_extern_not_whitelisted_2:                                 db "' is not on the recognized syscall list"
@@ -524,6 +528,99 @@ check_stmt:
     ret
 
 ; ===========================================================================
+; stmt_always_returns: in rdi = stmt node ptr. out: rax = 1/0.
+; AST_STMT_RETURN is trivially 1. AST_STMT_IF is 1 only if it has an else
+; branch AND both branches always-return -- no else means the no-else
+; path definitely falls through. AST_STMT_WHILE is 0 in general (no
+; `break` in this language, but a loop body can still run zero times
+; unless the condition is unconditionally true, which this analysis
+; doesn't reason about for arbitrary expressions) -- except the one sound
+; special case: a condition that is literally the `true` literal can only
+; ever exit via `return` (or loop forever, which is an equally valid way
+; to never fall past this point, same as e.g. Rust's `loop {}`),
+; regardless of what the body does. Everything else (ASSIGN/EXPR) is 0.
+; ===========================================================================
+stmt_always_returns:
+    push    rbx
+    mov     rbx, rdi
+    mov     rax, [rbx + AST_KIND_OFF]
+    cmp     rax, AST_STMT_RETURN
+    je      .yes
+    cmp     rax, AST_STMT_IF
+    je      .if_stmt
+    cmp     rax, AST_STMT_WHILE
+    je      .while_stmt
+    jmp     .no
+.if_stmt:
+    mov     rax, [rbx + AST_C_OFF]      ; else_block, 0 if absent
+    cmp     rax, 0
+    je      .no
+    mov     rdi, [rbx + AST_B_OFF]      ; then_block
+    mov     rsi, [rdi + AST_B_OFF]      ; its stmt_count
+    mov     rdi, [rdi + AST_A_OFF]      ; its stmts ptr
+    call    stmts_always_return
+    cmp     rax, 0
+    je      .no
+    mov     rax, [rbx + AST_C_OFF]      ; else_block (re-derive -- the
+                                         ; call above clobbered rax)
+    mov     rsi, [rax + AST_B_OFF]
+    mov     rdi, [rax + AST_A_OFF]
+    call    stmts_always_return
+    jmp     .done
+.while_stmt:
+    mov     rax, [rbx + AST_A_OFF]      ; cond
+    mov     rcx, [rax + AST_KIND_OFF]
+    cmp     rcx, AST_EX_BOOL
+    jne     .no
+    cmp     qword [rax + AST_A_OFF], 1
+    jne     .no
+.yes:
+    mov     rax, 1
+    jmp     .done
+.no:
+    xor     rax, rax
+.done:
+    pop     rbx
+    ret
+
+; ===========================================================================
+; stmts_always_return: in rdi = stmts ptr (array of stmt node ptrs),
+; rsi = count. out: rax = 1/0 -- true iff *any* statement in the list
+; always-returns (an earlier always-returning statement makes everything
+; after it unreachable regardless of its own shape; this phase adds no
+; separate "unreachable code" diagnostic, it just doesn't let dead code's
+; shape affect the verdict). Shared verbatim by AST_BLOCK (a=stmts,
+; b=count) and AST_FUNC_BLOCK (c=stmts, d=stmt_count) -- same array-of-
+; node-ptrs shape, callers just pass the right fields.
+; ===========================================================================
+stmts_always_return:
+    push    rbx
+    push    r12
+    push    r13
+    mov     rbx, rdi                    ; stmts ptr
+    mov     r12, rsi                    ; count
+    xor     r13, r13                    ; index
+.loop:
+    cmp     r13, r12
+    jae     .no
+    mov     rdi, [rbx + r13*8]
+    call    stmt_always_returns
+    cmp     rax, 0
+    jne     .yes
+    inc     r13
+    jmp     .loop
+.yes:
+    mov     rax, 1
+    jmp     .done
+.no:
+    xor     rax, rax
+.done:
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+; ===========================================================================
 ; mk_base / mk_ptr_base: internal. in rdi = builtin TOK_KW_* tag. out rax
 ; = a freshly synthesized AST_TY_BASE{tag} / AST_TY_POINTER{BASE{tag}}
 ; node -- used only to build the fixed expected shapes for the extern
@@ -841,6 +938,31 @@ check_function_body:
     mov     rdi, [rbx + AST_C_OFF]
     mov     rsi, r12
     call    check_func_block
+
+    cmp     r12, 0
+    je      .void_ok                    ; void functions may fall off the
+                                         ; end, nothing to check
+    mov     rax, [rbx + AST_C_OFF]      ; func_block ptr
+    mov     rdi, [rax + AST_C_OFF]      ; its stmts ptr
+    mov     rsi, [rax + AST_D_OFF]      ; its stmt_count
+    call    stmts_always_return
+    cmp     rax, 0
+    jne     .void_ok
+    call    sema_report_begin
+    mov     rsi, msg_missing_return_path
+    mov     rdx, msg_missing_return_path_len
+    call    err_append_str
+    mov     rax, [rbx + AST_A_OFF]
+    mov     rdi, [rax + AST_A_OFF]
+    mov     rsi, [rax + AST_B_OFF]
+    call    err_append_span
+    mov     rsi, msg_missing_return_path_2
+    mov     rdx, msg_missing_return_path_2_len
+    call    err_append_str
+    mov     rax, [rbx + AST_A_OFF]
+    mov     rdi, [rax + AST_A_OFF]
+    jmp     sema_report_finish
+.void_ok:
     pop     r12
     pop     rbx
     ret
