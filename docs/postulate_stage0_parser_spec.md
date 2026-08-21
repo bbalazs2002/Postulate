@@ -426,9 +426,16 @@ block      ::= "{" stmt* "}"
 func_block ::= "{" decl* stmt* "}"
 ```
 
-`parse_block`: `{` után hurokban `parse_stmt()`-et hív, amíg `tok_cur !=
+`parse_block`: a nyitó `{`-t **explicit `parser_expect(TOK_LBRACE, ...)`
+ellenőrzi**, nem puszta `parser_advance` — a nyelvnek **nincs** kapcsos
+zárójel nélküli, egyetlen utasításos blokk-alternatívája (pl. az
+`if (a == b) return;` szintaktikai hiba, nem egy egyutasításos blokk
+rövidítése). Utána hurokban `parse_stmt()`-et hív, amíg `tok_cur !=
 TOK_RBRACE`, majd `}`. Nulla utasítás is érvényes (nincs "legalább 1"
-ellenőrzés).
+ellenőrzés). Az explicit ellenőrzés hiánya (puszta `parser_advance`, ami
+feltétel nélkül elnyelte volna a `tok_cur`-t, bármi is legyen az) korábban
+egy csendes, félrevezető hibaútvonalhoz vezetett volna — ld. 9.7's
+"gap-vs-bug" jegyzete.
 
 `parse_func_block`: `{` után **először** egy hurok, amíg `tok_cur` `mut`/
 `const` (mindegyiket `parse_decl`-lel parsolva), **utána** egy hurok
@@ -438,12 +445,12 @@ fejezet).
 
 ### 9.7 Implementáció közben feltárt hibaosztályok
 
-Ennek a szeletnek a megírása közben két, korábban rejtve maradt, valódi hiba
-derült ki a **már meglévő** típus-/kifejezés-parser és AST-dump kódban — mindkettő
-azért maradt rejtve korábban, mert a KORÁBBI hívási helyek "véletlenül" sosem
-igényelték a hibás viselkedés kiváltását. Mindkettőt kijavítottuk; mindkettő
-tanulsága érdemes explicit rögzítésre, mert egy jövőbeli bővítés ugyanebbe a
-csapdába eshet:
+Ennek a szeletnek a megírása közben három, korábban rejtve maradt probléma
+derült ki a **már meglévő** típus-/kifejezés-parser és AST-dump kódban —
+mindegyik azért maradt rejtve korábban, mert a KORÁBBI hívási helyek
+"véletlenül" sosem igényelték a hibás viselkedés kiváltását. Mindegyiket
+kijavítottuk; mindegyik tanulsága érdemes explicit rögzítésre, mert egy
+jövőbeli bővítés ugyanebbe a csapdába eshet:
 
 1. **Regiszter-védelem hiánya "levél" ágakban.** A `parse_primary`
    `.ident_or_struct`/`.int` ágai, és a `parse_type`/`parse_base_type` több ága,
@@ -466,6 +473,21 @@ csapdába eshet:
    számításából származó) értéket használta. **Javítás:** az `emit_str` hívás
    után a mezőt **újra be kell olvasni** a csomópontból (`mov rdi,
    [csomópont+mező]`), nem szabad a korábban betöltött `rax`-ra hagyatkozni.
+3. **Hiányzó `'{'`-ellenőrzés `parse_block`-ban ("gap-vs-bug").** A
+   `parse_block` a nyitó `'{'`-t eredetileg feltétel nélküli
+   `parser_advance`-szel fogyasztotta el, `parser_expect` helyett — sem ez a
+   rutin, sem a hívói (`parse_if_stmt`, `parse_while_stmt`) nem ellenőrizték
+   előtte, hogy `tok_cur` tényleg `TOK_LBRACE`. Ez nem crashelt (nem
+   `undefined`-viselkedés, mint az 1–2. pont), csak **elnyelte** a
+   `tok_cur`-t, bármi is volt az, és a hibát (ha volt) egy sokkal
+   zavaróbb, félrevezető helyen jelentette — pl. `if (a == b) return;`
+   esetén az eredetileg kiadott hiba `"expected expression"` volt a `;`-nél,
+   nem `"expected '{'"` a `return`-nél. Explicit felhasználói döntés
+   véglegesítette: a nyelvnek **nincs** kapcsos zárójel nélküli,
+   egyetlen-utasításos blokk-alternatívája — a `block ::= "{" stmt* "}"`
+   nyelvtani szabály `'{'`-je mindig kötelező, sosem elhagyható. **Javítás:**
+   `parse_block` elején `parser_expect(TOK_LBRACE, "expected '{'")`,
+   `parser_advance` helyett (ld. 9.6, és a 35–37. fixture).
 
 ---
 
@@ -732,6 +754,9 @@ fixture **első sora egy irányjelző**.
 | `32_top_level_extern_void` | `TOP_LEVEL_DECL` / `extern function sys_exit(code: int64) : void;` | extern_decl, `void` return_type |
 | `33_program_struct_and_function` | `PROGRAM` / egy `struct`, majd egy azt használó `function` | `program`'s `top_level_decl+`, több deklaráció, kereszt-deklarációs mezőelérés |
 | `34_program_empty_error` | `PROGRAM` / üres bemenet | `top_level_decl+` üres-lista elutasítás |
+| `35_stmt_if_missing_braces_error` | `STMT` / `if (a == b) return;` | `parse_block` explicit `'{'`-ellenőrzése (ld. 9.7/3) |
+| `36_stmt_while_missing_braces_error` | `STMT` / `while (a == b) return;` | ugyanaz, `while` ágon |
+| `37_stmt_if_else_missing_braces_error` | `STMT` / `if (a == b) { return; } else return;` | ugyanaz, az `else`-ág `parse_block` hívásán |
 
 A pontos stderr-szöveg és pozíció-számok mindig a ténylegesen lefordított
 bináris valós kimenetéből kerülnek rögzítésre — sosem kézzel kitalálva.
@@ -785,6 +810,11 @@ utasítás-fajtát is egyetlen `STMT` irányjelző fedi le.
    minden új rutinnál írás közben, nem utólag hibakereséssel).
 6. `Stage0/README.md` frissítése (irányjelző-táblázat, dump-forma-példa,
    Layout szakasz).
+7. Utólagos javítás, felhasználói kérésre: `parse_block` hiányzó `'{'`
+   ellenőrzésének pótlása (`parser_expect`, ld. 9.6/9.7-3) — a nyelvnek
+   nincs kapcsos zárójel nélküli blokk-alternatívája, ezt a parsernek is ki
+   kell kényszerítenie, ne csak a formális nyelvtannak. A 35–37. fixture.
+   Teljes regresszió: 37 parser-fixture + 6 lexer-fixture, zöld.
 
 Ezzel a Stage 0 EBNF **teljes** nyelvtana le van fedve a `build/parser`
 binárisban — a `program` szabálytól a legmélyebb kifejezés-szintig. Nincs

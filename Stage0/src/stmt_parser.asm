@@ -42,6 +42,8 @@ msg_expected_colon:                            db "expected ':'"
 msg_expected_colon_len                         equ $ - msg_expected_colon
 msg_too_many_decls:                                db "too many declarations in block"
 msg_too_many_decls_len                             equ $ - msg_too_many_decls
+msg_expected_lbrace:                                   db "expected '{'"
+msg_expected_lbrace_len                                equ $ - msg_expected_lbrace
 
 section .text
 
@@ -245,12 +247,21 @@ parse_return_stmt:
 ; ===========================================================================
 ; parse_block: block ::= "{" stmt* "}"  -- zero-or-more, no "empty is an
 ; error" check (unlike array/struct literals -- the grammar has "*" here,
-; not "+").
+; not "+"). The opening '{' is mandatory and explicitly checked
+; (parser_expect, not a bare parser_advance) -- the language has no
+; brace-less single-statement form (e.g. "if (a == b) return;" is a syntax
+; error, not sugar for a one-statement block). Without this check,
+; parser_advance would silently swallow whatever token happened to be
+; current (see docs/postulate_stage0_parser_spec.md section 9.6) and
+; produce a confusing downstream error instead of a direct "expected '{'".
 ; ===========================================================================
 parse_block:
     push    r12                  ; count
     push    r13                  ; arena dest
-    call    parser_advance                ; '{'
+    mov     rdi, TOK_LBRACE
+    mov     rsi, msg_expected_lbrace
+    mov     rdx, msg_expected_lbrace_len
+    call    parser_expect
     sub     rsp, MAX_LIST_ARITY*8
     xor     r12, r12
 .loop:
