@@ -223,9 +223,16 @@ parse_while_stmt:
 ; parse_return_stmt: return_stmt ::= "return" expr? ";"
 ; tok_cur == TOK_SEMI immediately after 'return' unambiguously selects the
 ; empty-expr alternative -- no lookahead needed.
+; b holds the 'return' keyword's own source offset -- unlike every other
+; stmt kind, a semantic-analysis error about this statement (e.g. "missing
+; return value in a non-void function") has no expression to anchor a
+; diagnostic position on when the expr field (a) is 0, so the statement
+; itself needs to carry one.
 ; ===========================================================================
 parse_return_stmt:
     push    r12                  ; expr or 0
+    push    r13                  ; 'return' keyword's own offset
+    mov     r13, [tok_cur + TOK_OFFSET_OFF]
     call    parser_advance                ; 'return'
     xor     r12, r12
     mov     rax, [tok_cur + TOK_KIND_OFF]
@@ -241,6 +248,8 @@ parse_return_stmt:
     mov     rdi, AST_STMT_RETURN
     call    ast_alloc_node
     mov     [rax + AST_A_OFF], r12
+    mov     [rax + AST_B_OFF], r13
+    pop     r13
     pop     r12
     ret
 

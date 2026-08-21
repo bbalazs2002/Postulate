@@ -1,0 +1,11 @@
+PROGRAM
+function has_negative(arr: int32[5]) : bool {
+  mut i: int32 := 0;
+  while (i < 5) {
+    if (arr[i] < 0) {
+      return true;
+    }
+    i := i + 1;
+  }
+  return false;
+}

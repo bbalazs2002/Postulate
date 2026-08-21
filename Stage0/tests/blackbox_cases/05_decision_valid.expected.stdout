@@ -1,0 +1,1 @@
+(program (function has_negative (params (param arr (array (base int32) 5))) (base bool) (func_block (decls (decl_mut i (base int32) (int 0))) (stmts (while (binary < (ident i) (int 5)) (block (if (binary < (index (ident arr) (ident i)) (int 0)) (block (return (bool true)))) (assign (pair (ident i) (binary + (ident i) (int 1)))))) (return (bool false))))))

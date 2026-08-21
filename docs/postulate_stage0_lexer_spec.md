@@ -61,6 +61,7 @@ Stage0/
       04_comments.{...}
       05_lexer_error.{...}
       06_unterminated_comment.{...}
+      07_based_form_empty_digits.{...}
 ```
 
 **A `lexer.asm` / `main.asm` szétválasztás lényege:** a `lexer.asm` kizárólag a
@@ -269,11 +270,23 @@ a döntés nem lehet a szken­nelőbe égetve.
 A tényleges diagnosztika-viselkedés — formázás, stderr-írás, kilépési kód
 kiválasztása — kizárólag a `main.asm` driver-hurkában történik:
 
-- **`TOK_ERROR`** (ismeretlen karakter): a driver kiszámítja a sor/oszlop
-  pozíciót (ld. lent), stderr-re írja: `lex error: unexpected character '@'
-  (0x40) at line 3, col 12 (byte offset 41)`, majd kiírja stdoutra az addig
-  helyesen felismert tokeneket (a hiba előtti prefix nem vész el — ld. 9.
-  fejezet), és `exit(1)`.
+- **`TOK_ERROR`** — két különböző alfajtát fed le, más-más üzenettel, mert a
+  driver a `TOK_LENGTH_OFF` mezőn dönt el, melyikről van szó (ld. `lexer.asm`
+  három `TOK_ERROR`-termelő helye):
+  - **Ismeretlen karakter** (`TOK_LENGTH_OFF = 1`, akár egy bare `=`, akár
+    bármilyen más fel nem ismert bájt): stderr-re írja: `lex error:
+    unexpected character '@' (0x40) at line 3, col 12 (byte offset 41)`.
+  - **Üres bázisjegy-sorozat** (`TOK_LENGTH_OFF = 0` — pl. `16n` közvetlenül
+    egy nem hexajegy karakter előtt vagy a fájl végén): stderr-re írja:
+    `lex error: based-form integer literal has no digits after 'n' at line
+    L, col C (byte offset O)`. **Nem** a "unexpected character" formát
+    használja — ebben az esetben a hibás pozíció utáni bájt (ha van
+    egyáltalán) semmiben nem hibás önmagában, tehát azt "hibás karakterként"
+    megnevezni félrevezető lenne (és fájlvégi esetben nem is létező bájtot
+    olvasna ki). Ld. `tests/cases/07_based_form_empty_digits`.
+  Mindkét alfajta esetén: kiírja stdoutra az addig helyesen felismert
+  tokeneket (a hiba előtti prefix nem vész el — ld. 9. fejezet), és
+  `exit(1)`.
 - **`TOK_ERROR_COMMENT`** (lezáratlan blokk-komment): hasonlóan, `lex error:
   unterminated block comment starting at line 5, col 1 (byte offset 88)`,
   ugyanaz a flush-majd-exit(1) viselkedés.
@@ -364,6 +377,7 @@ kimenettel szemben — sikeres esetekben `.expected.stderr` üres és
 | `04_comments` | Sor- és blokk-kommentek token-szerű szöveggel a belsejükben, bizonyítva hogy a szken­nelés helyesen folytatódik utánuk. |
 | `05_lexer_error` | Egy valódi érvénytelen bájt (`@`), ellenőrizve: a hiba előtti helyesen felismert prefix megjelenik stdouton, a pontos stderr-diagnosztika, `exit(1)`. |
 | `06_unterminated_comment` | Lezáratlan `/*`, ellenőrizve a `TOK_ERROR_COMMENT`-et és hogy a diagnosztika a komment *nyitására*, nem a fájl végére mutat. |
+| `07_based_form_empty_digits` | `16n;` — üres bázisjegy-sorozat, ellenőrizve a dedikált `"has no digits after 'n'"` üzenetet, nem az "unexpected character" formát (ld. 7. fejezet). |
 
 ---
 

@@ -1,0 +1,16 @@
+PROGRAM
+function selection_sort(arr: *(int32[5])) : void {
+  mut i: int32 := 0;
+  while (i < 5) {
+    mut min_idx: int32 := i;
+    mut j: int32 := i + 1;
+    while (j < 5) {
+      if ((*arr)[j] < (*arr)[min_idx]) {
+        min_idx := j;
+      }
+      j := j + 1;
+    }
+    (*arr)[i] := (*arr)[min_idx], (*arr)[min_idx] := (*arr)[i];
+    i := i + 1;
+  }
+}

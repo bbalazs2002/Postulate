@@ -1,0 +1,10 @@
+PROGRAM
+function sum(arr: int32[5]) : int32 {
+  mut total: int32 := 0;
+  mut i: int32 := 0;
+  while (i < 5) {
+    total := total + arr[i];
+    i := i + 1;
+  }
+  return total;
+}

@@ -757,6 +757,9 @@ fixture **első sora egy irányjelző**.
 | `35_stmt_if_missing_braces_error` | `STMT` / `if (a == b) return;` | `parse_block` explicit `'{'`-ellenőrzése (ld. 9.7/3) |
 | `36_stmt_while_missing_braces_error` | `STMT` / `while (a == b) return;` | ugyanaz, `while` ágon |
 | `37_stmt_if_else_missing_braces_error` | `STMT` / `if (a == b) { return; } else return;` | ugyanaz, az `else`-ág `parse_block` hívásán |
+| `38_expr_lex_error_bad_char` | `EXPR` / `1 + =` | `TOK_ERROR` (1 hosszú) leírása "found"-ban: `invalid character '='` (ld. 16.3) |
+| `39_expr_lex_error_based_form_empty` | `EXPR` / `16n` | `TOK_ERROR` (0 hosszú) leírása: `invalid token` |
+| `40_expr_lex_error_unterminated_comment` | `EXPR` / `1 + /* oops` | `TOK_ERROR_COMMENT` leírása: `unterminated comment` |
 
 A pontos stderr-szöveg és pozíció-számok mindig a ténylegesen lefordított
 bináris valós kimenetéből kerülnek rögzítésre — sosem kézzel kitalálva.
@@ -815,6 +818,13 @@ utasítás-fajtát is egyetlen `STMT` irányjelző fedi le.
    nincs kapcsos zárójel nélküli blokk-alternatívája, ezt a parsernek is ki
    kell kényszerítenie, ne csak a formális nyelvtannak. A 35–37. fixture.
    Teljes regresszió: 37 parser-fixture + 6 lexer-fixture, zöld.
+8. Fekete doboz tesztkészlet hozzáadása (ld. 16. fejezet), majd — az abban
+   megfigyelt hiányosságra reagálva, felhasználói kérésre — a `TOK_ERROR`/
+   `TOK_ERROR_COMMENT` diagnosztika-minőség javítása mindkét binárisban
+   (`err_append_token_desc` a parserben, `report_error` a lexerben, ld.
+   16.3). A 38–40. parser-fixture + a lexer-spec 7. fixtere
+   (`07_based_form_empty_digits`). Teljes regresszió: 40 parser-fixture +
+   24 fekete doboz fixture + 7 lexer-fixture, zöld.
 
 Ezzel a Stage 0 EBNF **teljes** nyelvtana le van fedve a `build/parser`
 binárisban — a `program` szabálytól a legmélyebb kifejezés-szintig. Nincs
@@ -822,3 +832,110 @@ további tudatosan elhalasztott parser-szelet; a hátralévő nyitott pontok
 (forward-declared függvények test nélkül, extern-fehérlista/típus-egyezés
 szemantikai ellenőrzése, kódgenerálás LLVM IR-re) mind egy jövőbeli,
 szemantikai-elemző/kódgeneráló fázis hatókörébe tartoznak, nem a parseréba.
+
+---
+
+## 16. Fekete doboz tesztkészlet (`tests/blackbox_cases/`, `run_blackbox_tests.sh`)
+
+Az 1–15. fejezet tesztkészlete (`tests/parser_cases/`) **fehér doboz**
+jellegű: minden fixture egy adott nyelvtani szabályra van szabva (az
+irányjelző kiválasztja, melyik `parse_*` rutint gyakorolja), és a cél az
+adott rutin izolált lefedése. Ez a második, különálló készlet **fekete
+dobozként** kezeli a `build/parser`-t: minden fixture egy teljes, önmagában
+értelmes `PROGRAM`, valós programozási feladatot valósít meg (nem egy
+nyelvtani konstrukciót demonstrál), és csak a megfigyelhető viselkedést
+(kilépési kód, stdout, stderr) vizsgálja — nem érdekli, melyik belső rutin
+fut le hozzá.
+
+### 16.1 A választott feladatok — programozási tételek
+
+A klasszikus, Fóthi Ákos-féle programozás-módszertani "tételek" (ld. fő spec
+"Tervezési döntések" fejezete a `:=` jelölés eredetéről) — mindegyikhez
+**legalább egy helyes és egy hibás** program készült, változatos, valóban
+előforduló hibafajtákkal (sosem ugyanaz a hibaosztály kétszer):
+
+| Fixture-pár | Tétel | A hibás verzió hibája |
+|---|---|---|
+| `01`/`02` | Összegzés | hiányzó `;` |
+| `03`/`04` | Megszámlálás | `=` a `:=` helyett (lexikai hiba, nem csak szintaktikai) |
+| `05`/`06` | Eldöntés (korai `return`-nel) | hiányzó `)` a feltételben |
+| `07`/`08` | Kiválasztás (index/pozíció) | elgépelt kulcsszó (`retrun`) |
+| `09`/`10` | Maximum-kiválasztás | hiányzó `}` (blokk-egyensúly felborul) |
+| `11`/`12` | Kiválogatás (két kimeneti pointer-paraméter) | hiányzó `)` egy `*(T[N])` típusban |
+| `13`/`14` | Kiválasztásos rendezés (max-kiválasztás + csere kombinálva) | `mut` deklaráció beágyazott blokkban |
+| `15`/`16` | Szétválogatás (két kimeneti tömbbe) | hiányzó `(` egy dereferencia előtt |
+| `17`/`18` | Lineáris keresés struct-tömbben (mező szerint) | `->` a `.` helyett (nincs ilyen operátor) |
+| `19`/`20` | Kombináció: megszámlálás + maximum egy függvényben | felesleges vessző a szimultán értékadásban |
+| `21`/`22` | Kombináció: kiválogatás + összegzés egy függvényben | hiányzó `}` egy tömb-literálban |
+| `23`/`24` | Nagyméretű, több struct/függvény/pointer/rekurzió — ld. 16.2 | hiányzó `;` egy mélyen beágyazott függvényben |
+
+Minden hibás eset **pontosan egy** eltérést tartalmaz a helyes párjához
+képest — a cél egy konkrét, valós programozói hiba izolált bemutatása, nem
+egy mesterséges, halmozott hibájú bemenet.
+
+### 16.2 A nagyméretű program (23/24. fixture)
+
+Egy kis RPN (fordított lengyel jelölésű) kifejezés-kiértékelő: `Token` és
+`Stack` struct, `stack_push`/`stack_pop` (pointer-paraméteren keresztül
+módosítanak), `apply_op`, egy **rekurzív** `gcd`, és egy `eval_rpn` +
+`main`, ami egyesíti mindet — két `extern function` deklarációval
+(`sys_write`, `sys_exit`), beágyazott struct- és tömb-literálokkal, és a
+`(*ptr).mező[index]` mintával (a `*(T[N])` pointer-tömb tervezési döntés
+— ld. fő spec 5. fejezet — pontosan ezt a formát teszi szükségessé és
+lehetővé). Célja: egy, a ténylegesen megírandó fordítóhoz komplexitásban
+közelítő bemeneten igazolni, hogy a parser (és különösen a
+`compute_line_col` sor/oszlop-számítás, ld. 11. fejezet) helyesen működik
+sok, egymásra épülő deklaráció esetén is — a 24. (hibás) fixture kifejezetten
+azt igazolja, hogy egy mélyen (a 4. deklarációban, a fájl közepén) elrejtett
+hiba is a pontos sorban/oszlopban kerül jelentésre.
+
+### 16.3 Egy megfigyelt hiányosság — felhasználói kérésre javítva
+
+A `04_count_error` fixture (`=` a `:=` helyett) futtatása közben kiderült:
+egy **lexikai** hibát (`TOK_ERROR`) hordozó token, ha egy szintaktikai hiba
+"found <token-leírás>" részébe kerül, **üres leírást** kapott — az
+`err_append_token_desc` (`parser_tokens.asm`) `.unknown:` ága semmit nem írt
+ki `TOK_ERROR`/`TOK_ERROR_COMMENT` esetén, mert ezek a kind-ok egyik ismert
+tartományba (EOF/IDENT/INT/kulcsszó/operátor/tagolójel) sem esnek. A
+tényleges üzenet emiatt `"...found "` alakú volt, a token leírása nélkül —
+nem hibás (nem crashelt, nem félrevezető pozíció), csak **kevésbé
+informatív**, mint lehetne. Utólag, felhasználói kérésre javítva:
+
+- **`err_append_token_desc`** (`parser_tokens.asm`) új ága: `TOK_ERROR`
+  esetén a `TOK_LENGTH_OFF` mező dönt — ha `1` (a lexer két "hibás
+  karakter" termelője, ld. lexer-spec 7. fejezet), a tényleges karaktert
+  idézőjelbe téve mutatja (`invalid character '='`); ha `0` (az üres
+  bázisjegy-sorozat termelője), egy generikus `invalid token` leírást ad,
+  mert ott nincs egyetlen konkrét hibás karakter, amit meg lehetne mutatni
+  (és a pozíción álló bájt — ha van egyáltalán — önmagában nem hibás). A
+  `TOK_ERROR_COMMENT` esetén `unterminated comment`.
+- **Ugyanez a hiányosság megvolt a *lexer* saját `report_error`-jában is**
+  (`main.asm`) — az mindig feltétlenül kiolvasta és megjelenítette a
+  `[tok+TOK_OFFSET_OFF]`-on álló bájtot mint "unexpected character",
+  **függetlenül attól, hogy `TOK_LENGTH_OFF` 0 vagy 1** — az üres
+  bázisjegy-sorozat esetén ez egy ártatlan, a hibával összefüggésbe nem
+  hozható bájtot (vagy fájlvégi esetben egy, a `.bss`-ből származó nulla
+  bájtot) nevezett meg hibásként. Javítva: `report_error` most `TOK_LENGTH_OFF`
+  alapján ágazik, és a hossz-0 esetben egy dedikált
+  `"based-form integer literal has no digits after 'n'"` üzenetet ad, a
+  "unexpected character" forma helyett — ld. lexer-spec 7. fejezet és
+  `tests/cases/07_based_form_empty_digits`.
+- Három új, dedikáltan ezt a hibaosztályt gyakorló fixture
+  (`38_expr_lex_error_bad_char`, `39_expr_lex_error_based_form_empty`,
+  `40_expr_lex_error_unterminated_comment`) került a fehér doboz
+  készletbe (`tests/parser_cases/`) — ezek kifejezetten a diagnosztika
+  minőségét tesztelik, nem egy adott nyelvtani szabályt, de az `EXPR`
+  irányjelzőn keresztül futnak, mint bármelyik más kifejezés-fixture. A
+  `04_count_error` fekete doboz fixture `.expected.stderr`-je újra lett
+  rögzítve az új, informatívabb üzenettel.
+
+### 16.4 Miért külön mappa és futtatószkript
+
+`tests/blackbox_cases/` + `scripts/run_blackbox_tests.sh` — ugyanaz a
+3-fájlos `.expected.*` konvenció, ugyanaz a `diff`-alapú futtató logika,
+mint `run_parser_tests.sh`-nál, de **külön mappa és külön szkript**, nem a
+meglévő `parser_cases/` bővítése — a két készlet célja és olvasási módja
+eltérő (egy grammatikai szabály izolált lefedése vs. egy teljes program
+viselkedése), és a `Dockerfile`-ban is külön `RUN` lépésként szerepel, hogy
+egy jövőbeli fekete doboz teszt hibája önmagában, a fehér doboz készlettől
+elkülönítve derüljön ki a build logban.

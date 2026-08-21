@@ -99,6 +99,14 @@ msg_byte_offset:      db " (byte offset "
 msg_byte_offset_len   equ $ - msg_byte_offset
 msg_found:            db "), found "
 msg_found_len         equ $ - msg_found
+msg_invalid_char_prefix:  db "invalid character '"
+msg_invalid_char_prefix_len equ $ - msg_invalid_char_prefix
+msg_invalid_char_suffix:  db "'"
+msg_invalid_char_suffix_len equ $ - msg_invalid_char_suffix
+msg_invalid_token:        db "invalid token"
+msg_invalid_token_len     equ $ - msg_invalid_token
+msg_unterminated_comment: db "unterminated comment"
+msg_unterminated_comment_len equ $ - msg_unterminated_comment
 nl_byte:              db 10
 
 section .text
@@ -294,6 +302,39 @@ err_append_token_desc:
     call    err_append_str
     jmp     .emit_span
 .not_op:
+    cmp     rax, TOK_ERROR
+    jne     .not_error
+    ; TOK_ERROR carries a real 1-byte span for the two "bad character"
+    ; producers in lexer.asm (a bare '=', or any other unrecognized byte),
+    ; but a zero-length span for the third producer (an empty based-form
+    ; digit run, e.g. "16n" with nothing after the 'n') -- there is no
+    ; single character to quote in that case, so fall back to a generic
+    ; description instead of showing an empty ''.
+    mov     rcx, [tok_cur + TOK_LENGTH_OFF]
+    cmp     rcx, 0
+    je      .error_no_span
+    mov     rsi, msg_invalid_char_prefix
+    mov     rdx, msg_invalid_char_prefix_len
+    call    err_append_str
+    mov     rax, [tok_cur + TOK_OFFSET_OFF]
+    mov     rsi, [parser_src_buf]
+    add     rsi, rax
+    mov     rdx, 1
+    call    err_append_str
+    mov     rsi, msg_invalid_char_suffix
+    mov     rdx, msg_invalid_char_suffix_len
+    jmp     err_append_str
+.error_no_span:
+    mov     rsi, msg_invalid_token
+    mov     rdx, msg_invalid_token_len
+    jmp     err_append_str
+.not_error:
+    cmp     rax, TOK_ERROR_COMMENT
+    jne     .not_error_comment
+    mov     rsi, msg_unterminated_comment
+    mov     rdx, msg_unterminated_comment_len
+    jmp     err_append_str
+.not_error_comment:
     cmp     rax, TOK_COLON
     jl      .unknown
     cmp     rax, TOK_RBRACKET

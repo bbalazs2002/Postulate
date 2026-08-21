@@ -1,0 +1,6 @@
+function f() : void {
+}
+
+function g() : void {
+  f();
+}

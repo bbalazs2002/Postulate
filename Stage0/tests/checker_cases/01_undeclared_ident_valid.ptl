@@ -1,0 +1,4 @@
+function f() : int32 {
+  mut x: int32 := 5;
+  return x;
+}

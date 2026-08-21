@@ -1,0 +1,1 @@
+semantic error: cannot dereference a non-pointer type at line 2, col 11 (byte offset 41)

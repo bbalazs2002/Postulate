@@ -1,0 +1,5 @@
+function f() : int64 {
+  mut a: int32 := 1;
+  mut b: int64 := 2;
+  return a + b;
+}

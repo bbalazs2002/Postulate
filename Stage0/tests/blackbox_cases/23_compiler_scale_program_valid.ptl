@@ -1,0 +1,77 @@
+PROGRAM
+extern function sys_write(fd: int64, buf: *uint8, count: uint64) : int64;
+extern function sys_exit(code: int64) : void;
+
+struct Token {
+  kind : int32;
+  value : int32;
+}
+
+struct Stack {
+  data : int32[8];
+  top : int32;
+}
+
+function stack_push(s: *Stack, v: int32) : void {
+  (*s).data[(*s).top] := v;
+  (*s).top := (*s).top + 1;
+}
+
+function stack_pop(s: *Stack) : int32 {
+  (*s).top := (*s).top - 1;
+  return (*s).data[(*s).top];
+}
+
+function gcd(a: int32, b: int32) : int32 {
+  if (b == 0) {
+    return a;
+  }
+  return gcd(b, a % b);
+}
+
+function apply_op(op_kind: int32, x: int32, y: int32) : int32 {
+  if (op_kind == 1) {
+    return x + y;
+  }
+  if (op_kind == 2) {
+    return x - y;
+  }
+  if (op_kind == 3) {
+    return x * y;
+  }
+  return 0;
+}
+
+function eval_rpn(tokens: Token[8], token_count: int32) : int32 {
+  mut s: Stack := Stack { data := {0, 0, 0, 0, 0, 0, 0, 0}, top := 0 };
+  mut i: int32 := 0;
+  mut a: int32 := 0;
+  mut b: int32 := 0;
+  while (i < token_count) {
+    if (tokens[i].kind == 0) {
+      stack_push(&s, tokens[i].value);
+    } else {
+      b := stack_pop(&s);
+      a := stack_pop(&s);
+      stack_push(&s, apply_op(tokens[i].kind, a, b));
+    }
+    i := i + 1;
+  }
+  return stack_pop(&s);
+}
+
+function main() : void {
+  mut tokens: Token[8] := {
+    Token { kind := 0, value := 4 },
+    Token { kind := 0, value := 6 },
+    Token { kind := 1, value := 0 },
+    Token { kind := 0, value := 2 },
+    Token { kind := 3, value := 0 },
+    Token { kind := 0, value := 0 },
+    Token { kind := 0, value := 0 },
+    Token { kind := 0, value := 0 }
+  };
+  mut result: int32 := eval_rpn(tokens, 5);
+  mut common: int32 := gcd(result, 12);
+  sys_exit(0);
+}

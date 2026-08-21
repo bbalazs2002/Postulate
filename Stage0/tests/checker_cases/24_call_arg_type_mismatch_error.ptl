@@ -1,0 +1,7 @@
+function g(a: int32) : void {
+}
+
+function f() : void {
+  mut x: bool := true;
+  g(x);
+}

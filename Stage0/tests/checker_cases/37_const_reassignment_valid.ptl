@@ -1,0 +1,4 @@
+function f() : void {
+  mut x: int32 := 0;
+  x := 5;
+}

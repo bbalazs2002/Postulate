@@ -1,0 +1,3 @@
+function f() : int32 {
+  return 5;
+}

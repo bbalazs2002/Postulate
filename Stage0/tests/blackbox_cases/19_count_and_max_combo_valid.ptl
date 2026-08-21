@@ -1,0 +1,17 @@
+PROGRAM
+function count_and_max(arr: int32[5], count_out: *int32) : int32 {
+  mut cnt: int32 := 0;
+  mut m: int32 := arr[0];
+  mut i: int32 := 0;
+  while (i < 5) {
+    if (arr[i] > 0) {
+      cnt := cnt + 1;
+    }
+    if (arr[i] > m) {
+      m := arr[i];
+    }
+    i := i + 1;
+  }
+  *count_out := cnt;
+  return m;
+}

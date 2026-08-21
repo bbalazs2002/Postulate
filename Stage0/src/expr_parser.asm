@@ -470,30 +470,67 @@ parse_primary:
 .array_lit:
     jmp     parse_array_literal      ; tail call -- consumes '{'..'}' itself
 .int:
+    ; b/c preserve the literal's own source span (name_offset/name_len,
+    ; same convention as AST_EX_IDENT) alongside the already-computed
+    ; value in a -- needed so a semantic-analysis phase can report a
+    ; precise position for a type error centered on a bare literal (no
+    ; other field on this node carries a source position at all).
     push    r12
+    push    r13
+    push    r14
     mov     r12, [tok_cur + TOK_VALUE_OFF]
+    mov     r13, [tok_cur + TOK_OFFSET_OFF]
+    mov     r14, [tok_cur + TOK_LENGTH_OFF]
     call    parser_advance
     mov     rdi, AST_EX_INT
     call    ast_alloc_node
     mov     [rax + AST_A_OFF], r12
+    mov     [rax + AST_B_OFF], r13
+    mov     [rax + AST_C_OFF], r14
+    pop     r14
+    pop     r13
     pop     r12
     ret
 .true:
+    push    r12
+    push    r13
+    mov     r12, [tok_cur + TOK_OFFSET_OFF]
+    mov     r13, [tok_cur + TOK_LENGTH_OFF]
     call    parser_advance
     mov     rdi, AST_EX_BOOL
     call    ast_alloc_node
     mov     qword [rax + AST_A_OFF], 1
+    mov     [rax + AST_B_OFF], r12
+    mov     [rax + AST_C_OFF], r13
+    pop     r13
+    pop     r12
     ret
 .false:
+    push    r12
+    push    r13
+    mov     r12, [tok_cur + TOK_OFFSET_OFF]
+    mov     r13, [tok_cur + TOK_LENGTH_OFF]
     call    parser_advance
     mov     rdi, AST_EX_BOOL
     call    ast_alloc_node
     mov     qword [rax + AST_A_OFF], 0
+    mov     [rax + AST_B_OFF], r12
+    mov     [rax + AST_C_OFF], r13
+    pop     r13
+    pop     r12
     ret
 .null:
+    push    r12
+    push    r13
+    mov     r12, [tok_cur + TOK_OFFSET_OFF]
+    mov     r13, [tok_cur + TOK_LENGTH_OFF]
     call    parser_advance
     mov     rdi, AST_EX_NULL
     call    ast_alloc_node
+    mov     [rax + AST_A_OFF], r12
+    mov     [rax + AST_B_OFF], r13
+    pop     r13
+    pop     r12
     ret
 .paren:
     call    parser_advance

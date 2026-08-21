@@ -91,6 +91,8 @@ msg_err_close:                db ")", 10
 msg_err_close_len             equ $ - msg_err_close
 msg_err_comment_1:         db "lex error: unterminated block comment starting at line "
 msg_err_comment_1_len      equ $ - msg_err_comment_1
+msg_err_based_form_empty:   db "lex error: based-form integer literal has no digits after 'n' at line "
+msg_err_based_form_empty_len equ $ - msg_err_based_form_empty
 
 section .text
 
@@ -220,6 +222,25 @@ report_error:
     mov     [scratch_line], rax
     mov     [scratch_col], rdx
 
+    ; lexer.asm has two TOK_ERROR producers that point at a real offending
+    ; byte (a bare '=', or any other unrecognized character) -- both set
+    ; TOK_LENGTH_OFF = 1 -- and a third (an empty based-form digit run,
+    ; e.g. "16n" with nothing after the 'n') that sets TOK_LENGTH_OFF = 0
+    ; and points OFFSET at whatever byte happens to follow the 'n', which
+    ; is not itself invalid. Showing "unexpected character 'X'" for that
+    ; third case would blame an innocent, unrelated byte (or read one past
+    ; the source if 'n' was the last byte in the file); report the real
+    ; problem by length instead.
+    mov     rax, [tok + TOK_LENGTH_OFF]
+    cmp     rax, 0
+    jne     .has_span
+
+    mov     rsi, msg_err_based_form_empty
+    mov     rdx, msg_err_based_form_empty_len
+    call    err_append_str
+    jmp     .common
+
+.has_span:
     mov     rsi, msg_err_unexpected_1
     mov     rdx, msg_err_unexpected_1_len
     call    err_append_str
@@ -243,6 +264,7 @@ report_error:
     mov     rdx, msg_err_unexpected_3_len
     call    err_append_str
 
+.common:
     mov     rax, [scratch_line]
     call    err_append_dec
 

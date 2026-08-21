@@ -24,3 +24,17 @@ ld -static -no-pie -e _start -o build/parser \
     build/parser_main.o build/lexer.o build/runtime.o build/ast.o \
     build/parser_tokens.o build/type_parser.o build/expr_parser.o \
     build/stmt_parser.o build/top_parser.o build/ast_dump.o
+
+# --- semantic checker binary (name resolution + core type checking --
+# see docs/postulate_stage0_semantics_spec.md) ---
+nasm -f elf64 -I src/ -o build/checker_main.o src/checker_main.asm
+nasm -f elf64 -I src/ -o build/symtab.o src/symtab.asm
+nasm -f elf64 -I src/ -o build/sema_types.o src/sema_types.asm
+nasm -f elf64 -I src/ -o build/sema_expr.o src/sema_expr.asm
+nasm -f elf64 -I src/ -o build/sema_stmt.o src/sema_stmt.asm
+
+ld -static -no-pie -e _start -o build/checker \
+    build/checker_main.o build/lexer.o build/runtime.o build/ast.o \
+    build/parser_tokens.o build/type_parser.o build/expr_parser.o \
+    build/stmt_parser.o build/top_parser.o \
+    build/symtab.o build/sema_types.o build/sema_expr.o build/sema_stmt.o

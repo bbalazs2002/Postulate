@@ -1,0 +1,6 @@
+struct Node {
+  x : int32;
+}
+
+function f(n: Node) : void {
+}

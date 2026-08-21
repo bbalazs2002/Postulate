@@ -1,0 +1,1 @@
+semantic error: extern function 'sys_foo' is not on the recognized syscall list at line 1, col 17 (byte offset 16)
