@@ -72,6 +72,19 @@ Self-hosting elérve — Stage 0 ("bootstrap mag") ezután történeti/eldobhat�
   az még nem létezik, amikor a fordítót futtatod. Ezért a Stage 0-nak saját
   I/O-t és memóriafoglalást (`mmap`, `read`, `write`, `exit` syscall-okon
   keresztül) kell biztosítania, libc nélkül.
+- **A Postulate nyelv maga is eléri ugyanezeket a syscallokat**, `extern function`
+  deklarációkon keresztül (ld. 4. fejezet nyelvtan) — enélkül a Stage 1 fordító
+  (ami már Postulate-ben van írva) nem tudna forrásfájlt olvasni vagy LLVM IR-t
+  kiírni. A Stage 0 fordító egy **fix, zárt szimbólumnév-listát** ismer fel és
+  fordít le közvetlen syscall-hívássá — nincs általános linker/FFI:
+
+  ```postulate
+  extern function sys_read(fd: int64, buf: *uint8, count: uint64) : int64;
+  extern function sys_write(fd: int64, buf: *uint8, count: uint64) : int64;
+  extern function sys_mmap(addr: uint64, length: uint64, prot: int64,
+                            flags: int64, fd: int64, offset: int64) : *uint8;
+  extern function sys_exit(code: int64) : void;
+  ```
 
 ---
 
@@ -83,13 +96,17 @@ A Stage 0 pontosan annyit tartalmaz, amennyi egy **lexer + rekurzív leszállás
 parser + AST-építés + szöveges LLVM IR-kiírás** megírásához szükséges a Stage 1
 fordító megírásához:
 
-- Fix méretű egész típusok, `bool`, nyers pointer, fix méretű tömb, `struct`
+- Fix méretű egész típusok, `bool`, nyers pointer, fix méretű tömb (elemenként
+  bázistípusból vagy pointerből), `struct`, `void`
 - Csak függvény-elején történő deklaráció (állapottér rögzítése — Hoare-logika-barát)
 - `if`/`else`, `while`, `return`
 - Szimultán értékadás (`:=`), Dijkstra/Hoare-szemantikával
 - Teljes kifejezés-nyelvtan operátor-precedenciával
 - Több számrendszerű egész literál, `bool` literál, `null`
 - `//` és `/* */` kommentek
+- `extern function` deklaráció, fix syscall-whitelisttel — ez teszi lehetővé,
+  hogy a Stage 1 fordító (Postulate-ben írva) egyáltalán olvasni/írni tudjon
+  fájlt, enélkül a bootstrap-lánc nem folytatódhatna Stage 1-re
 
 ### Mit szándékosan kizártunk Stage 0-ból
 
@@ -107,12 +124,14 @@ fordító megírásához:
 
 ```ebnf
 program        ::= top_level_decl+
-top_level_decl ::= function | struct_decl
+top_level_decl ::= function | struct_decl | extern_decl
 
 struct_decl    ::= "struct" identifier "{" field_decl+ "}"
 field_decl     ::= identifier ":" type ";"
 
-function       ::= "function" identifier "(" params? ")" ":" type func_block
+function       ::= "function" identifier "(" params? ")" ":" return_type func_block
+return_type    ::= type | "void"
+extern_decl    ::= "extern" "function" identifier "(" params? ")" ":" return_type ";"
 params         ::= param ("," param)*
 param          ::= identifier ":" type
 
@@ -163,9 +182,25 @@ null_literal    ::= "null"
 base_type      ::= "int8" | "int16" | "int" | "int32" | "int64"
                   | "uint8" | "uint16" | "uint" | "uint32" | "uint64"
                   | "bool" | identifier
-type           ::= base_type "[" integer_literal "]"
+type           ::= "*" base_type "[" integer_literal "]"
                   | "*" type
+                  | base_type "[" integer_literal "]"
+                  | "(" type ")"
                   | base_type
+```
+
+A `type` szabály alternatívái **sorrendben, elsőtalálat-elvvel** (PEG-stílusban) értendők — az első
+alternatíva mindig elsőbbséget élvez, ha illeszkedik:
+
+- **`*T[N]` (zárójel nélkül) → N darab `*T` pointer tömbje.** Ez a rövid, alapértelmezett forma —
+  fordítói adatszerkezeteknél (AST gyerek-listák, szimbólumtábla-bejegyzések) ez a gyakoribb eset.
+- **`*(T[N])` (explicit zárójellel) → pointer egy N-elemű `T`-tömbre.** A ritkább eset zárójelet
+  igényel — a `"(" type ")"` csoportosító szabály teszi lehetővé.
+- Zárójel nélkül a `*` mindig a *közvetlenül utána következő, még fel nem bontott* elemre
+  vonatkozik — ha az rögtön egy `base_type "[" N "]"` mintát alkot, az egész `*base_type[N]`
+  egységet "pointer-tömbként" kell olvasni, nem "pointerré csomagolt tömbként".
+
+```ebnf
 
 identifier     ::= ("a".."z" | "A".."Z") ("a".."z" | "A".."Z" | "0".."9" | "_")*
 digit          ::= "0".."9"
@@ -175,10 +210,10 @@ comment        ::= line_comment | block_comment
 line_comment   ::= "//" (any_char_except_newline)* newline
 block_comment  ::= "/*" (any_char)* "*/"
 
-keywords       ::= "function" | "struct" | "mut" | "const" | "if" | "else" | "while"
+keywords       ::= "function" | "struct" | "extern" | "mut" | "const" | "if" | "else" | "while"
                   | "return" | "true" | "false" | "null"
                   | "int8" | "int16" | "int" | "int32" | "int64"
-                  | "uint8" | "uint16" | "uint" | "uint32" | "uint64" | "bool"
+                  | "uint8" | "uint16" | "uint" | "uint32" | "uint64" | "bool" | "void"
 ```
 
 ### Szemantikai megkötések (nem nyelvtaniak — a fordító szemantikai elemző
@@ -200,6 +235,8 @@ fázisában ellenőrizendők, nem a lexer/parser szintjén)
 | `array_literal` | Az elemek száma pontosan meg kell egyezzen a deklarált tömbmérettel (`N`). Eltérés esetén fordítási hiba — köztes, részleges lista nem megengedett (ugyanaz a "nincs szemét memória" elv, mint a struct-oknál). A fordító a listát belsőleg sorozatos indexelt értékadásra bontja szét (`arr[0] := e0; arr[1] := e1; ...`), nincs hozzá külön kódgenerálási eset. |
 | Pointer-aritmetika | **Tiltott Stage 0-ban.** Pointereken kizárólag címképzés (`&`) és dereferálás (`*`) megengedett — `p + 1` stílusú kifejezések fordítási hibát adnak. A tömbelérés `arr[i]` formában továbbra is támogatott. Ez a megkötés **később, egy adott fázisban feloldásra kerül** — ld. "Későbbi fázisokra halasztott döntések". |
 | Szimultán értékadás | `assign_stmt`-ben minden `lvalue` célpontnak különbözőnek kell lennie egy soron belül. A jobb oldalak kiértékelése az utasítás **előtti** állapoton történik; az összes hozzárendelés csak ez után, egyszerre lép érvénybe (Dijkstra/Hoare-szemantika). |
+| `extern function` | A deklarált név kizárólag a Stage 0 fordító által ismert, **fix, zárt szimbólumnév-listából** választható (ld. 2. fejezet kiegészítése) — jelenleg `sys_read`, `sys_write`, `sys_mmap`, `sys_exit`. A paraméter- és visszatérési típusoknak pontosan meg kell egyezniük az adott szimbólumhoz Stage 0-ban rögzített aláírással. Nincs `func_block` teste (a `;` zárja), és nincs általános linker/FFI — bármely más néven történő `extern` deklaráció fordítási hiba. |
+| `return` / visszatérési típus | `void` visszatérési típusú függvényben a `return` kizárólag kifejezés nélkül szerepelhet (`return;`). Minden más (nem-`void`) visszatérési típus esetén a `return` kötelezően tartalmaz kifejezést, aminek típusa szigorúan meg kell egyezzen a függvény deklarált visszatérési típusával — ugyanaz az "Implicit típuskonverzió: Tilos" szabály érvényes itt is (ld. fent), tehát pl. egy `int16`-ot visszaadó kifejezés nem fogadható el `int32` visszatérési típusnál. Minden végrehajtási útnak `return`-nel kell záródnia nem-`void` függvényben. |
 
 ### Operátor-precedencia és asszociativitás (a nyelvtani lánc sorrendje már ezt
 tükrözi, legerősebbtől leggyengébbig)
@@ -213,10 +250,10 @@ tükrözi, legerősebbtől leggyengébbig)
 | `shift` | `<<`, `>>` | bal |
 | `bit_and` | `&` | bal |
 | `bit_xor` | `^` | bal |
-| `bit_or` | `|` | bal |
+| `bit_or` | `\|` | bal |
 | `comparison` | `==`, `!=`, `<`, `>`, `<=`, `>=` | **nem láncolható** |
 | `logic_and` | `&&` | bal |
-| `logic_or` | `||` | bal |
+| `logic_or` | `\|\|` | bal |
 
 **Fontos:** a bitwise operátorok szorosabban kötnek, mint az összehasonlítás
 (Python-stílus) — ez tudatosan megfordítja a klasszikus C-hibát, ahol pl.
@@ -248,6 +285,24 @@ tükrözi, legerősebbtől leggyengébbig)
   "szemét" memóriatartalmú összetett érték; ez matematikailag is konzisztens
   Fóthi könyvének rekord-definíciójával (a rekord *maga* a teljes komponens-n-es,
   fogalmilag nem létezhet részleges kitöltés).
+- **`void` visszatérési típus, külön `return_type` szabályként** — kizárólag
+  függvény visszatérési típusaként használható, nem a általános `type`
+  szabály része, tehát nem lehet változó, mező vagy paraméter típusa. Azoknak
+  a függvényeknek kell, amelyek csak mellékhatásért (pl. pointeren keresztüli
+  írásért) hívódnak, és nincs értelmes visszatérési értékük.
+- **`*T[N]` alapértelmezés szerint "N pointer tömbje", nem "pointer egy
+  tömbre"** — a fordítói adatszerkezeteknél (AST gyerek-listák, szimbólumtábla)
+  a pointer-tömb a gyakoribb eset, ezért ez kapja a rövid formát; a ritkább
+  "pointer egy tömbre" esetet explicit zárójel jelöli (`*(T[N])`).
+- **`extern function`, fix syscall-whitelisttel, nem `syscall()` primitív vagy
+  `asm` blokk** — a Hoare-logikás, modularis bizonyítás lényege, hogy egy
+  függvényhívás a *szerződése* (típusos aláírás, később `requires`/`ensures`)
+  alapján ellenőrizhető anélkül, hogy a törzsébe kellene nézni. Egy típusos,
+  névvel ellátott `extern` deklaráció pontosan ez — "fekete doboz" szerződéssel.
+  Egy nyers `syscall(nr, args...)` hívás szétszórná a szemantikát típus nélküli
+  hívási helyekre, egy `asm` blokk pedig teljesen átlátszatlan lenne bármilyen
+  statikus/formális elemzés számára — mindkettő a bizonyíthatósági cél ellen
+  dolgozna.
 
 ---
 
@@ -266,6 +321,26 @@ tükrözi, legerősebbtől leggyengébbig)
 4. **Pointer-aritmetika** — Stage 0-ban tiltott (csak `&`/`*` engedélyezett),
    de egy későbbi fázisban bevezetésre kerül. A bevezetés módja (pl. csak
    típusméret-skálázott léptetés, vagy nyers byte-offset) még kidolgozandó.
+5. **Figyelmeztetés a figyelmen kívül hagyott visszatérési értékre** — a
+   végleges (nem Stage 0) fordítónak külön diagnosztikai figyelmeztetést kell
+   adnia (nem hibát), ha egy program egy nem-`void` visszatérési típusú
+   függvényt `expr_stmt`-ként hív meg úgy, hogy a visszaadott értéket nem
+   használja fel (pl. `mult(4);` önálló utasításként). A `void` visszatérési
+   típus bevezetése (ld. 4–5. fejezet) pontosan ezt a különbséget teszi
+   explicitté: egy függvény vagy deklaráltan nem ad vissza értéket (`void`,
+   nincs mit eldobni), vagy ad, és annak eldobása valószínűleg hiba a hívó
+   kódban.
+6. **Függvény deklaráció definíció nélkül (forward declaration)** — a
+   `function` szabály jelenleg mindig megköveteli a `func_block` testet, tehát
+   nincs mód egy Postulate-ben megvalósítandó függvényt csak deklarálni, testet
+   később megadni (pl. kölcsönösen rekurzív függvényekhez, vagy hogy a hívási
+   sorrend ne kösse meg a definíciók sorrendjét). Ez **nem** ugyanaz, mint az
+   `extern function` (ld. 2–4. fejezet) — az egy Stage 0 által ismert,
+   syscallra leképzett, véglegesen testetlen deklaráció; ez itt egy Postulate
+   nyelven megírt függvény halasztott teste lenne. A pontos szintaxis (pl.
+   `function name(params) : return_type;` test nélkül, majd egy külön
+   `function name(params) : return_type { ... }` a tényleges definícióval, a
+   kettő aláírásának kötelező egyezésével) még kidolgozandó.
 
 ---
 
@@ -314,6 +389,9 @@ bevezetésre kerül:
 ```postulate
 // Szintaxis-bemutató a Postulate nyelvhez.
 
+extern function sys_write(fd: int64, buf: *uint8, count: uint64) : int64;
+extern function sys_exit(code: int64) : void;
+
 struct Node {
   value : int32;
   next  : *Node;
@@ -360,32 +438,55 @@ function make_pair(x : uint8, y : uint8) : Pair {
   return Pair { a := x, b := y };
 }
 
-function mult(x : int) : int {
+function mult(x : int32) : int32 {
   return x * 2;
 }
 
+function increment(p : *int32) : void {
+  *p := *p + 1;
+}
+
 function main() : int32 {
+  // Minden deklaráció a blokk elején (func_block ::= decl* stmt*) —
+  // utána kizárólag utasítások következhetnek.
   const pair : Pair := Pair { a := 8n17, b := 16n1F };
   const total : uint := 16n64;            // uint ≡ uint16
 
   mut n2 : Node := Node { value := 99, next := null };
   mut n1 : Node := Node { value := 1,  next := &n2 };
 
+  // pointer-tömb: 3 darab *Node, alapból mind null-ra broadcast-olva (ld. 4. fejezet)
+  mut node_list : *Node[3] := null;
+
   mut arr : int32[10] := 0;               // minden elem 0-ra inicializálva
-  arr[0] := 5;
-  arr[1] := 10;
 
   // array_literal: pontosan 10 elem, tetszőleges expr (pl. függvényhívás) is lehet
   mut arr2 : int32[10] := {1, 2, 3, 4, 5, 6, 7, mult(4), 9, 10};
 
-  mut p   : *int32 := &arr[0];
-  mut sum : int32   := *p + arr[1];
+  mut p   : *int32 := &arr[0];            // csak címképzés, arr tartalmától független
+  mut sum : int32;                        // skalár mut: opcionális inicializálás
+
+  mut msg : uint8[5] := {72, 101, 108, 108, 111};   // "Hello" nyers bájtjai (nincs string típus)
+
+  // --- innentől csak utasítások ---
+
+  node_list[0] := &n1;
+  node_list[1] := &n2;
+
+  arr[0] := 5;
+  arr[1] := 10;
+
+  sum := *p + arr[1];
 
   if (is_even(sum)) {
     sum := sum * 2;
   } else {
     sum := sum + 1;
   }
+
+  increment(&sum);   // void függvény: mellékhatás pointeren keresztül, nincs visszatérési érték
+
+  sys_write(1, &msg[0], 5);   // extern function: nyers syscall-hívás
 
   return sum;
 }
@@ -396,13 +497,14 @@ function main() : int32 {
 ## 10. Következő lépés (ahol a tervezés abbamaradt)
 
 A Stage 0 nyelvtan **formálisan lezártnak** tekinthető (a 7. pontban jelzett
-nyitott kérdések kivételével, amik nem blokkolják az indulást). A logikus
-következő lépések egy új munkamenetben:
+nyitott kérdések kivételével, amik nem blokkolják az indulást) — beleértve a
+pointer-tömb jelölést és az `extern function`/syscall-whitelistet is, amik
+korábban blokkolták volna a Stage 1 önhordó fordító tényleges megírhatóságát
+(ld. 2–5. fejezet). A logikus következő lépések egy új munkamenetben:
 
-1. Dönteni a tömb-literál bevezetéséről (7. pont), vagy elhalasztani.
-2. Lexer implementációjának megkezdése x86_64 assembly-ben (Linux syscall ABI),
+1. Lexer implementációjának megkezdése x86_64 assembly-ben (Linux syscall ABI),
    a fenti `identifier`/`literal`/`comment`/`keywords` szabályok alapján.
-3. Rekurzív leszállásos parser felépítése a fenti EBNF alapján.
-4. GitHub Actions CI beállítása (QEMU + Docker-alapú build környezet) —
+2. Rekurzív leszállásos parser felépítése a fenti EBNF alapján.
+3. GitHub Actions CI beállítása (QEMU + Docker-alapú build környezet) —
    ez a projekt egy korábbi, ehhez a dokumentumhoz nem tartozó megbeszélésének
    témája volt, érdemes külön összefoglalni, ha szükséges.
