@@ -1,0 +1,13 @@
+KW mut
+IDENT x
+COLON
+KW int32
+OP :=
+INT 1
+SEMI
+KW mut
+IDENT y
+COLON
+KW int32
+OP :=
+IDENT x

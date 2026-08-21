@@ -1,0 +1,2 @@
+mut x : int32 := 1;
+mut y : int32 := x @ 2;

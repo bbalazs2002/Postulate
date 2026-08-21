@@ -1,0 +1,41 @@
+IDENT a
+OP <=
+IDENT b
+OP <
+IDENT c
+SEMI
+IDENT d
+OP <<
+IDENT e
+SEMI
+IDENT f
+OP >>
+IDENT g
+OP >=
+IDENT h
+SEMI
+IDENT i
+OP &&
+IDENT j
+SEMI
+IDENT k
+OP ||
+IDENT l
+SEMI
+IDENT m
+OP ==
+IDENT n
+OP !=
+IDENT o
+SEMI
+IDENT p
+OP :=
+IDENT q
+SEMI
+IDENT r
+OP !
+OP &
+OP |
+COLON
+IDENT x
+EOF

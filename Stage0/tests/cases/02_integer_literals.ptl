@@ -1,0 +1,4 @@
+const total : uint := 16n64;
+const pair : Pair := Pair { a := 8n17, b := 16n1F };
+const bad : uint := 99n5;
+mut plain : int32 := 42;

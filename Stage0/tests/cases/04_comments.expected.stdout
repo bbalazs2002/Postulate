@@ -1,0 +1,8 @@
+KW mut
+IDENT x
+COLON
+KW int32
+OP :=
+INT 1
+SEMI
+EOF

@@ -1,1 +1,11 @@
+// temporal files
 temp/**
+
+// build artifacts
+Stage0/build/**
+
+// node module files
+*/node_modules/**
+
+// secrets
+*/*.env

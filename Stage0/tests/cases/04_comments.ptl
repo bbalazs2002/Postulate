@@ -1,0 +1,3 @@
+// this := is + not <= a token 16n1F
+/* a * b : and a stray * next to slash */
+mut x : int32 := 1;
