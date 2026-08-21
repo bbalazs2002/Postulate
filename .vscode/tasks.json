@@ -1,0 +1,18 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "compile-postulate-extension",
+      "type": "shell",
+      "command": "npm run compile",
+      "options": {
+        "cwd": "${workspaceFolder}/editors/vscode"
+      },
+      "problemMatcher": "$tsc",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    }
+  ]
+}

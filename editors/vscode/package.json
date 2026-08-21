@@ -7,17 +7,25 @@
     "vscode": "^1.80.0"
   },
   "categories": ["Programming Languages"],
+  "main": "./out/extension.js",
   "contributes": {
     "languages": [{
       "id": "postulate",
       "aliases": ["Postulate", "ptl"],
       "extensions": [".ptl"],
       "configuration": "./language-configuration.json"
-    }],
-    "grammars": [{
-      "language": "postulate",
-      "scopeName": "source.postulate",
-      "path": "./tree-sitter-postulate.wasm"
     }]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -w -p ./"
+  },
+  "dependencies": {
+    "web-tree-sitter": "^0.25.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.4.0"
   }
 }

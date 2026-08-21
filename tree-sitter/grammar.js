@@ -196,7 +196,7 @@ module.exports = grammar({
     pointer_type: $ => prec(1, seq('*', $.type)),
 
     // --- IDENTIFIERS & COMMENTS ---
-    identifier: $ => /[a-zA-Z_][a-zA-Z0-9_]*/,
+    identifier: $ => /[a-zA-Z][a-zA-Z0-9_]*/,
 
     comment: $ => choice(
       token(seq('//', /.*/)),
