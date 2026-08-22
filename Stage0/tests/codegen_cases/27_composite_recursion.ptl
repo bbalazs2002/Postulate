@@ -1,0 +1,15 @@
+struct Acc { total: int32; n: int32; }
+
+function step(a: Acc) : Acc {
+  mut next: Acc := Acc { total := a.total + a.n, n := a.n - 1 };
+  if (a.n <= 0) {
+    return a;
+  }
+  return step(next);
+}
+
+function main() : int32 {
+  mut start: Acc := Acc { total := 0, n := 5 };
+  mut result: Acc := step(start);
+  return result.total;
+}

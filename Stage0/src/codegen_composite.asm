@@ -272,10 +272,17 @@ emit_rep_movsb_copy:
 ; forward, declaration/index order; for every leaf (scalar/pointer)
 ; field/element, gen_rvalue + push; a nested composite field/element is
 ; recursed into inline, joining the same flat push sequence. No
-; addresses touched.
+; addresses touched. out: rax = total bytes pushed (leaf_count * 8,
+; summed recursively through every nested composite field/element).
+; Every existing caller (decl-init/assign) computes its own target
+; address independently and simply ignores this; Phase 3's composite
+; call-argument materialization needs it to recover a fresh reservation's
+; address via a compile-time-known "[rsp + this]" offset once pass 1's
+; leaves are on top of it (ld. codegen_expr.asm's gen_user_call).
 ; ===========================================================================
 gen_init_push:
     mov     rbx, rdi
+    xor     r15, r15                    ; running total bytes pushed
     mov     rax, [rbx + AST_KIND_OFF]
     cmp     rax, AST_EX_STRUCT_LIT
     je      .struct
@@ -295,28 +302,43 @@ gen_init_push:
     je      .arr_recurse
     mov     rdi, rax
     push    r13
-    push    r14                         ; next iteration needs both back
+    push    r14
+    push    r15                         ; next iteration needs all three
+                                         ; back -- never trust a callee to
+                                         ; leave our running total alone
     call    gen_rvalue
+    pop     r15
     pop     r14
     pop     r13
     mov     rsi, s_push_rax
     mov     rdx, s_push_rax_len
     push    r13
     push    r14
+    push    r15
     call    emit_str
+    pop     r15
     pop     r14
     pop     r13
     push    r13
     push    r14
+    push    r15
     call    emit_nl
+    pop     r15
     pop     r14
     pop     r13
+    add     r15, 8
     jmp     .arr_next
 .arr_recurse:
     mov     rdi, rax
     push    r13
     push    r14
-    call    gen_init_push
+    push    r15                         ; protect OUR running total across
+                                         ; the recursive call -- the
+                                         ; callee resets ITS OWN r15 to 0,
+                                         ; so ours would be lost otherwise
+    call    gen_init_push               ; -> rax = nested leaf byte count
+    pop     r15
+    add     r15, rax
     pop     r14
     pop     r13
 .arr_next:
@@ -327,7 +349,9 @@ gen_init_push:
     mov     rdi, [rbx + AST_A_OFF]      ; name_offset
     mov     rsi, [rbx + AST_B_OFF]      ; name_len
     push    rbx                         ; needed by the loop below
+    push    r15
     call    lookup_struct
+    pop     r15
     pop     rbx
     mov     r12, [rax + STE_DECL_PTR]   ; struct decl
     mov     r13, [r12 + AST_D_OFF]      ; field_count
@@ -343,8 +367,10 @@ gen_init_push:
     mov     rdx, [rax + AST_B_OFF]      ; field decl name_len
     push    rbx
     push    r12
-    push    r13                         ; next iteration needs all three
+    push    r13
+    push    r15                         ; next iteration needs all four
     call    find_field_init
+    pop     r15
     pop     r13
     pop     r12
     pop     rbx
@@ -358,7 +384,9 @@ gen_init_push:
     push    rbx
     push    r12
     push    r13
+    push    r15
     call    gen_rvalue
+    pop     r15
     pop     r13
     pop     r12
     pop     rbx
@@ -367,24 +395,33 @@ gen_init_push:
     push    rbx
     push    r12
     push    r13
+    push    r15
     call    emit_str
+    pop     r15
     pop     r13
     pop     r12
     pop     rbx
     push    rbx
     push    r12
     push    r13
+    push    r15
     call    emit_nl
+    pop     r15
     pop     r13
     pop     r12
     pop     rbx
+    add     r15, 8
     jmp     .struct_next
 .struct_recurse:
     mov     rdi, rax
     push    rbx
     push    r12
     push    r13
+    push    r15                         ; protect OUR running total across
+                                         ; the recursive call
     call    gen_init_push
+    pop     r15
+    add     r15, rax
     pop     r13
     pop     r12
     pop     rbx
@@ -393,6 +430,7 @@ gen_init_push:
     inc     rcx
     jmp     .struct_loop
 .done:
+    mov     rax, r15
     ret
 
 ; ===========================================================================

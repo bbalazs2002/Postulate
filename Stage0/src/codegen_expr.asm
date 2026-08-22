@@ -43,6 +43,8 @@ extern get_bool_type
 extern get_int_type
 extern bytes_equal
 extern ast_alloc_node
+extern gen_init_push
+extern gen_init_pop_store
 
 global gen_rvalue
 global gen_lvalue
@@ -274,8 +276,6 @@ s_add_rbx__len equ $ - s_add_rbx_
 
 msg_composite_as_scalar: db "cannot use a struct/array value directly as a scalar expression -- use its fields/elements, or copy it via a full assignment"
 msg_composite_as_scalar_len equ $ - msg_composite_as_scalar
-msg_composite_call_boundary: db "struct/array values cannot be passed as a call argument or returned from a function in this codegen phase yet"
-msg_composite_call_boundary_len equ $ - msg_composite_call_boundary
 
 s_mov_rdi_rsp: db "    mov     rdi, rsp"
 s_mov_rdi_rsp_len equ $ - s_mov_rdi_rsp
@@ -285,6 +285,14 @@ s_call_pf_: db "    call    pf_"
 s_call_pf__len equ $ - s_call_pf_
 s_add_rsp_: db "    add     rsp, "
 s_add_rsp__len equ $ - s_add_rsp_
+s_sub_rsp_: db "    sub     rsp, "
+s_sub_rsp__len equ $ - s_sub_rsp_
+s_mov_rbx_rsp: db "    mov     rbx, rsp"
+s_mov_rbx_rsp_len equ $ - s_mov_rbx_rsp
+s_lea_rbx_rsp_plus: db "    lea     rbx, [rsp + "
+s_lea_rbx_rsp_plus_len equ $ - s_lea_rbx_rsp_plus
+s_lea_rdx_rsp_plus: db "    lea     rdx, [rsp + "
+s_lea_rdx_rsp_plus_len equ $ - s_lea_rdx_rsp_plus
 
 section .text
 
@@ -570,9 +578,17 @@ emit_label_ref:
 
 ; ===========================================================================
 ; gen_lvalue: in rdi = expr node ptr. out: rax = the lvalue's type node
-; ptr. Emits code that leaves the lvalue's address in the emitted
-; program's rbx. Phase 1 scope: AST_EX_IDENT only (INDEX/FIELD/UNARY(*)
-; are deferred -- struct/array/pointer codegen, ld. codegen spec).
+; ptr; r8 = cleanup size in bytes (0 = nothing to free; nonzero = the
+; caller must, once it's fully done reading/copying via this address,
+; emit "add rsp, <r8>" -- Phase 3: an AST_EX_CALL lvalue reserves fresh
+; stack space for its composite return value and deliberately does NOT
+; free it here, since the caller still needs the address; r8 is how that
+; obligation gets handed back so nothing leaks. INDEX/FIELD propagate
+; whatever their base returned unchanged (the reservation, if any, lives
+; at the base's address, not at the computed field/element offset); every
+; other case is always 0 (an existing local's address, or a pointer's
+; own already-scalar value, never a fresh reservation). Emits code that
+; leaves the lvalue's address in the emitted program's rbx.
 ; Note on two worlds: this routine (like every routine in this file) uses
 ; rbx/r12-r15 as ITS OWN compile-time bookkeeping registers, per this
 ; codebase's universal convention -- entirely separate from "rbx" in the
@@ -591,6 +607,8 @@ gen_lvalue:
     je      .field
     cmp     rax, AST_EX_UNARY
     je      .unary_deref
+    cmp     rax, AST_EX_CALL
+    je      .call
     mov     rsi, msg_unsupported_expr
     mov     rdx, msg_unsupported_expr_len
     call    codegen_fail
@@ -598,6 +616,10 @@ gen_lvalue:
     mov     rdi, [rbx + AST_A_OFF]
     mov     rsi, [rbx + AST_B_OFF]
     call    gen_named_local_addr        ; nothing of ours needed after
+    xor     r8, r8                      ; existing local -- nothing to
+                                         ; free afterward (r8 is this
+                                         ; routine's third output, ld.
+                                         ; header below)
     jmp     .exit
 
 ; INDEX: gen_lvalue(base) -> rbx; push rbx; gen_rvalue(index) -> rax;
@@ -663,6 +685,15 @@ gen_lvalue:
     push    r12
     call    emit_nl
     pop     r12
+    push    r12
+    mov     rdi, rbx                    ; the INDEX node itself -- still
+                                         ; intact, protected throughout
+    call    lvalue_cleanup_size         ; -> rax = whatever the base's
+                                         ; own gen_lvalue would report;
+                                         ; pure query, propagated through
+                                         ; unchanged (ld. header)
+    pop     r12
+    mov     r8, rax
     mov     rax, [r12 + AST_A_OFF]      ; result type = element type
     jmp     .exit
 
@@ -710,10 +741,21 @@ gen_lvalue:
     call    emit_nl
     pop     r12
     pop     rbx
+    push    rbx
+    push    r12
+    mov     rdi, rbx                    ; the FIELD node itself -- still
+                                         ; intact, protected throughout
+    call    lvalue_cleanup_size         ; -> rax = whatever the base's
+                                         ; own gen_lvalue would report
+    pop     r12
+    pop     rbx
+    mov     r8, rax                     ; protect across field_type
+    push    r8
     mov     rdi, r12
     mov     rsi, [rbx + AST_B_OFF]
     mov     rdx, [rbx + AST_C_OFF]
     call    field_type                  ; -> rax = field's declared type
+    pop     r8
     jmp     .exit
 
 ; UNARY(*): the pointer's own VALUE already *is* the target address.
@@ -738,9 +780,137 @@ gen_lvalue:
     call    emit_nl
     pop     r12
     mov     rax, [r12 + AST_A_OFF]      ; result type = pointee type
+    xor     r8, r8                      ; the pointer's VALUE is the
+                                         ; address -- never a fresh
+                                         ; reservation
+    jmp     .exit
+
+; CALL (composite-returning only -- gen_rvalue's own .call dispatch
+; guards against a composite-returning USER call ever reaching
+; gen_user_call directly; this is the only path that does, ld. header).
+; Reserves space on the target's own stack for the callee's return value
+; BEFORE evaluating anything else, hands that reservation's address back
+; as this lvalue's result (via r8, deliberately NOT freeing it here --
+; ld. header), and lets gen_user_call wire it in as a hidden output-
+; pointer argument (emitted as "lea rdx, [rsp + N]" right before the
+; call, N = the compile-time-known total bytes gen_user_call itself
+; reserves for arguments -- computed there because DEST sits ABOVE that
+; region, untouched throughout argument evaluation, so no register needs
+; to carry the address across it).
+.call:
+    mov     rax, [rbx + AST_A_OFF]      ; callee IDENT node
+    mov     rdi, [rax + AST_A_OFF]      ; callee name_offset
+    mov     rsi, [rax + AST_B_OFF]      ; callee name_len
+    push    rbx
+    call    lookup_callable
+    pop     rbx
+    mov     r12, rax                    ; callable_table entry
+    mov     rdi, [r12 + CTE_RET_TYPE]
+    push    rbx
+    push    r12
+    call    type_size
+    pop     r12
+    pop     rbx
+    add     rax, 7
+    and     rax, ~7
+    mov     r13, rax                    ; size_rounded -- also our own
+                                         ; cleanup output later
+    mov     rsi, s_sub_rsp_
+    mov     rdx, s_sub_rsp__len
+    push    rbx
+    push    r12
+    push    r13
+    call    emit_str
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rax, r13
+    push    rbx
+    push    r12
+    push    r13
+    call    emit_dec
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    call    emit_nl                     ; reservation emitted: target rsp
+                                         ; now IS this call's return-value
+                                         ; destination
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rdi, rbx                    ; AST_EX_CALL node
+    mov     rsi, r12                    ; callable_table entry
+    push    r13
+    call    gen_user_call               ; -> rax(ours) = declared return
+                                         ; type; emits arg eval/push, the
+                                         ; hidden-output-pointer wiring,
+                                         ; the call itself, and its own
+                                         ; args-only cleanup -- net
+                                         ; effect: target rsp is back to
+                                         ; the reservation made just above
+    pop     r13
+    mov     r14, rax                    ; declared return type -- ours
+    mov     rsi, s_mov_rbx_rsp
+    mov     rdx, s_mov_rbx_rsp_len
+    push    r13
+    push    r14
+    call    emit_str
+    pop     r14
+    pop     r13
+    push    r13
+    push    r14
+    call    emit_nl
+    pop     r14
+    pop     r13
+    mov     rax, r14                    ; result type
+    mov     r8, r13                     ; cleanup = size_rounded
     jmp     .exit
 
 .exit:
+    ret
+
+; ===========================================================================
+; lvalue_cleanup_size: in rdi = expr node (anything gen_lvalue accepts).
+; out: rax = the exact number of bytes gen_lvalue would leave reserved
+; and NOT yet freed after computing this expression's address (0 for a
+; plain existing local or a dereferenced pointer; the rounded return-
+; type size of the innermost CALL when the expression -- or the base of
+; an INDEX/FIELD chain -- resolves through one). Pure compile-time
+; query, emits nothing -- mirrors gen_lvalue's own cleanup-propagation
+; rule exactly (ld. its header), without any of gen_lvalue's side
+; effects. Needed by gen_user_call's pre-pass, which must know a
+; composite argument's true stack footprint before emitting a single
+; instruction (ld. its own header).
+; ===========================================================================
+lvalue_cleanup_size:
+    mov     rbx, rdi
+    mov     rax, [rbx + AST_KIND_OFF]
+    cmp     rax, AST_EX_INDEX
+    je      .recurse_base
+    cmp     rax, AST_EX_FIELD
+    je      .recurse_base
+    cmp     rax, AST_EX_CALL
+    je      .call
+    ; AST_EX_IDENT / AST_EX_UNARY(*) -- always an existing local's
+    ; address or a pointer's own value; never a fresh reservation
+    xor     rax, rax
+    ret
+.recurse_base:
+    mov     rdi, [rbx + AST_A_OFF]      ; base -- AST_A_OFF for both
+                                         ; INDEX and FIELD
+    jmp     lvalue_cleanup_size         ; tail call
+.call:
+    mov     rax, [rbx + AST_A_OFF]      ; callee IDENT node
+    mov     rdi, [rax + AST_A_OFF]      ; callee name_offset
+    mov     rsi, [rax + AST_B_OFF]      ; callee name_len
+    call    lookup_callable
+    mov     rdi, [rax + CTE_RET_TYPE]
+    call    type_size
+    add     rax, 7
+    and     rax, ~7
     ret
 
 ; ===========================================================================
@@ -861,11 +1031,15 @@ gen_rvalue:
 ; were a plain scalar), then load it.
 .load_via_lvalue:
     mov     rdi, rbx
-    call    gen_lvalue                  ; -> rax = type; emits address calc
+    call    gen_lvalue                  ; -> rax = type; r8 = cleanup;
+                                         ; emits address calc
     mov     r12, rax
+    mov     r9, r8                      ; cleanup, protected via r9
     mov     rdi, r12
     push    r12
+    push    r9
     call    is_scalar_loadable_type
+    pop     r9
     pop     r12
     cmp     rax, 0
     jne     .load_ok
@@ -875,8 +1049,27 @@ gen_rvalue:
 .load_ok:
     mov     rdi, r12
     push    r12
+    push    r9
     call    emit_sized_load             ; emits "<mov/movsx/movzx> rax, ... [rbx]"
+    pop     r9
     pop     r12
+    cmp     r9, 0
+    je      .load_no_cleanup
+    mov     rsi, s_add_rsp_             ; free the temp this value was
+    mov     rdx, s_add_rsp__len         ; read out of, now that we're
+    push    r12                         ; done reading it (ld. gen_lvalue
+    push    r9                          ; header -- no leak)
+    call    emit_str
+    pop     r9
+    pop     r12
+    mov     rax, r9
+    push    r12
+    call    emit_dec
+    pop     r12
+    push    r12
+    call    emit_nl
+    pop     r12
+.load_no_cleanup:
     mov     rax, r12
     jmp     .exit
 
@@ -1206,6 +1399,26 @@ gen_rvalue:
     mov     r14, rax                    ; callable_table entry
     cmp     qword [r14 + CTE_IS_EXTERN], 0
     jne     .call_extern
+    mov     rax, [r14 + CTE_RET_TYPE]   ; 0 = void
+    cmp     rax, 0
+    je      .call_user
+    mov     rdi, rax
+    push    rbx
+    push    r14
+    call    is_scalar_loadable_type     ; gen_rvalue never returns a
+                                         ; composite type (ld. file
+                                         ; header) -- a composite-
+                                         ; returning user call is only
+                                         ; ever reachable via gen_lvalue's
+                                         ; own CALL case
+    pop     r14
+    pop     rbx
+    cmp     rax, 0
+    jne     .call_user
+    mov     rsi, msg_composite_as_scalar
+    mov     rdx, msg_composite_as_scalar_len
+    call    codegen_fail
+.call_user:
     mov     rdi, rbx                    ; AST_EX_CALL node
     mov     rsi, r14                    ; callable_table entry
     call    gen_user_call
@@ -1816,48 +2029,139 @@ gen_extern_call:
 ; ===========================================================================
 ; gen_user_call: internal. in rdi = AST_EX_CALL node, rsi = its resolved
 ; callable_table entry (is_extern = 0). out: rax = declared return type
-; (0 = void). Implements the custom calling convention Phase 1's spec
-; already fully decided: args evaluated right to left and pushed (one
-; padding push first if N is odd, so arg1 still lands exactly at [rsp]
-; after all N real args -- ld. "Calling convention"); mov rdi, rsp; mov
-; rsi, N; call pf_<name>; add rsp, <N*8 padded to 16>. Every argument
-; gen_rvalue hands back is already guaranteed scalar/pointer (ld.
-; gen_rvalue's own self-guarding, noted at .binary above) -- no separate
-; per-argument guard needed here, only the callee's own return type.
+; (0 = void). Phase 3: both composite arguments and a composite return
+; value are now supported, completing the calling convention (ld. codegen
+; spec Sec 2). Args evaluated right to left; a scalar argument is
+; evaluated (gen_rvalue) and pushed as before. A composite argument's
+; 8-byte slot holds an ADDRESS instead of a value: for a STRUCT_LIT/
+; ARRAY_LIT source, a fresh temp is reserved and materialized into (via
+; gen_init_push/gen_init_pop_store, its own address recovered via a
+; compile-time-known "[rsp + leaf_bytes]" offset -- ld. gen_init_push's
+; own header); for any other (lvalue-shaped) source, gen_lvalue's own
+; address is pushed DIRECTLY, with NO caller-side copy at all -- the
+; callee's own emit_param_copy (codegen_program.asm) does the by-value
+; copy on ITS side, so passing the existing address straight through is
+; already correct, and simpler. A composite return value's destination
+; is a reservation made by gen_lvalue's own .call case BEFORE this
+; routine ever runs (ld. there); this routine locates it via a compile-
+; time-known "[rsp + N]" offset (N = the exact total this routine
+; reserves for arguments, computed by the pre-pass below) and passes it
+; as a hidden output-pointer argument in rdx immediately before the
+; `call` -- no register needs to carry it across argument evaluation.
+;
+; Stack alignment: the pre-pass computes the EXACT total bytes this call
+; will reserve for its arguments (per argument: 8 for a scalar slot; 8 +
+; size_rounded for a composite slot pointing at a fresh literal-sourced
+; temp; 8 + lvalue_cleanup_size(arg) for a composite slot pointing at an
+; existing/call-sourced address -- ld. lvalue_cleanup_size) BEFORE
+; emitting anything, so the one-word pad-if-needed decision (every
+; component is a multiple of 8, so padding is always exactly 0 or 8) can
+; still be made up front, as before, even though the total is no longer
+; simply N*8.
 ; ===========================================================================
 gen_user_call:
     mov     rbx, rdi                    ; AST_EX_CALL node
     mov     r12, rsi                    ; callable_table entry
-
-    mov     rax, [r12 + CTE_RET_TYPE]   ; 0 = void
-    cmp     rax, 0
-    je      .ret_ok
-    mov     rdi, rax
-    push    rbx
-    push    r12
-    call    is_scalar_loadable_type
-    pop     r12
-    pop     rbx
-    cmp     rax, 0
-    jne     .ret_ok
-    mov     rsi, msg_composite_call_boundary
-    mov     rdx, msg_composite_call_boundary_len
-    call    codegen_fail
-.ret_ok:
     mov     r13, [rbx + AST_B_OFF]      ; args ptr
     mov     r14, [rbx + AST_C_OFF]      ; arg_count
 
-    mov     rax, r14
-    and     rax, 1
+    ; --- pre-pass: compute total_reserved_padded (r9), no emission ---
+    mov     rax, [r12 + CTE_SIG_PTR]
+    mov     r10, [rax + AST_C_OFF]      ; params ptr
+    xor     r9, r9                      ; running total
+    xor     r11, r11                    ; index
+.presize_loop:
+    cmp     r11, r14
+    jae     .presize_done
+    mov     rax, [r10 + r11*8]          ; AST_PARAM ptr
+    mov     rdi, [rax + AST_C_OFF]      ; declared type
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r9
+    push    r10
+    push    r11
+    call    is_scalar_loadable_type
+    pop     r11
+    pop     r10
+    pop     r9
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    cmp     rax, 0
+    je      .presize_composite
+    add     r9, 8
+    jmp     .presize_next
+.presize_composite:
+    mov     rax, [r13 + r11*8]          ; this argument's expr node
+    mov     rax, [rax + AST_KIND_OFF]
+    cmp     rax, AST_EX_STRUCT_LIT
+    je      .presize_literal
+    cmp     rax, AST_EX_ARRAY_LIT
+    je      .presize_literal
+    ; lvalue-shaped source
+    mov     rax, [r13 + r11*8]
+    mov     rdi, rax
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r9
+    push    r10
+    push    r11
+    call    lvalue_cleanup_size
+    pop     r11
+    pop     r10
+    pop     r9
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    add     r9, 8
+    add     r9, rax
+    jmp     .presize_next
+.presize_literal:
+    mov     rax, [r10 + r11*8]
+    mov     rdi, [rax + AST_C_OFF]      ; declared (composite) type
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r9
+    push    r10
+    push    r11
+    call    type_size
+    pop     r11
+    pop     r10
+    pop     r9
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    add     rax, 7
+    and     rax, ~7
+    add     r9, 8
+    add     r9, rax
+.presize_next:
+    inc     r11
+    jmp     .presize_loop
+.presize_done:
+    mov     rax, r9
+    and     rax, 15
     cmp     rax, 0
     je      .no_pad
+    add     r9, 8
     mov     rsi, s_push_rax             ; dummy padding, pushed FIRST so
     mov     rdx, s_push_rax_len         ; it ends up farthest from rsp --
     push    rbx
     push    r12
     push    r13
     push    r14
+    push    r9
     call    emit_str                    ; arg1 (pushed last) still lands
+    pop     r9
     pop     r14
     pop     r13
     pop     r12
@@ -1866,34 +2170,59 @@ gen_user_call:
     push    r12
     push    r13
     push    r14
+    push    r9
     call    emit_nl                     ; exactly at [rsp]
+    pop     r9
     pop     r14
     pop     r13
     pop     r12
     pop     rbx
 .no_pad:
+    ; r9 = total_reserved_padded -- this call's own arg region only,
+    ; EXCLUDING any composite return-value destination (that was
+    ; reserved by our caller, gen_lvalue's .call case, before we were
+    ; ever entered, and sits entirely above/outside this region)
+
     mov     r15, r14                    ; loop index, counts arg_count..1
 .push_loop:
     cmp     r15, 0
     je      .push_done
     dec     r15
-    mov     rdi, [r13 + r15*8]
-    push    rbx                         ; AST_EX_CALL node -- must survive
-                                         ; every call in this loop, since
-                                         ; .push_done reads it again for
-                                         ; the callee's name; gen_rvalue
-                                         ; clobbers its own rbx internally,
-                                         ; so this is NOT optional
-    push    r15
+    mov     rax, [r12 + CTE_SIG_PTR]
+    mov     rax, [rax + AST_C_OFF]      ; params ptr
+    mov     rax, [rax + r15*8]          ; AST_PARAM ptr
+    mov     rdi, [rax + AST_C_OFF]      ; declared type
+    push    rbx
     push    r12
     push    r13
     push    r14
-    call    gen_rvalue                  ; self-guarded; emits value into
-                                         ; the target program's rax
+    push    r15
+    push    r9
+    call    is_scalar_loadable_type
+    pop     r9
+    pop     r15
     pop     r14
     pop     r13
     pop     r12
+    pop     rbx
+    cmp     rax, 0
+    je      .arg_composite
+
+    ; --- SCALAR argument (unchanged from Phase 1/2) ---
+    mov     rdi, [r13 + r15*8]
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r9
+    call    gen_rvalue                  ; self-guarded; emits value into
+                                         ; the target program's rax
+    pop     r9
     pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
     pop     rbx
     mov     rsi, s_push_rax
     mov     rdx, s_push_rax_len
@@ -1902,7 +2231,9 @@ gen_user_call:
     push    r13
     push    r14
     push    r15
+    push    r9
     call    emit_str
+    pop     r9
     pop     r15
     pop     r14
     pop     r13
@@ -1913,12 +2244,288 @@ gen_user_call:
     push    r13
     push    r14
     push    r15
+    push    r9
     call    emit_nl
+    pop     r9
     pop     r15
     pop     r14
     pop     r13
     pop     r12
     pop     rbx
+    jmp     .push_next
+
+.arg_composite:
+    mov     rax, [r12 + CTE_SIG_PTR]
+    mov     rax, [rax + AST_C_OFF]
+    mov     rax, [rax + r15*8]
+    mov     rdi, [rax + AST_C_OFF]      ; declared (composite) type
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r9                          ; r9 (running total) must survive
+                                         ; every call for the rest of this
+                                         ; function -- never trust a
+                                         ; callee to leave it alone
+    call    type_size
+    pop     r9
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    add     rax, 7
+    and     rax, ~7
+    mov     r8, rax                     ; size_rounded for this param
+    mov     rax, [r13 + r15*8]          ; this argument's expr node
+    mov     rdx, [rax + AST_KIND_OFF]
+    cmp     rdx, AST_EX_STRUCT_LIT
+    je      .arg_literal
+    cmp     rdx, AST_EX_ARRAY_LIT
+    je      .arg_literal
+
+    ; --- lvalue-shaped composite argument: push its OWN address
+    ; directly, no caller-side copy at all -- the callee's own
+    ; emit_param_copy does the by-value copy on its side (ld. header) ---
+    mov     rdi, rax                    ; the argument expr node
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r9
+    call    gen_lvalue                  ; -> target rbx = its address
+    pop     r9
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rsi, s_push_rbx
+    mov     rdx, s_push_rbx_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r9
+    call    emit_str
+    pop     r9
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r9
+    call    emit_nl
+    pop     r9
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    jmp     .push_next
+
+.arg_literal:
+    ; r8 = size_rounded for this param -- protected throughout, nothing
+    ; above or below touches it until we're done with it here. r9
+    ; (running total) is likewise protected throughout, same rule.
+    mov     rsi, s_sub_rsp_
+    mov     rdx, s_sub_rsp__len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r8
+    push    r9
+    call    emit_str
+    pop     r9
+    pop     r8
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rax, r8
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r8
+    push    r9
+    call    emit_dec
+    pop     r9
+    pop     r8
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r8
+    push    r9
+    call    emit_nl                     ; reserved -- target rsp is now
+                                         ; this argument's own fresh temp
+    pop     r9
+    pop     r8
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rax, [r13 + r15*8]          ; the STRUCT_LIT/ARRAY_LIT node
+    mov     rdi, rax
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r8
+    push    r9
+    call    gen_init_push               ; -> rax = leaf_bytes; pushes
+                                         ; the leaves ON TOP of (below)
+                                         ; the reservation just made
+    pop     r9
+    pop     r8
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     r10, rax                    ; leaf_bytes
+    mov     rsi, s_lea_rbx_rsp_plus
+    mov     rdx, s_lea_rbx_rsp_plus_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r8
+    push    r9
+    push    r10
+    call    emit_str
+    pop     r10
+    pop     r9
+    pop     r8
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rax, r10
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r8
+    push    r9
+    call    emit_dec
+    pop     r9
+    pop     r8
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rsi, s_close_bracket
+    mov     rdx, s_close_bracket_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r8
+    push    r9
+    call    emit_str
+    pop     r9
+    pop     r8
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r8
+    push    r9
+    call    emit_nl                     ; target rbx = this literal's
+                                         ; fresh temp address (recovered
+                                         ; via the known leaf_bytes
+                                         ; offset -- ld. gen_init_push)
+    pop     r9
+    pop     r8
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rax, [r12 + CTE_SIG_PTR]
+    mov     rax, [rax + AST_C_OFF]
+    mov     rax, [rax + r15*8]
+    mov     rsi, [rax + AST_C_OFF]      ; expected type = declared param
+                                         ; type
+    mov     rdi, [r13 + r15*8]          ; the literal node
+    xor     rdx, rdx                    ; accumulated offset = 0
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r9
+    call    gen_init_pop_store          ; pops the leaves, stores into
+                                         ; the temp via target rbx
+    pop     r9
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rsi, s_push_rbx
+    mov     rdx, s_push_rbx_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r9
+    call    emit_str
+    pop     r9
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r9
+    call    emit_nl
+    pop     r9
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+
+.push_next:
     jmp     .push_loop
 .push_done:
     mov     rsi, s_mov_rdi_rsp
@@ -1926,14 +2533,18 @@ gen_user_call:
     push    rbx
     push    r12
     push    r14
+    push    r9
     call    emit_str
+    pop     r9
     pop     r14
     pop     r12
     pop     rbx
     push    rbx
     push    r12
     push    r14
+    push    r9
     call    emit_nl
+    pop     r9
     pop     r14
     pop     r12
     pop     rbx
@@ -1942,7 +2553,9 @@ gen_user_call:
     push    rbx
     push    r12
     push    r14
+    push    r9
     call    emit_str
+    pop     r9
     pop     r14
     pop     r12
     pop     rbx
@@ -1950,24 +2563,91 @@ gen_user_call:
     push    rbx
     push    r12
     push    r14
+    push    r9
     call    emit_dec
+    pop     r9
     pop     r14
     pop     r12
     pop     rbx
     push    rbx
     push    r12
     push    r14
+    push    r9
     call    emit_nl
+    pop     r9
     pop     r14
     pop     r12
     pop     rbx
+
+    ; --- composite-return wiring: emitted only if the callee's declared
+    ; return type is composite -- detected fresh here (r12 still valid,
+    ; unrelated to whichever caller reached us, ld. header) ---
+    mov     rax, [r12 + CTE_RET_TYPE]   ; 0 = void
+    cmp     rax, 0
+    je      .no_out_ptr
+    mov     rdi, rax
+    push    rbx
+    push    r12
+    push    r14
+    push    r9
+    call    is_scalar_loadable_type
+    pop     r9
+    pop     r14
+    pop     r12
+    pop     rbx
+    cmp     rax, 0
+    jne     .no_out_ptr
+    mov     rsi, s_lea_rdx_rsp_plus
+    mov     rdx, s_lea_rdx_rsp_plus_len
+    push    rbx
+    push    r12
+    push    r14
+    push    r9
+    call    emit_str
+    pop     r9
+    pop     r14
+    pop     r12
+    pop     rbx
+    mov     rax, r9
+    push    rbx
+    push    r12
+    push    r14
+    push    r9
+    call    emit_dec
+    pop     r9
+    pop     r14
+    pop     r12
+    pop     rbx
+    mov     rsi, s_close_bracket
+    mov     rdx, s_close_bracket_len
+    push    rbx
+    push    r12
+    push    r14
+    push    r9
+    call    emit_str
+    pop     r9
+    pop     r14
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r14
+    push    r9
+    call    emit_nl
+    pop     r9
+    pop     r14
+    pop     r12
+    pop     rbx
+.no_out_ptr:
 
     mov     rsi, s_call_pf_
     mov     rdx, s_call_pf__len
     push    rbx
     push    r12
     push    r14
+    push    r9
     call    emit_str
+    pop     r9
     pop     r14
     pop     r12
     pop     rbx
@@ -1977,32 +2657,28 @@ gen_user_call:
     mov     rdx, [rax + AST_B_OFF]
     push    r12
     push    r14
+    push    r9
     call    emit_str                    ; rbx (AST_EX_CALL node) is not
                                          ; read again after this
+    pop     r9
     pop     r14
     pop     r12
     push    r12
     push    r14
+    push    r9
     call    emit_nl
+    pop     r9
     pop     r14
     pop     r12
 
-    mov     rax, r14
-    imul    rax, rax, 8
-    add     rax, 15
-    and     rax, ~15                    ; N*8 padded up to a multiple of
-                                         ; 16 -- correctly (N+1)*8 when N
-                                         ; is odd, matching the padding
-                                         ; push above
-    mov     r13, rax                    ; padded cleanup size
     mov     rsi, s_add_rsp_
     mov     rdx, s_add_rsp__len
     push    r12
-    push    r13
+    push    r9
     call    emit_str
-    pop     r13
+    pop     r9
     pop     r12
-    mov     rax, r13
+    mov     rax, r9
     push    r12
     call    emit_dec
     pop     r12

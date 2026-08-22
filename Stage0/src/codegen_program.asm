@@ -45,14 +45,21 @@ extern codegen_fail
 extern emit_str
 extern emit_dec
 extern emit_nl
+extern emit_rep_movsb_copy
 
 global local_stack_offset
 global compute_local_offsets
 global gen_function
 global gen_program
+global cur_func_return_type
+global cur_func_out_ptr_offset
 
 section .bss
 local_offsets: resq MAX_LIST_ARITY
+; set once by gen_function, right before it calls gen_func_block; read by
+; codegen_stmt.asm's gen_stmt .return_stmt case (ld. gen_function header)
+cur_func_return_type: resq 1
+cur_func_out_ptr_offset: resq 1
 
 section .data
 str_main: db "main"
@@ -61,10 +68,6 @@ msg_no_main: db "no 'main' function found -- exactly one function must be named 
 msg_no_main_len equ $ - msg_no_main
 msg_main_has_params: db "the entry point 'main' must have no parameters"
 msg_main_has_params_len equ $ - msg_main_has_params
-msg_composite_return_unsupported: db "struct/array return types are not supported by this codegen phase yet"
-msg_composite_return_unsupported_len equ $ - msg_composite_return_unsupported
-msg_composite_param_unsupported: db "struct/array parameter types are not supported by this codegen phase yet (a value may not cross a function-call boundary)"
-msg_composite_param_unsupported_len equ $ - msg_composite_param_unsupported
 
 s_pf_prefix: db "pf_"
 s_pf_prefix_len equ $ - s_pf_prefix
@@ -128,6 +131,17 @@ s_comma_eax_nl: db "], eax", 10
 s_comma_eax_nl_len equ $ - s_comma_eax_nl
 s_comma_rax_nl: db "], rax", 10
 s_comma_rax_nl_len equ $ - s_comma_rax_nl
+s_comma_rdx_nl: db "], rdx", 10
+s_comma_rdx_nl_len equ $ - s_comma_rdx_nl
+
+s_push_rdi: db "    push    rdi", 10
+s_push_rdi_len equ $ - s_push_rdi
+s_pop_rdi: db "    pop     rdi", 10
+s_pop_rdi_len equ $ - s_pop_rdi
+s_mov_rsi_rdi_plus: db "    mov     rsi, [rdi + "
+s_mov_rsi_rdi_plus_len equ $ - s_mov_rsi_rdi_plus
+s_lea_rdi_rbp_minus: db "    lea     rdi, [rbp - "
+s_lea_rdi_rbp_minus_len equ $ - s_lea_rdi_rbp_minus
 
 section .text
 
@@ -188,14 +202,33 @@ compute_local_offsets:
 ; ===========================================================================
 ; emit_param_copy: internal. in rdi = param's declared type, rsi = its
 ; byte offset in the incoming arg block ((i-1)*8 relabeled 0-based: i*8
-; for the i-th param, 0-based), rdx = its own local stack offset. Emits a
-; sized load from "[rdi + <arg offset>]" into rax, then a sized store into
-; "[rbp - <local offset>]" -- the prologue's per-param copy step (ld.
-; "Stack frame layout").
+; for the i-th param, 0-based), rdx = its own local stack offset.
+; Scalar/pointer: emits a sized load from "[rdi + <arg offset>]" into
+; rax, then a sized store into "[rbp - <local offset>]" -- the
+; prologue's per-param copy step (ld. "Stack frame layout"). Composite
+; (Phase 3): the incoming slot holds a POINTER instead of a value (ld.
+; gen_user_call's own header) -- copies `size` bytes FROM [that pointer]
+; into this function's own local slot via rep movsb, giving this
+; function a true, independent-by-value copy (mirrors the already-built
+; p2 := p1; copy path). Either way, target rdi (the incoming-args-base
+; pointer, needed by every OTHER param's own copy in gen_function's
+; loop) is left exactly as it was found -- the composite branch
+; explicitly saves/restores it around repurposing it as rep movsb's
+; destination register.
 ; ===========================================================================
 emit_param_copy:
     mov     r12, rsi                     ; arg byte offset
     mov     r13, rdx                     ; local stack offset
+    push    rdi
+    push    r12
+    push    r13
+    call    is_scalar_loadable_type
+    pop     r13
+    pop     r12
+    pop     rdi
+    cmp     rax, 0
+    je      .composite
+
     push    rdi
     push    r12
     push    r13
@@ -331,53 +364,153 @@ emit_param_copy:
 .done:
     ret
 
+.composite:
+    push    rdi                          ; declared type -- protect
+    push    r12                          ; across type_size
+    push    r13
+    call    type_size
+    pop     r13
+    pop     r12
+    pop     rdi
+    mov     rbx, rax                     ; size
+
+    mov     rsi, s_push_rdi
+    mov     rdx, s_push_rdi_len
+    push    rbx
+    push    r12
+    push    r13
+    call    emit_str                     ; protect the incoming-args-
+    pop     r13                          ; base pointer -- we're about
+    pop     r12                          ; to repurpose target rdi below
+    pop     rbx
+
+    mov     rsi, s_mov_rsi_rdi_plus
+    mov     rdx, s_mov_rsi_rdi_plus_len
+    push    rbx
+    push    r12
+    push    r13
+    call    emit_str
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rax, r12
+    push    rbx
+    push    r13
+    call    emit_dec
+    pop     r13
+    pop     rbx
+    mov     rsi, s_close_bracket_nl
+    mov     rdx, s_close_bracket_nl_len
+    push    rbx
+    push    r13
+    call    emit_str                     ; target rsi = source pointer
+    pop     r13                          ; (the value this argument's
+    pop     rbx                          ; slot actually holds)
+
+    mov     rsi, s_lea_rdi_rbp_minus
+    mov     rdx, s_lea_rdi_rbp_minus_len
+    push    rbx
+    push    r13
+    call    emit_str
+    pop     r13
+    pop     rbx
+    mov     rax, r13
+    push    rbx
+    call    emit_dec
+    pop     rbx
+    mov     rsi, s_close_bracket_nl
+    mov     rdx, s_close_bracket_nl_len
+    push    rbx
+    call    emit_str                     ; target rdi = this local's own
+    pop     rbx                          ; slot (clobbers the incoming-
+                                          ; args-base, saved above)
+
+    mov     rdi, rbx
+    call    emit_rep_movsb_copy
+
+    mov     rsi, s_pop_rdi
+    mov     rdx, s_pop_rdi_len
+    call    emit_str                     ; restore the incoming-args-
+    ret                                  ; base pointer for the next param
+
 ; ===========================================================================
 ; gen_function: in rdi = AST_FUNCTION ptr. Rebuilds this function's local
 ; table + stack offsets, then emits its pf_<name> label, prologue (incl.
-; per-param copy), body, and epilogue. Rejects (codegen_fail) a
-; composite return type outright -- a struct/array value may never cross
-; a function-call boundary this phase (ld. file header).
+; per-param copy), body, and epilogue. Phase 3: both a composite return
+; type and composite param types are now accepted -- a composite param's
+; incoming slot holds a POINTER (ld. emit_param_copy's composite branch,
+; which copies FROM it, giving this function its own independent-by-
+; value copy); a composite return type additionally reserves one hidden,
+; always-8-byte frame slot (immediately below the user-visible locals,
+; sized into the same prologue "sub rsp") holding the incoming output
+; pointer (target rdx at function entry, per the calling convention),
+; saved there right after the prologue -- before ANYTHING else in this
+; function's body gets a chance to clobber rdx -- and threaded down into
+; gen_func_block/gen_block/gen_stmt (rsi = declared return type, rdx =
+; this hidden slot's offset, 0/0 for void or a scalar return -- ld.
+; codegen_stmt.asm's .return_stmt) so a composite RETURN statement knows
+; where to write its result.
 ; ===========================================================================
 gen_function:
     mov     rbx, rdi                     ; AST_FUNCTION node
     mov     r12, [rbx + AST_A_OFF]       ; signature ptr
-
-    mov     rax, [rbx + AST_B_OFF]       ; return type, 0 = void
-    cmp     rax, 0
-    je      .ret_ok
-    mov     rdi, rax
-    push    rbx
-    push    r12
-    call    is_scalar_loadable_type
-    pop     r12
-    pop     rbx
-    cmp     rax, 0
-    jne     .ret_ok
-    mov     rsi, msg_composite_return_unsupported
-    mov     rdx, msg_composite_return_unsupported_len
-    call    codegen_fail
-.ret_ok:
+    mov     r8, [rbx + AST_B_OFF]        ; declared return type, 0 = void
 
     mov     rdi, r12
     mov     rsi, [rbx + AST_C_OFF]       ; body (func_block)
     push    rbx
     push    r12
+    push    r8
     call    build_local_table
+    pop     r8
     pop     r12
     pop     rbx
     push    rbx
     push    r12
+    push    r8
     call    compute_local_offsets
+    pop     r8
     pop     r12
     pop     rbx
-    mov     r13, rax                     ; locals_size
+    mov     r13, rax                     ; locals_size (already rounded
+                                          ; to 16)
+
+    xor     r9, r9                       ; hidden_slot_offset, 0 = none
+    cmp     r8, 0
+    je      .ret_scalar_or_void
+    mov     rdi, r8
+    push    rbx
+    push    r12
+    push    r13
+    push    r8
+    call    is_scalar_loadable_type
+    pop     r8
+    pop     r13
+    pop     r12
+    pop     rbx
+    cmp     rax, 0
+    jne     .ret_scalar_or_void
+    ; composite return: one extra hidden 8-byte slot, right after the
+    ; user-visible locals; total prologue reservation re-rounded to 16
+    mov     r9, r13
+    add     r9, 8                        ; hidden_slot_offset -- slot is
+                                          ; at [rbp - r9]
+    mov     rax, r9
+    add     rax, 15
+    and     rax, ~15
+    mov     r13, rax                     ; new prologue reservation size
+.ret_scalar_or_void:
 
     mov     rsi, s_pf_prefix
     mov     rdx, s_pf_prefix_len
     push    rbx
     push    r12
     push    r13
+    push    r8
+    push    r9
     call    emit_str
+    pop     r9
+    pop     r8
     pop     r13
     pop     r12
     pop     rbx
@@ -388,7 +521,11 @@ gen_function:
     push    rbx
     push    r12
     push    r13
+    push    r8
+    push    r9
     call    emit_str
+    pop     r9
+    pop     r8
     pop     r13
     pop     r12
     pop     rbx
@@ -397,7 +534,11 @@ gen_function:
     push    rbx
     push    r12
     push    r13
+    push    r8
+    push    r9
     call    emit_str
+    pop     r9
+    pop     r8
     pop     r13
     pop     r12
     pop     rbx
@@ -406,7 +547,11 @@ gen_function:
     push    rbx
     push    r12
     push    r13
+    push    r8
+    push    r9
     call    emit_str
+    pop     r9
+    pop     r8
     pop     r13
     pop     r12
     pop     rbx
@@ -415,7 +560,11 @@ gen_function:
     push    rbx
     push    r12
     push    r13
+    push    r8
+    push    r9
     call    emit_str
+    pop     r9
+    pop     r8
     pop     r13
     pop     r12
     pop     rbx
@@ -426,27 +575,87 @@ gen_function:
     push    rbx
     push    r12
     push    r13
+    push    r8
+    push    r9
     call    emit_str
+    pop     r9
+    pop     r8
     pop     r13
     pop     r12
     pop     rbx
     mov     rax, r13
     push    rbx
     push    r12
+    push    r13
+    push    r8
+    push    r9
     call    emit_dec
+    pop     r9
+    pop     r8
+    pop     r13
     pop     r12
     pop     rbx
     push    rbx
     push    r12
+    push    r13
+    push    r8
+    push    r9
     call    emit_nl
+    pop     r9
+    pop     r8
+    pop     r13
     pop     r12
     pop     rbx
 .no_locals:
 
+    cmp     r9, 0
+    je      .no_out_ptr_save
+    mov     rsi, s_mov_qword_rbp_minus
+    mov     rdx, s_mov_qword_rbp_minus_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r8
+    push    r9
+    call    emit_str
+    pop     r9
+    pop     r8
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rax, r9
+    push    rbx
+    push    r12
+    push    r13
+    push    r8
+    push    r9
+    call    emit_dec
+    pop     r9
+    pop     r8
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rsi, s_comma_rdx_nl
+    mov     rdx, s_comma_rdx_nl_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r8
+    push    r9
+    call    emit_str                     ; incoming output pointer saved
+                                          ; -- before anything else in
+                                          ; this function's body can
+                                          ; clobber target rdx
+    pop     r9
+    pop     r8
+    pop     r13
+    pop     r12
+    pop     rbx
+.no_out_ptr_save:
+
     ; per-param copy: local_table[0 .. param_count) are exactly the
     ; params, in order (build_local_table adds params before decls). r12
-    ; (signature ptr) is not read again anywhere after this point, so it
-    ; needs no further protection.
+    ; (signature ptr) is read once more just below, then not again.
     mov     r14, [r12 + AST_C_OFF]       ; params ptr
     mov     r13, [r12 + AST_D_OFF]       ; param_count (locals_size no
                                           ; longer needed)
@@ -454,26 +663,6 @@ gen_function:
 .param_loop:
     cmp     r15, r13
     jae     .params_done
-    mov     rax, [r14 + r15*8]           ; AST_PARAM ptr
-    mov     rdi, [rax + AST_C_OFF]       ; declared type
-    push    rbx
-    push    r13
-    push    r14
-    push    r15
-    call    is_scalar_loadable_type      ; params cross the call boundary
-                                          ; (unlike plain decls, ld. file
-                                          ; header) -- must stay scalar/
-                                          ; pointer this phase
-    pop     r15
-    pop     r14
-    pop     r13
-    pop     rbx
-    cmp     rax, 0
-    jne     .param_type_ok
-    mov     rsi, msg_composite_param_unsupported
-    mov     rdx, msg_composite_param_unsupported_len
-    call    codegen_fail
-.param_type_ok:
     mov     rax, r15
     imul    rax, rax, LOCAL_ENTRY_SIZE
     lea     rax, [local_table + rax]     ; this param's local_table entry
@@ -482,7 +671,11 @@ gen_function:
     push    r13
     push    r14
     push    r15
+    push    r8
+    push    r9
     call    local_stack_offset           ; -> rax = local stack offset
+    pop     r9
+    pop     r8
     pop     r15
     pop     r14
     pop     r13
@@ -500,7 +693,11 @@ gen_function:
     push    r13
     push    r14
     push    r15
+    push    r8
+    push    r9
     call    emit_param_copy
+    pop     r9
+    pop     r8
     pop     r15
     pop     r14
     pop     r13
@@ -509,6 +706,18 @@ gen_function:
     inc     r15
     jmp     .param_loop
 .params_done:
+    ; gen_stmt's .return_stmt (codegen_stmt.asm) needs to know this
+    ; function's declared return type and, if composite, where the
+    ; hidden output-pointer slot is -- handed over via these two module-
+    ; level globals (set here, once, before gen_func_block ever runs)
+    ; rather than threaded as parameters through gen_func_block/gen_block
+    ; /gen_stmt's own call chain: gen_function is never reentrant (a
+    ; function body never triggers codegen of another function's body
+    ; mid-flight, ld. gen_program), so there is exactly one live value
+    ; at a time -- no risk of one function's return context leaking into
+    ; another's.
+    mov     [cur_func_return_type], r8
+    mov     [cur_func_out_ptr_offset], r9
     mov     rdi, [rbx + AST_C_OFF]       ; body -- rbx's last use
     call    gen_func_block
 
