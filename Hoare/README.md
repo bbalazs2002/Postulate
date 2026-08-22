@@ -141,6 +141,49 @@ identical to before this existed. This is debug/test-only instrumentation
 for the compiler's own regression suite, not a language feature: Postulate
 source has no way to opt into it, and it adds no cost to a normal build.
 
+## Release image
+
+`Dockerfile.release` packages just the compiler and what `./hoare` needs
+to run it — `build/codegen`, the `hoare` script, `nasm`/`ld`/`bash`, and
+the language reference — for other developers who just want to compile
+Postulate programs, not build Hoare from source or run its test suite.
+Nothing from the dev/test toolchain (`build/lexer`/`build/parser`/
+`build/checker`, the `.asm` sources, `tests/`) is present. It's built
+`FROM` the already fully-tested dev image (`postulate-hoare` above must
+exist first), so a release is always exactly what the full test suite
+just verified — no separate logic of its own.
+
+Build from the **repository root** (the context needs to see both
+`Hoare/` and `docs/`):
+
+```powershell
+docker build -t postulate-hoare Hoare
+docker build -f Hoare/Dockerfile.release -t postulate-hoare-release .
+```
+
+Use — `hoare` is the image's `ENTRYPOINT`, and `WORKDIR` is `/work`, so
+no `--entrypoint`/`-w` override is needed, unlike the dev image below:
+
+```powershell
+docker run --rm -v ${PWD}:/work postulate-hoare-release test.ptl
+```
+
+**Windows-host bind-mount note**: Docker Desktop's host bind mounts don't
+always reflect a container-side `chmod +x` back onto the host filesystem
+(NTFS has no native Unix executable bit) — if the produced binary won't
+run directly from PowerShell/Bash on the host, run it from inside the
+container instead (`docker run --rm -v ${PWD}:/work --entrypoint sh
+postulate-hoare-release -c "hoare test.ptl -o /tmp/out && /tmp/out"`), or
+copy it out with `docker cp` first.
+
+The language reference lives inside the image at
+`/opt/hoare/docs/postulate_v0_language_reference.md`; pull a local copy
+with:
+
+```powershell
+docker run --rm --entrypoint cat postulate-hoare-release /opt/hoare/docs/postulate_v0_language_reference.md > language_reference.md
+```
+
 ## Run
 
 ```powershell
@@ -202,6 +245,9 @@ set of forms.
 ## Layout
 
 ```
+hoare                  the unified compiler CLI (see "Compiling a program")
+Dockerfile              dev/test image (see "Build and test")
+Dockerfile.release       release image (see "Release image")
 src/config.inc        size constants (buffers, AST arena, list-arity cap)
 src/tokens.inc         token kind constants + 32-byte token struct layout
 src/lexer.asm            lex_next -- pure tokenizer, no syscalls, shared by all binaries

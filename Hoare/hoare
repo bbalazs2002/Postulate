@@ -11,7 +11,12 @@
 # Linux toolchain), not directly on a Windows host -- see README.md.
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# readlink -f resolves through a symlink (e.g. /usr/local/bin/hoare ->
+# /opt/hoare/hoare in the release image, see Dockerfile.release) to the
+# real script path, so build/codegen is still found relative to where
+# this file actually lives, not wherever it was invoked from.
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 CODEGEN="$SCRIPT_DIR/build/codegen"
 
 usage() {
