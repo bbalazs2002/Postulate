@@ -1,8 +1,9 @@
 # Hoare — the Postulate Stage 0 bootstrap compiler
 
 Four standalone, Docker-built, Docker-tested x86_64 NASM binaries — this
-directory *is* the Stage 0 compiler, named **Hoare**, and the first steps
-of what will become the unified **`hoare`** compiler CLI:
+directory *is* the Stage 0 compiler, named **Hoare** — plus the unified
+**`./hoare`** CLI (see "Compiling a program" below) that wraps them all
+into one command:
 
 - **`build/lexer`** — reads a Postulate source file on stdin, writes a text
   token dump to stdout. See
@@ -63,6 +64,54 @@ steps — a failing test fails the build:
   the entire `tests/codegen_cases/` suite recompiled with the flag on and
   re-executed, proving none of the real, working test programs leave any
   stack corruption behind.
+- `scripts/run_hoare_cli_tests.sh` — smoke-tests the `./hoare` CLI itself
+  (see "Compiling a program" below): a successful compile-and-run, the
+  same with `--stack-trace`, a codegen-rejected input's exit code
+  propagating correctly without attempting to assemble/link garbage, and
+  basic usage-error handling.
+
+## Compiling a program
+
+`./hoare` is the single command that replaces the four-stage manual
+pipeline (`build/codegen` → `nasm` → `ld`) end to end — it parses,
+checks, generates, assembles, and links one `.ptl` file into a runnable
+ELF binary:
+
+```bash
+./hoare test.ptl              # -> ./test
+./test
+```
+
+```
+usage: hoare <file.ptl> [-o <output>] [--stack-trace]
+  -o <output>     output binary path (default: <file> with .ptl stripped)
+  --stack-trace   compile with the debug-only stack-corruption self-check
+                  (POSTULATE_STACK_CHECK=1 -- see "Stack-corruption self-check")
+```
+
+It needs `nasm`/`ld` on `PATH` and `build/codegen` already built (same
+requirement as every script above) — run it from inside the Docker image
+or an equivalent Linux toolchain, not directly on a Windows host. From a
+Windows host via Docker, bind-mount your working directory in and run it
+there:
+
+```powershell
+docker run --rm -v ${PWD}:/work -w /work --entrypoint /workspace/hoare postulate-hoare /work/test.ptl
+```
+
+**`hoare`'s own exit codes** (distinct from `build/codegen`'s 0-4 and the
+runtime self-check's 112/113 below — these three only ever come from the
+wrapper script itself, before or after the underlying binaries run):
+
+| Code | Meaning |
+|---|---|
+| `5` | `nasm` rejected the generated assembly — an internal Hoare bug (the checked-valid program's codegen is wrong), not a problem with the input. |
+| `6` | `ld` failed to link the generated object — likewise an internal Hoare bug. |
+| `64` | Usage error (missing/nonexistent input file, bad flag) — `build/codegen` never ran. |
+
+Any other exit code (`0`-`4`, or `112`/`113` under `--stack-trace`) is
+`build/codegen`'s own, passed straight through unchanged — see "Exit
+codes" below.
 
 ## Stack-corruption self-check
 
