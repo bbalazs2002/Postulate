@@ -940,16 +940,6 @@ produces a clear diagnostic rather than a confusing surprise.
 still the intended, normative behavior — these are toolchain gaps, not
 sanctioned language behavior to rely on):
 
-- Arithmetic/bitwise operators (§3.2, §3.3) are currently only checked
-  for both-operands-same-type, not for both-operands-being-an-integer-
-  type — e.g. `true + false` is not yet rejected at compile time the
-  way it should be. Don't write code that depends on this; treat §3.2's
-  operand-type rule as binding.
-- Comparison operators (§3.4) on struct/array-typed operands are
-  likewise not yet rejected at the type-checking stage, even though
-  they are not meaningfully implemented — such a program currently
-  fails at code-generation time (`codegen error`, exit code 4) rather
-  than at the earlier, more specific type-checking stage (exit code 3).
 - `main`'s return type is not checked to be `void`/scalar (§6) — nothing
   currently stops you from writing `function main() : SomeStruct`. This
   is not merely unsupported: the process entry point (`_start`) always

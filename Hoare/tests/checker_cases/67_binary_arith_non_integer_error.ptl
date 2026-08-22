@@ -1,0 +1,4 @@
+function main() : int32 {
+  mut b: bool := true + false;
+  return 0;
+}

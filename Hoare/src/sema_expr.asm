@@ -55,6 +55,8 @@ msg_expected_integer:         db "expected an integer type"
 msg_expected_integer_len      equ $ - msg_expected_integer
 msg_binary_type_mismatch:        db "binary operator operand type mismatch"
 msg_binary_type_mismatch_len     equ $ - msg_binary_type_mismatch
+msg_compare_composite:            db "cannot compare struct/array values"
+msg_compare_composite_len         equ $ - msg_compare_composite
 msg_deref_non_pointer:               db "cannot dereference a non-pointer type"
 msg_deref_non_pointer_len            equ $ - msg_deref_non_pointer
 msg_addr_of_non_lvalue:                 db "'&' requires an lvalue operand"
@@ -603,8 +605,24 @@ check_expr:
     mov     rdi, rax
     jmp     sema_report_finish
 .binary_compare_ok:
+    mov     rax, [r13 + AST_KIND_OFF]
+    cmp     rax, AST_TY_ARRAY
+    je      .binary_compare_composite
+    mov     rdi, r13
+    call    resolve_struct_type
+    cmp     rax, 0
+    jne     .binary_compare_composite
     call    get_bool_type
     jmp     .exit
+.binary_compare_composite:
+    call    sema_report_begin
+    mov     rsi, msg_compare_composite
+    mov     rdx, msg_compare_composite_len
+    call    err_append_str
+    mov     rdi, rbx
+    call    find_offset
+    mov     rdi, rax
+    jmp     sema_report_finish
 
 ; Arithmetic/bitwise/shift: whichever operand is NOT a bare literal
 ; anchors the other's type (checked first, its result used as the other
@@ -649,6 +667,19 @@ check_expr:
     mov     rdi, rax
     jmp     sema_report_finish
 .binary_arith_ok:
+    mov     rdi, r13
+    call    is_integer_type
+    cmp     rax, 0
+    jne     .binary_arith_int_ok
+    call    sema_report_begin
+    mov     rsi, msg_expected_integer
+    mov     rdx, msg_expected_integer_len
+    call    err_append_str
+    mov     rdi, rbx
+    call    find_offset
+    mov     rdi, rax
+    jmp     sema_report_finish
+.binary_arith_int_ok:
     mov     rax, r13
     jmp     .exit
 
