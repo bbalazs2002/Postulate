@@ -6,6 +6,14 @@
 ; field-lookup scan pattern (same linear-scan-over-AST_FIELD_DECL shape),
 ; reused as a pattern only, not as shared code (different return value:
 ; a byte offset, not a type pointer).
+;
+; No routine here has a prologue/epilogue save of rbx/r12-r15: since
+; every caller is now responsible for protecting its own values around
+; each individual call it makes (ld. codegen_composite.asm's file
+; header), a callee no longer needs to preserve its caller's incoming
+; register contents on its own initiative -- only the still-present
+; per-call push/pop pairs inside a routine's own body, protecting ITS
+; OWN locals across ITS OWN nested calls, remain meaningful.
 
 %include "config.inc"
 %include "tokens.inc"
@@ -37,7 +45,6 @@ section .text
 ; type_size: in rdi = AST_TY_* node ptr. out: rax = size in bytes.
 ; ===========================================================================
 type_size:
-    push    rbx
     mov     rbx, rdi
     mov     rax, [rbx + AST_KIND_OFF]
     cmp     rax, AST_TY_POINTER
@@ -81,7 +88,6 @@ type_size:
     mov     rcx, [rbx + AST_B_OFF]      ; element count
     imul    rax, rcx
 .done:
-    pop     rbx
     ret
 
 ; ===========================================================================
@@ -110,10 +116,6 @@ is_signed_type:
 ; field's size, declaration order.
 ; ===========================================================================
 struct_size:
-    push    rbx
-    push    r12
-    push    r13
-    push    r14
     mov     rbx, rdi
     mov     r12, [rbx + AST_C_OFF]      ; fields ptr
     mov     r13, [rbx + AST_D_OFF]      ; field_count
@@ -141,10 +143,6 @@ struct_size:
     jmp     .loop
 .done:
     mov     rax, r14
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
     ret
 
 ; ===========================================================================
@@ -154,11 +152,6 @@ struct_size:
 ; (already validated by the semantic checker before codegen ever runs).
 ; ===========================================================================
 field_offset:
-    push    rbx
-    push    r12
-    push    r13
-    push    r14
-    push    r15
     mov     rbx, rdi                    ; struct decl (only read once,
                                          ; below -- never needs protecting
                                          ; across a call)
@@ -226,21 +219,11 @@ field_offset:
     jmp     .loop
 .found:
     mov     rax, r15
-    pop     r15
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
     ret
 .not_found:
     ; defensive only -- callers only ever invoke field_offset for a name
     ; already validated to exist on this struct by the semantic checker
     xor     rax, rax
-    pop     r15
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
     ret
 
 ; ===========================================================================
@@ -253,9 +236,6 @@ field_offset:
 ; separately from field_offset's address-arithmetic use there.
 ; ===========================================================================
 field_type:
-    push    rbx
-    push    r12
-    push    r13
     mov     rbx, rdi                    ; struct decl
     mov     r12, rsi                    ; query name_offset
     mov     r13, rdx                    ; query name_len
@@ -298,15 +278,9 @@ field_type:
     jmp     .loop
 .found:
     mov     rax, [rax + AST_C_OFF]      ; field's declared type
-    pop     r13
-    pop     r12
-    pop     rbx
     ret
 .not_found:
     xor     rax, rax
-    pop     r13
-    pop     r12
-    pop     rbx
     ret
 
 ; ===========================================================================

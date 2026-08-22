@@ -11,7 +11,11 @@
 ; refer to the EMITTED PROGRAM's runtime register, not this compiler's
 ; own rbx hardware register used for bookkeeping -- the two are entirely
 ; unrelated (emitting the text "push rbx" is just string manipulation,
-; it never touches our own rbx).
+; it never touches our own rbx). Consequently no routine here has a
+; prologue/epilogue save of its caller's rbx/r12-r15 either: since every
+; caller now protects its own values around each call it makes, a
+; callee no longer needs to preserve its caller's incoming register
+; contents on its own initiative.
 
 %include "config.inc"
 %include "tokens.inc"
@@ -108,9 +112,6 @@ section .text
 ;   message rather than mishandle it.
 ; ===========================================================================
 gen_decl:
-    push    rbx
-    push    r12
-    push    r13
     mov     rbx, rdi
     mov     rax, [rbx + AST_D_OFF]      ; init, 0 if absent
     cmp     rax, 0
@@ -309,9 +310,6 @@ gen_decl:
     xor     rdx, rdx                    ; accumulated offset = 0
     call    gen_init_pop_store
 .done:
-    pop     r13
-    pop     r12
-    pop     rbx
     ret
 
 ; ===========================================================================
@@ -322,11 +320,6 @@ gen_decl:
 ; codegen ever runs.
 ; ===========================================================================
 gen_stmt:
-    push    rbx
-    push    r12
-    push    r13
-    push    r14
-    push    r15
     mov     rbx, rdi
     mov     rax, [rbx + AST_KIND_OFF]
     cmp     rax, AST_STMT_EXPR
@@ -1179,20 +1172,12 @@ gen_stmt:
     jmp     .exit
 
 .exit:
-    pop     r15
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
     ret
 
 ; ===========================================================================
 ; gen_block: in rdi = AST_BLOCK ptr. Generates every statement in it.
 ; ===========================================================================
 gen_block:
-    push    rbx
-    push    r13
-    push    r14
     mov     rbx, rdi
     mov     r13, [rbx + AST_A_OFF]      ; stmts ptr
     mov     r14, [rbx + AST_B_OFF]      ; stmt_count -- rbx itself is not
@@ -1212,9 +1197,6 @@ gen_block:
     inc     rcx
     jmp     .loop
 .done:
-    pop     r14
-    pop     r13
-    pop     rbx
     ret
 
 ; ===========================================================================
@@ -1222,9 +1204,6 @@ gen_block:
 ; init, then every statement.
 ; ===========================================================================
 gen_func_block:
-    push    rbx
-    push    r13
-    push    r14
     mov     rbx, rdi
 
     mov     r13, [rbx + AST_A_OFF]      ; decls ptr
@@ -1264,7 +1243,4 @@ gen_func_block:
     inc     rcx
     jmp     .stmt_loop
 .done:
-    pop     r14
-    pop     r13
-    pop     rbx
     ret

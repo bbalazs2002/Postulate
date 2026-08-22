@@ -20,7 +20,11 @@
 ; value must survive a call, the function that needs it pushes it
 ; immediately before that one call and pops it immediately after -- never
 ; spanning more than one call per push/pop pair, so every call site is a
-; self-contained, independently-checkable block.
+; self-contained, independently-checkable block. Consequently no routine
+; here has a prologue/epilogue save of its caller's rbx/r12-r15 either:
+; since every caller now protects its own values around each call it
+; makes, a callee no longer needs to preserve its caller's incoming
+; register contents on its own initiative.
 
 %include "config.inc"
 %include "tokens.inc"
@@ -115,9 +119,6 @@ section .text
 ; already validated present-exactly-once by the semantic checker).
 ; ===========================================================================
 find_field_init:
-    push    rbx
-    push    r12
-    push    r13
     mov     rbx, rdi                    ; struct_lit node
     mov     r12, rsi                    ; query name_offset
     mov     r13, rdx                    ; query name_len
@@ -161,15 +162,9 @@ find_field_init:
     inc     r9
     jmp     .loop
 .found:
-    pop     r13
-    pop     r12
-    pop     rbx
     ret
 .not_found:
     xor     rax, rax
-    pop     r13
-    pop     r12
-    pop     rbx
     ret
 
 ; ===========================================================================
@@ -181,8 +176,6 @@ find_field_init:
 ; different offsets within one composite literal.
 ; ===========================================================================
 emit_sized_store_rbx_plus:
-    push    r12
-    push    r13
     mov     r12, rdi                    ; type -- only needed to build the
                                          ; type_size call below, never read
                                          ; again after it
@@ -244,8 +237,6 @@ emit_sized_store_rbx_plus:
     call    emit_str
 .done:
     call    emit_nl
-    pop     r13
-    pop     r12
     ret
 
 ; ===========================================================================
@@ -256,7 +247,6 @@ emit_sized_store_rbx_plus:
 ; text-emits the trailing copy instructions).
 ; ===========================================================================
 emit_rep_movsb_copy:
-    push    r12
     mov     r12, rdi
     mov     rsi, s_mov_rcx_
     mov     rdx, s_mov_rcx__len
@@ -274,7 +264,6 @@ emit_rep_movsb_copy:
     mov     rdx, s_rep_movsb_len
     call    emit_str
     call    emit_nl
-    pop     r12
     ret
 
 ; ===========================================================================
@@ -286,10 +275,6 @@ emit_rep_movsb_copy:
 ; addresses touched.
 ; ===========================================================================
 gen_init_push:
-    push    rbx
-    push    r12
-    push    r13
-    push    r14
     mov     rbx, rdi
     mov     rax, [rbx + AST_KIND_OFF]
     cmp     rax, AST_EX_STRUCT_LIT
@@ -408,10 +393,6 @@ gen_init_push:
     inc     rcx
     jmp     .struct_loop
 .done:
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
     ret
 
 ; ===========================================================================
@@ -431,11 +412,6 @@ gen_init_push:
 ; one retained rbx.
 ; ===========================================================================
 gen_init_pop_store:
-    push    rbx
-    push    r12
-    push    r13
-    push    r14
-    push    r15
     mov     rbx, rdi                    ; literal node (ours -- target's
                                          ; own rbx, the base address, is
                                          ; untouched by us the whole time)
@@ -636,11 +612,6 @@ gen_init_pop_store:
     dec     rax
     jmp     .struct_loop
 .done:
-    pop     r15
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
     ret
 
 ; ===========================================================================
@@ -653,9 +624,6 @@ gen_init_pop_store:
 ; iteration stores a sized view of it and advances rbx by elem_size.
 ; ===========================================================================
 gen_composite_broadcast:
-    push    rbx
-    push    r12
-    push    r13
     mov     rbx, rdi                    ; element type (ours)
     mov     r12, rsi                    ; element count (ours)
 
@@ -826,7 +794,4 @@ gen_composite_broadcast:
     mov     rdx, s_suf_end_len
     call    emit_label_def
 
-    pop     r13
-    pop     r12
-    pop     rbx
     ret

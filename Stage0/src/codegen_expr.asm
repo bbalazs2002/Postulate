@@ -297,8 +297,6 @@ section .text
 ; Never returns.
 ; ===========================================================================
 codegen_fail:
-    push    rbx
-    push    r12
     mov     rbx, rsi
     mov     r12, rdx
     mov     qword [err_cursor], 0
@@ -329,9 +327,6 @@ codegen_fail:
 ; build/codegen never links ast_dump.o.
 ; ===========================================================================
 emit_dec:
-    push    rbx
-    push    r12
-    push    r13
     sub     rsp, 32
     mov     rbx, rsp
     lea     r12, [rbx + 32]
@@ -360,9 +355,6 @@ emit_dec:
     call    emit_str                    ; nothing of ours is needed after
                                          ; this, so no protection required
     add     rsp, 32
-    pop     r13
-    pop     r12
-    pop     rbx
     ret
 
 ; ===========================================================================
@@ -388,7 +380,6 @@ next_label_suffix:
 ; "_else:\n" or "\n" for a jump target reference).
 ; ===========================================================================
 emit_label_num:
-    push    rbx
     mov     rbx, rax
     mov     rsi, s_dotL
     mov     rdx, s_dotL_len
@@ -397,7 +388,6 @@ emit_label_num:
     pop     rbx
     mov     rax, rbx
     call    emit_dec
-    pop     rbx
     ret
 
 ; ===========================================================================
@@ -408,8 +398,6 @@ emit_label_num:
 ; is untouched (only ever read, never used as scratch here).
 ; ===========================================================================
 emit_sized_load:
-    push    r12
-    push    r13
     mov     r12, rdi                    ; type node
     push    r12
     call    type_size
@@ -464,8 +452,6 @@ emit_sized_load:
     mov     rdx, s_rbx_bracket_len
     call    emit_str
     call    emit_nl
-    pop     r13
-    pop     r12
     ret
 
 ; ===========================================================================
@@ -477,7 +463,6 @@ emit_sized_load:
 ; responsible for that ordering (ld. AST_STMT_ASSIGN's two-pass scheme).
 ; ===========================================================================
 emit_sized_store:
-    push    r12
     mov     r12, rdi
     call    type_size
     cmp     rax, 1
@@ -530,7 +515,6 @@ emit_sized_store:
     call    emit_str
 .done:
     call    emit_nl
-    pop     r12
     ret
 
 ; ===========================================================================
@@ -542,8 +526,6 @@ emit_sized_store:
 ; circuit codegen here and by codegen_stmt.asm's if/while.
 ; ===========================================================================
 emit_label_def:
-    push    rbx
-    push    r12
     mov     rbx, rax
     mov     r12, rsi
     push    rdx
@@ -564,13 +546,9 @@ emit_label_def:
     mov     rsi, s_colon_nl
     mov     rdx, s_colon_nl_len
     call    emit_str
-    pop     r12
-    pop     rbx
     ret
 
 emit_label_ref:
-    push    rbx
-    push    r12
     mov     rbx, rax
     mov     r12, rsi
     push    rdx
@@ -588,8 +566,6 @@ emit_label_ref:
     pop     rdx
     mov     rsi, r12
     call    emit_str
-    pop     r12
-    pop     rbx
     ret
 
 ; ===========================================================================
@@ -605,9 +581,6 @@ emit_label_ref:
 ; (emit_sized_load/emit_sized_store).
 ; ===========================================================================
 gen_lvalue:
-    push    rbx
-    push    r12
-    push    r13
     mov     rbx, rdi
     mov     rax, [rbx + AST_KIND_OFF]
     cmp     rax, AST_EX_IDENT
@@ -768,9 +741,6 @@ gen_lvalue:
     jmp     .exit
 
 .exit:
-    pop     r13
-    pop     r12
-    pop     rbx
     ret
 
 ; ===========================================================================
@@ -783,8 +753,6 @@ gen_lvalue:
 ; same address computation, just via different node kinds.
 ; ===========================================================================
 gen_named_local_addr:
-    push    r12
-    push    r13
     call    lookup_local
     mov     r12, rax                    ; local_table entry ptr
     mov     rdi, r12
@@ -812,8 +780,6 @@ gen_named_local_addr:
     call    emit_nl
     pop     r12
     mov     rax, [r12 + LTE_TYPE_PTR]
-    pop     r13
-    pop     r12
     ret
 
 ; ===========================================================================
@@ -825,10 +791,6 @@ gen_named_local_addr:
 ; calls, STRUCT_LIT/ARRAY_LIT) hits codegen_fail.
 ; ===========================================================================
 gen_rvalue:
-    push    rbx
-    push    r12
-    push    r13
-    push    r14
     mov     rbx, rdi
     mov     rax, [rbx + AST_KIND_OFF]
     cmp     rax, AST_EX_INT
@@ -1255,10 +1217,6 @@ gen_rvalue:
     jmp     .exit
 
 .exit:
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
     ret
 
 ; ===========================================================================
@@ -1595,8 +1553,6 @@ gen_binary_combine:
 ; before codegen ever runs.
 ; ===========================================================================
 syscall_number_for:
-    push    rbx
-    push    r12
     mov     rbx, rdi                    ; name_offset
     mov     r12, rsi                    ; name_len
     cmp     r12, 8
@@ -1671,8 +1627,6 @@ syscall_number_for:
     mov     rax, 60
     jmp     .done
 .done:
-    pop     r12
-    pop     rbx
     ret
 
 ; ===========================================================================
@@ -1686,11 +1640,6 @@ syscall_number_for:
 ; convention's rax-for-scalar-return rule, no extra move needed.
 ; ===========================================================================
 gen_extern_call:
-    push    rbx
-    push    r12
-    push    r13
-    push    r14
-    push    r15
     mov     rbx, rdi                    ; AST_EX_CALL node -- not read
                                          ; again after the setup below
     mov     r12, rsi                    ; callable_table entry
@@ -1862,11 +1811,6 @@ gen_extern_call:
     call    emit_nl
     pop     r12
     mov     rax, [r12 + CTE_RET_TYPE]   ; 0 = void
-    pop     r15
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
     ret
 
 ; ===========================================================================
@@ -1882,11 +1826,6 @@ gen_extern_call:
 ; per-argument guard needed here, only the callee's own return type.
 ; ===========================================================================
 gen_user_call:
-    push    rbx
-    push    r12
-    push    r13
-    push    r14
-    push    r15
     mov     rbx, rdi                    ; AST_EX_CALL node
     mov     r12, rsi                    ; callable_table entry
 
@@ -1939,6 +1878,12 @@ gen_user_call:
     je      .push_done
     dec     r15
     mov     rdi, [r13 + r15*8]
+    push    rbx                         ; AST_EX_CALL node -- must survive
+                                         ; every call in this loop, since
+                                         ; .push_done reads it again for
+                                         ; the callee's name; gen_rvalue
+                                         ; clobbers its own rbx internally,
+                                         ; so this is NOT optional
     push    r15
     push    r12
     push    r13
@@ -1949,8 +1894,10 @@ gen_user_call:
     pop     r13
     pop     r12
     pop     r15
+    pop     rbx
     mov     rsi, s_push_rax
     mov     rdx, s_push_rax_len
+    push    rbx
     push    r12
     push    r13
     push    r14
@@ -1960,6 +1907,8 @@ gen_user_call:
     pop     r14
     pop     r13
     pop     r12
+    pop     rbx
+    push    rbx
     push    r12
     push    r13
     push    r14
@@ -1969,6 +1918,7 @@ gen_user_call:
     pop     r14
     pop     r13
     pop     r12
+    pop     rbx
     jmp     .push_loop
 .push_done:
     mov     rsi, s_mov_rdi_rsp
@@ -2061,9 +2011,4 @@ gen_user_call:
     pop     r12
 
     mov     rax, [r12 + CTE_RET_TYPE]   ; 0 = void
-    pop     r15
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
     ret

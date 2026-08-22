@@ -20,7 +20,11 @@
 ; ever trusted to leave any register untouched across a call. Whenever a
 ; value must survive a call, the function that needs it pushes it
 ; immediately before that one call and pops it immediately after -- never
-; spanning more than one call per push/pop pair.
+; spanning more than one call per push/pop pair. Consequently no routine
+; here has a prologue/epilogue save of its caller's rbx/r12-r15 either:
+; since every caller now protects its own values around each call it
+; makes, a callee no longer needs to preserve its caller's incoming
+; register contents on its own initiative.
 
 %include "config.inc"
 %include "tokens.inc"
@@ -153,8 +157,6 @@ local_stack_offset:
 ; a multiple of 16 (ld. "Stack frame layout"'s alignment invariant).
 ; ===========================================================================
 compute_local_offsets:
-    push    rbx
-    push    r12
     mov     rbx, [local_count]
     xor     r12, r12                     ; running total
     xor     rcx, rcx
@@ -181,8 +183,6 @@ compute_local_offsets:
     mov     rax, r12
     add     rax, 15
     and     rax, ~15
-    pop     r12
-    pop     rbx
     ret
 
 ; ===========================================================================
@@ -194,9 +194,6 @@ compute_local_offsets:
 ; "Stack frame layout").
 ; ===========================================================================
 emit_param_copy:
-    push    rbx
-    push    r12
-    push    r13
     mov     r12, rsi                     ; arg byte offset
     mov     r13, rdx                     ; local stack offset
     push    rdi
@@ -332,9 +329,6 @@ emit_param_copy:
     mov     rdx, s_comma_eax_nl_len
     call    emit_str
 .done:
-    pop     r13
-    pop     r12
-    pop     rbx
     ret
 
 ; ===========================================================================
@@ -345,11 +339,6 @@ emit_param_copy:
 ; a function-call boundary this phase (ld. file header).
 ; ===========================================================================
 gen_function:
-    push    rbx
-    push    r12
-    push    r13
-    push    r14
-    push    r15
     mov     rbx, rdi                     ; AST_FUNCTION node
     mov     r12, [rbx + AST_A_OFF]       ; signature ptr
 
@@ -536,11 +525,6 @@ gen_function:
     mov     rdx, s_ret_len
     call    emit_str
 
-    pop     r15
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
     ret
 
 ; ===========================================================================
@@ -555,11 +539,6 @@ gen_function:
 ; handling here.
 ; ===========================================================================
 gen_program:
-    push    rbx
-    push    r12
-    push    r13
-    push    r14
-    push    r15
     mov     rbx, rdi
     mov     r12, [rbx + AST_A_OFF]       ; decls ptr
     mov     r13, [rbx + AST_B_OFF]       ; decl_count -- rbx itself is
@@ -667,9 +646,4 @@ gen_program:
     inc     rcx
     jmp     .gen_loop
 .gen_done:
-    pop     r15
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
     ret
