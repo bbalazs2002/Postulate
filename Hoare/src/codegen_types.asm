@@ -1,7 +1,7 @@
 ; Postulate Stage 0 -- code generator: type sizes, signedness, struct layout.
 ; See docs/postulate_stage0_codegen_spec.md.
 ;
-; Packed struct layout (no padding, ld. spec) -- field_offset is a plain
+; Packed struct layout (no padding, see spec) -- field_offset is a plain
 ; running-sum accumulator, no alignment rounding. Mirrors sema_expr.asm's
 ; field-lookup scan pattern (same linear-scan-over-AST_FIELD_DECL shape),
 ; reused as a pattern only, not as shared code (different return value:
@@ -9,7 +9,7 @@
 ;
 ; No routine here has a prologue/epilogue save of rbx/r12-r15: since
 ; every caller is now responsible for protecting its own values around
-; each individual call it makes (ld. codegen_composite.asm's file
+; each individual call it makes (see codegen_composite.asm's file
 ; header), a callee no longer needs to preserve its caller's incoming
 ; register contents on its own initiative -- only the still-present
 ; per-call push/pop pairs inside a routine's own body, protecting ITS
@@ -33,7 +33,7 @@ global field_type
 global is_scalar_loadable_type
 
 section .data
-; indexed by (TOK_KW_INT8 .. TOK_KW_UINT64) - TOK_KW_INT8, ld. tokens.inc's
+; indexed by (TOK_KW_INT8 .. TOK_KW_UINT64) - TOK_KW_INT8, see tokens.inc's
 ; contiguous 22..31 range: int8,int16,int,int32,int64,uint8,uint16,uint,
 ; uint32,uint64.
 int_type_sizes:
@@ -288,7 +288,7 @@ field_type:
 ; true iff this type legitimately fits in a single 8-byte register (a
 ; builtin base type, or a pointer). False for a struct-name reference or
 ; AST_TY_ARRAY. Phase 2 onward: decls/params may be ANY type (composite
-; included, ld. codegen_composite.asm) -- this narrower guard is used
+; included, see codegen_composite.asm) -- this narrower guard is used
 ; only at the specific points a value would otherwise be funneled
 ; through rax as if it were scalar (gen_rvalue's IDENT/INDEX/FIELD/
 ; UNARY(*) load path, BINARY operands, user-function CALL arguments and

@@ -1,30 +1,30 @@
-; Kulcsszavak
+; Keywords
 ["function" "extern" "struct" "if" "else" "while" "return" "mut" "const"] @keyword
 
-; Típusok
+; Types
 (return_type "void" @type.builtin)
 (base_type) @type
 
-; Függvények
+; Functions
 (function name: (identifier) @function)
-; NOTE: hívás-kiemelés (function.call) nincs -- a nyelvtanban a hívás a
-; postfix_op egyik ága, testvére (nem szülője) a hívott azonosítónak, így
-; statikus lekérdezéssel nem különböztethető meg egy sima azonosítótól
-; nyelvtan-módosítás (pl. mező hozzáadása) nélkül.
+; NOTE: no call highlighting (function.call) -- in the grammar, a call is
+; one branch of postfix_op, a sibling (not a parent) of the called
+; identifier, so it can't be distinguished from a plain identifier via a
+; static query without a grammar change (e.g. adding a field).
 
-; Változók és Mezők
+; Variables and fields
 (field_decl name: (identifier) @property)
 (param name: (identifier) @variable.parameter)
 (decl name: (identifier) @variable)
 
-; Literálok
+; Literals
 (integer_literal) @number
 (bool_literal) @boolean
 (null_literal) @constant.builtin
 
-; Kommentek
+; Comments
 (comment) @comment
 
-; Operátorok és Írásjelek
+; Operators and punctuation
 ["+" "-" "*" "/" "%" "==" "!=" "<" ">" "<=" ">=" "&&" "||" "!" "&" "|" "^" "<<" ">>" ":="] @operator
 ["(" ")" "{" "}" "[" "]" ":" ";" ","] @punctuation.bracket

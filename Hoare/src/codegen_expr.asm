@@ -7,7 +7,7 @@
 ; syscalls and user functions (incl. recursion) -- but a struct/array
 ; value may never cross a function-call boundary (as an argument or a
 ; return value), only exist as a local/param/field/element -- that's a
-; separate, not-yet-designed future phase (ld. codegen spec). Anything
+; separate, not-yet-designed future phase (see codegen spec). Anything
 ; outside scope hits codegen_fail with a clear diagnostic rather than
 ; emitting wrong code.
 ;
@@ -299,7 +299,7 @@ section .text
 ; ===========================================================================
 ; codegen_fail: in rsi = message ptr, rdx = message len. Writes "codegen
 ; error: <msg>\n" to stderr and exits with code 4 (a new exit-code class,
-; ld. the codegen spec's exit-code table -- distinct from 1/2/3, since this
+; see the codegen spec's exit-code table -- distinct from 1/2/3, since this
 ; is neither a parse nor a semantic error: the program is valid Postulate,
 ; just outside what this phase of the code generator implements yet).
 ; Never returns.
@@ -468,7 +468,7 @@ emit_sized_load:
 ; target's declared type node. Emits a store of (the low N bytes of) rax
 ; into [rbx], N per type_size, followed by a newline. Value must already
 ; be in rax and address already in rbx when called -- callers are
-; responsible for that ordering (ld. AST_STMT_ASSIGN's two-pass scheme).
+; responsible for that ordering (see AST_STMT_ASSIGN's two-pass scheme).
 ; ===========================================================================
 emit_sized_store:
     mov     r12, rdi
@@ -618,7 +618,7 @@ gen_lvalue:
     call    gen_named_local_addr        ; nothing of ours needed after
     xor     r8, r8                      ; existing local -- nothing to
                                          ; free afterward (r8 is this
-                                         ; routine's third output, ld.
+                                         ; routine's third output, see
                                          ; header below)
     jmp     .exit
 
@@ -691,7 +691,7 @@ gen_lvalue:
     call    lvalue_cleanup_size         ; -> rax = whatever the base's
                                          ; own gen_lvalue would report;
                                          ; pure query, propagated through
-                                         ; unchanged (ld. header)
+                                         ; unchanged (see header)
     pop     r12
     mov     r8, rax
     mov     rax, [r12 + AST_A_OFF]      ; result type = element type
@@ -787,11 +787,11 @@ gen_lvalue:
 
 ; CALL (composite-returning only -- gen_rvalue's own .call dispatch
 ; guards against a composite-returning USER call ever reaching
-; gen_user_call directly; this is the only path that does, ld. header).
+; gen_user_call directly; this is the only path that does, see header).
 ; Reserves space on the target's own stack for the callee's return value
 ; BEFORE evaluating anything else, hands that reservation's address back
 ; as this lvalue's result (via r8, deliberately NOT freeing it here --
-; ld. header), and lets gen_user_call wire it in as a hidden output-
+; see header), and lets gen_user_call wire it in as a hidden output-
 ; pointer argument (emitted as "lea rdx, [rsp + N]" right before the
 ; call, N = the compile-time-known total bytes gen_user_call itself
 ; reserves for arguments -- computed there because DEST sits ABOVE that
@@ -880,10 +880,10 @@ gen_lvalue:
 ; type size of the innermost CALL when the expression -- or the base of
 ; an INDEX/FIELD chain -- resolves through one). Pure compile-time
 ; query, emits nothing -- mirrors gen_lvalue's own cleanup-propagation
-; rule exactly (ld. its header), without any of gen_lvalue's side
+; rule exactly (see its header), without any of gen_lvalue's side
 ; effects. Needed by gen_user_call's pre-pass, which must know a
 ; composite argument's true stack footprint before emitting a single
-; instruction (ld. its own header).
+; instruction (see its own header).
 ; ===========================================================================
 lvalue_cleanup_size:
     mov     rbx, rdi
@@ -1020,12 +1020,12 @@ gen_rvalue:
     call    emit_nl
     call    get_int_type                ; placeholder type -- unreachable
                                          ; in a well-typed scalar-only
-                                         ; program, ld. spec
+                                         ; program, see spec
     jmp     .exit
 
 ; IDENT/INDEX/FIELD all reach their value the same way: compute the
 ; lvalue (address into target rbx), guard that its type actually fits
-; in a single register (ld. is_scalar_loadable_type -- without this, a
+; in a single register (see is_scalar_loadable_type -- without this, a
 ; struct that happens to be exactly 1/2/4/8 bytes would silently fall
 ; through emit_sized_load's width dispatch and get "loaded" as if it
 ; were a plain scalar), then load it.
@@ -1057,7 +1057,7 @@ gen_rvalue:
     je      .load_no_cleanup
     mov     rsi, s_add_rsp_             ; free the temp this value was
     mov     rdx, s_add_rsp__len         ; read out of, now that we're
-    push    r12                         ; done reading it (ld. gen_lvalue
+    push    r12                         ; done reading it (see gen_lvalue
     push    r9                          ; header -- no leak)
     call    emit_str
     pop     r9
@@ -1406,7 +1406,7 @@ gen_rvalue:
     push    rbx
     push    r14
     call    is_scalar_loadable_type     ; gen_rvalue never returns a
-                                         ; composite type (ld. file
+                                         ; composite type (see file
                                          ; header) -- a composite-
                                          ; returning user call is only
                                          ; ever reachable via gen_lvalue's
@@ -1437,7 +1437,7 @@ gen_rvalue:
 ; bitwise/shift/div-mod/comparison -- NOT &&/||, handled separately by
 ; gen_rvalue's .land/.lor), r13 = operand type node ptr (both operands
 ; already type_equal-checked by the semantic checker). Assumes left is in
-; rax, right is in rcx (gen_rvalue's .binary staging, ld. above). Emits
+; rax, right is in rcx (gen_rvalue's .binary staging, see above). Emits
 ; the combine instruction(s), leaving the result in the emitted program's
 ; rax. out: rax (this routine's own return value) = the result's type
 ; node ptr -- r13 itself for arithmetic/bitwise/shift/div/mod, a fresh
@@ -1845,7 +1845,7 @@ syscall_number_for:
 ; ===========================================================================
 ; gen_extern_call: internal. in rdi = AST_EX_CALL node, rsi = its resolved
 ; callable_table entry (is_extern = 1). out: rax = declared return type
-; (0 = void). Emits: each arg evaluated right to left and pushed (ld.
+; (0 = void). Emits: each arg evaluated right to left and pushed (see
 ; "Calling convention"); popped in order into rdi/rsi/rdx/r10(via rcx)/r8/
 ; r9 (first-pushed = arg1 = popped first, since it was evaluated and
 ; pushed LAST); the fixed syscall number; `syscall`. Result already lands
@@ -2030,20 +2030,20 @@ gen_extern_call:
 ; gen_user_call: internal. in rdi = AST_EX_CALL node, rsi = its resolved
 ; callable_table entry (is_extern = 0). out: rax = declared return type
 ; (0 = void). Phase 3: both composite arguments and a composite return
-; value are now supported, completing the calling convention (ld. codegen
+; value are now supported, completing the calling convention (see codegen
 ; spec Sec 2). Args evaluated right to left; a scalar argument is
 ; evaluated (gen_rvalue) and pushed as before. A composite argument's
 ; 8-byte slot holds an ADDRESS instead of a value: for a STRUCT_LIT/
 ; ARRAY_LIT source, a fresh temp is reserved and materialized into (via
 ; gen_init_push/gen_init_pop_store, its own address recovered via a
-; compile-time-known "[rsp + leaf_bytes]" offset -- ld. gen_init_push's
+; compile-time-known "[rsp + leaf_bytes]" offset -- see gen_init_push's
 ; own header); for any other (lvalue-shaped) source, gen_lvalue's own
 ; address is pushed DIRECTLY, with NO caller-side copy at all -- the
 ; callee's own emit_param_copy (codegen_program.asm) does the by-value
 ; copy on ITS side, so passing the existing address straight through is
 ; already correct, and simpler. A composite return value's destination
 ; is a reservation made by gen_lvalue's own .call case BEFORE this
-; routine ever runs (ld. there); this routine locates it via a compile-
+; routine ever runs (see there); this routine locates it via a compile-
 ; time-known "[rsp + N]" offset (N = the exact total this routine
 ; reserves for arguments, computed by the pre-pass below) and passes it
 ; as a hidden output-pointer argument in rdx immediately before the
@@ -2053,7 +2053,7 @@ gen_extern_call:
 ; will reserve for its arguments (per argument: 8 for a scalar slot; 8 +
 ; size_rounded for a composite slot pointing at a fresh literal-sourced
 ; temp; 8 + lvalue_cleanup_size(arg) for a composite slot pointing at an
-; existing/call-sourced address -- ld. lvalue_cleanup_size) BEFORE
+; existing/call-sourced address -- see lvalue_cleanup_size) BEFORE
 ; emitting anything, so the one-word pad-if-needed decision (every
 ; component is a multiple of 8, so padding is always exactly 0 or 8) can
 ; still be made up front, as before, even though the total is no longer
@@ -2287,7 +2287,7 @@ gen_user_call:
 
     ; --- lvalue-shaped composite argument: push its OWN address
     ; directly, no caller-side copy at all -- the callee's own
-    ; emit_param_copy does the by-value copy on its side (ld. header) ---
+    ; emit_param_copy does the by-value copy on its side (see header) ---
     mov     rdi, rax                    ; the argument expr node
     push    rbx
     push    r12
@@ -2467,7 +2467,7 @@ gen_user_call:
     call    emit_nl                     ; target rbx = this literal's
                                          ; fresh temp address (recovered
                                          ; via the known leaf_bytes
-                                         ; offset -- ld. gen_init_push)
+                                         ; offset -- see gen_init_push)
     pop     r9
     pop     r8
     pop     r15
@@ -2581,7 +2581,7 @@ gen_user_call:
 
     ; --- composite-return wiring: emitted only if the callee's declared
     ; return type is composite -- detected fresh here (r12 still valid,
-    ; unrelated to whichever caller reached us, ld. header) ---
+    ; unrelated to whichever caller reached us, see header) ---
     mov     rax, [r12 + CTE_RET_TYPE]   ; 0 = void
     cmp     rax, 0
     je      .no_out_ptr

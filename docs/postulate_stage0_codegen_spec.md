@@ -1,340 +1,341 @@
-# Postulate Stage 0 — Kódgenerátor technikai specifikáció
+# Postulate Stage 0 — Code Generator Technical Specification
 
-> Ez a dokumentum a Stage 0 bootstrap fordító **kódgenerátorának**
-> technikai specifikációja — **1. fázis**: egyfüggvényes (`main`),
-> csak skalár típusokat kezelő, teljes kifejezés-/`if`/`while`-kódgenerálás,
-> a fehérlistázott `extern` syscall-okra való hívással bezárólag. **2.
-> fázis**: struct/tömb/pointer típusú lokálisok és paraméterek, teljes
-> `INDEX`/`FIELD`/`UNARY(*)`/`UNARY(&)`-kódgenerálás, struct-/tömb-literál
-> (`STRUCT_LIT`/`ARRAY_LIT`), tömb broadcast-init, struct-/tömb-érték
-> egyszerű másolása (`p2 := p1;`), és tetszőleges számú felhasználói
-> függvény egymás közti hívása (rekurzióval együtt) — mindezt **kivéve**
-> egy struct/tömb **érték** függvényhívás-határon való átvitelét
-> (argumentumként vagy visszatérési értékként). **3. fázis**: pontosan
-> ez a kihagyott tétel — struct/tömb érték most már argumentumként **és**
-> visszatérési értékként is átmehet egy hívás-határon (ld. 2. és 6.5-6.8.
-> fejezet); két szűk, tudatosan elhalasztott eset marad nyitva (ld. 10.
-> fejezet). A cél egy **negyedik, önálló `build/codegen` bináris** — a
-> `lexer → parser → checker → codegen` rétegződés folytatása. Előfeltétele
-> a [postulate_stage0_semantics_spec.md](postulate_stage0_semantics_spec.md)
-> (a már elkészült, teljes szemantikai ellenőrzés — a generált kód csak
-> olyan programra készül, ami már átment rajta) és a
+> This document is the technical specification of the Stage 0 bootstrap
+> compiler's **code generator** — **Phase 1**: single-function (`main`),
+> scalar-types-only, full expression/`if`/`while` code generation, up to
+> and including calls to the whitelisted `extern` syscalls. **Phase 2**:
+> struct/array/pointer-typed locals and parameters, full
+> `INDEX`/`FIELD`/`UNARY(*)`/`UNARY(&)` code generation, struct/array
+> literals (`STRUCT_LIT`/`ARRAY_LIT`), array broadcast-init, simple
+> struct/array value copying (`p2 := p1;`), and calls among an arbitrary
+> number of user functions (including recursion) — **excluding**, out of
+> all of this, the transfer of a struct/array **value** across a
+> function-call boundary (as an argument or as a return value).
+> **Phase 3**: exactly this omitted item — a struct/array value can now
+> cross a call boundary both as an argument **and** as a return value
+> (see Chapters 2 and 6.5-6.8); two narrow, deliberately deferred cases
+> remain open (see Chapter 10). The goal is a **fourth, standalone
+> `build/codegen` binary** — continuing the `lexer → parser → checker →
+> codegen` layering. Its prerequisites are
+> [postulate_stage0_semantics_spec.md](postulate_stage0_semantics_spec.md)
+> (the already-completed, full semantic check — the generated code is
+> only produced for a program that has already passed it) and
 > [postulate_stage0_parser_spec.md](postulate_stage0_parser_spec.md)
-> (AST-csomópont-elrendezés). A Stage 0 compiler végleges neve **Hoare**;
-> ez a menet még nem az egyesített `hoare` CLI, hanem annak egy köztes
-> építőeleme.
+> (AST node layout). The Stage 0 compiler's final name is **Hoare**;
+> this pass is not yet the unified `hoare` CLI, but one of its
+> intermediate building blocks.
 >
-> Emlékeztető (2026-08-21-i döntés): **a Stage 0-nak nincs optimalizáló
-> menete** — a lenti kódgenerálás szándékosan naiv (nincs regiszter-
-> allokáció, konstans-összevonás, holt kód eltávolítás). Az optimalizálás
-> a Stage 1 (önmagát fordító, Postulate-ben írt) compiler dolga lesz.
+> Reminder (2026-08-21 decision): **Stage 0 has no optimizing pass** —
+> the code generation below is deliberately naive (no register
+> allocation, constant folding, or dead-code elimination). Optimization
+> will be the job of the Stage 1 compiler (self-hosting, written in
+> Postulate).
 
 ---
 
-## 1. Cél és hatókör
+## 1. Goal and Scope
 
-- **Kimenet**: `build/codegen` **NASM assembly szöveget** ír stdout-ra,
-  amit a már meglévő `nasm`+`ld` eszközlánc fordít le és linkel (ugyanaz
-  a láncszem, amit `Stage0/scripts/build.sh` maga is használ) — nincs
-  saját ELF-writer vagy linker.
-- **Struct-elrendezés**: **packed, nincs padding** — a mezők a deklaráció
-  sorrendjében, egymás után, kitöltés nélkül. Ezt a Stage 1 megírásakor
-  érdemes felülvizsgálni (a természetes/ABI-igazítás lesz ekkor a
-  valószínű alternatíva); most a legegyszerűbb helyes választás egy nem
-  optimalizáló bootstrap fordítóhoz.
-- **1. fázis hatóköre** — a legegyszerűbb végpontok-közti szelet, ami az
-  egész új csővezetéket bizonyítja (`.ptl` → ellenőrzött AST → `.asm`
-  szöveg → `nasm`+`ld` → valódi Linux bináris → **lefuttatva
-  ellenőrizve**), mielőtt a memóriaelrendezés bonyolultsága hozzáadódna:
-  egy függvény (`main`), csak skalár típusok, teljes kifejezés-/
-  `if`/`while`-kódgenerálás, hívás csak fehérlistázott `extern`
-  függvényre.
-- **2. fázis hatóköre** (ld. 6. fejezet a részletekért) — mindaz, amit az
-  1. fázis "dokumentálva, elhalasztva"-ként jelölt, a struct/tömb
-  **érték** hívás-határon átvitele kivételével:
-  - Struct/tömb/pointer típusú `decl`/paraméter (2. fázisban a
-    paraméterek **csak** skalár/pointer maradtak, mert egy paraméter
-    definíció szerint hívás-határon kel át, míg egy `decl` nem — ezt a
-    3. fázis oldja fel, ld. lent).
-  - `INDEX`/`FIELD`/`UNARY(*)`/`UNARY(&)` — összeköthető, tetszőleges
-    mélységben (`*arr[2]`, `*values.value.ptrs[3]`), rekurzív
-    `gen_lvalue`/`gen_rvalue`-definíció révén.
-  - `STRUCT_LIT`/`ARRAY_LIT` (decl-init, egy-páros és több-páros
-    szimultán értékadás jobb oldalán is), tömb broadcast-init, struct-/
-    tömb-érték egyszerű másolása (`p2 := p1;`).
-  - Tetszőleges számú `AST_FUNCTION`, egymás közti hívással és
-    rekurzióval.
-  - `sys_read`/`sys_write`/`sys_mmap` immár ténylegesen hívható (pointer
-    argumentumaikhoz most már van kódgenerálás).
-- **3. fázis hatóköre** (ld. 2. és 6.5-6.8. fejezet a részletekért) —
-  struct/tömb **érték** immár átmehet egy felhasználói függvényhívás
-  határán, mindkét irányban:
-  - **Argumentumként**: egy összetett paraméter bejövő 8 bájtos rése
-    immár egy **címet** tartalmaz érték helyett (ugyanúgy, ahogy egy
-    pointer-argumentum már eddig is) — a hívó vagy egy már létező
-    lvalue (lokális, mező, elem, egy másik összetett-visszatérésű hívás
-    eredménye) címét adja tovább közvetlenül, **másolás nélkül**, vagy
-    (struct-/tömb-literál argumentum esetén) egy friss ideiglenes
-    területre materializálja azt. A **valódi**, érték-szerinti másolatot
-    a **hívott fél saját** prológusa készíti (`emit_param_copy`
-    összetett ága, `rep movsb` a bejövő pointerből a saját lokális
-    résébe) — a hívó oldalán így nem kell "védeni" semmit a hívás után,
-    a hívott a saját, független példányát kapja.
-  - **Visszatérési értékként**: a rejtett `rdx` output-pointer konvenció
-    (ld. 2. fejezet, már 2. fázis óta dokumentálva, most bekötve) — a
-    hívó egy friss ideiglenes területet foglal a célprogram saját
-    stack-jén (`sub rsp, <méret>`), ennek címét adja át `rdx`-ben, a
-    hívott fél pedig ide írja a `return`-nel visszaadott értéket
-    közvetlenül, `rax` helyett.
-  - Minden más konstrukció (ld. 10. fejezet: egy összetett-visszatérésű
-    hívás mint egy struct-/tömb-literál mező-/elem-értéke; összetett
-    típusú `BINARY` operátorok) **lentebb dokumentálva van**, de
-    **nincs implementálva** — ezeket a `codegen error: ...` diagnosztika
-    (4-es kilépőkód, ld. 9. fejezet) jelzi tisztán, ahelyett hogy rossz
-    kódot generálna.
-
----
-
-## 2. Hívási konvenció
-
-**Nem a platform ABI — egy egyedi, egységes, argumentumszám-független
-konvenció** felhasználó-függvény hívásokra (az `extern`/syscall hívás
-külön, fix alakú útvonal, ld. 6. fejezet `AST_EX_CALL` — ez a döntés
-sosem kell hogy együttműködjön a valódi SysV ABI-val, mert nincs olyan
-idegen kód, amit egy lefordított Postulate függvénynek közvetlenül
-hívhatóvá kéne tennie *magából* — az `extern function` egy zárt,
-4-syscall fehérlista, nem általános FFI).
-
-- Az argumentumok **jobbról balra** kerülnek kiértékelésre, és
-  azonnal, egyenként **push**-olásra — függetlenül a számuktól. Mivel
-  `arg1` (a legbaloldalibb) kerül kiértékelésre **utoljára**, ő kerül
-  push-olásra is utoljára, tehát a stack-en `rsp`-hez legközelebb lesz —
-  a stack `arg1, arg2, ..., argN` sorrendben, felülről lefelé olvasható,
-  egyenként 8 bájtos résekben (egységesen 8 bájt, függetlenül az
-  argumentum tényleges deklarált méretétől — a legegyszerűbb címzés:
-  `[block_ptr + (i-1)*8]`). Egy **skalár/pointer** argumentum rése az
-  értékét tartalmazza; egy **összetett** argumentum rése (3. fázis) egy
-  **címet** tartalmaz (ld. lent) — a rés mérete és a konvenció alakja
-  emiatt nem változik, csak az, hogy mit jelent a benne lévő 8 bájt.
-- A hívott fél pontosan **két** dolgot kap, **`rdi`**/**`rsi`**-ben:
-  egy pointert az első argumentumra (`rdi`) és az argumentumok számát
-  (`rsi`) — mindig ugyanez a két regiszter, függetlenül az aktuális
-  argumentumszámtól.
-- **Visszatérési érték**: skalár/pointer típusok → `rax` (nincs
-  megváltoztatva). `void` → `rax` nincs felhasználva. **Struct/tömb
-  visszatérési típusok** (3. fázis): a hívó egy harmadik, rejtett
-  argumentumot ad át — egy pointert oda, ahova az eredményt írni kell
-  (`rdx`, amit ez a konvenció egyébként nem használ) — a hívott fél
-  ezen a pointeren keresztül írja az eredményt, `rax` helyett. A hívó
-  ezt a pointert **nem** tartja élve egy regiszterben az argumentum-
-  kiértékelés teljes ideje alatt (a beágyazott hívások szabadon
-  felülírnák) — a célterületet a saját argumentum-blokkja **elé**
-  foglalja (`sub rsp, <méret, 8-ra kerekítve>`, `gen_lvalue` `CALL`
-  ága, `codegen_expr.asm`), majd a `call pf_<name>` közvetlen előtt egy
-  fordítási időben ismert `lea rdx, [rsp + N]`-nel számítja újra a
-  címét (`N` = a hívás saját argumentum-blokkjának teljes, ekkorra már
-  ismert mérete, ld. lent) — nincs szüksége egyetlen extra regiszterre
-  sem, ami "túlélné" a köztes kiértékelést.
-- **Összetett argumentum-materializáció** (3. fázis, `gen_user_call`,
-  `codegen_expr.asm`): a hívott fél saját paraméter-típusa dönti el
-  (nem az argumentum-kifejezés saját, esetlegesen eltérő típusa —
-  bár a checker már garantálja, hogy a kettő megegyezik), hogy egy
-  argumentum összetett-e. Ha igen:
-  - **lvalue-alakú forrás** (`IDENT`/`INDEX`/`FIELD`/`UNARY(*)`/`CALL`):
-    a forrás **saját** címe (`gen_lvalue(arg) -> rbx`) kerül közvetlenül
-    push-olásra, **másolás nélkül** — a hívott fél saját prológusa
-    (`emit_param_copy`) másolja ki onnan a saját, független példányát,
-    tehát a hívó oldalán nincs értelme előre másolni.
-  - **struct-/tömb-literál forrás**: egy friss ideiglenes terület
-    foglalása (`sub rsp, <méret, 8-ra kerekítve>`), a literál
-    materializálása bele (`gen_init_push`/`gen_init_pop_store`, ld.
-    6.6 — a cél címe a `gen_init_push` **visszatérési értékéből**
-    [összesen push-olt bájtok] számítva vissza, egy fordítási időben
-    ismert `lea rbx, [rsp + leaf_bytes]`-szel, mert a levelek a
-    foglalás **után** kerülnek push-olásra), majd ennek a friss
-    területnek a címe push-olva.
-  - Az összes ilyen ideiglenes terület (mind az összetett argumentumoké,
-    mind egy beágyazott, összetett-visszatérésű hívásból származó
-    argumentumé) a hívás **saját** végső `add rsp, N`-jével szabadul fel
-    — `N` innentől nem egyszerűen `arg_count*8`, hanem minden argumentum
-    tényleges lefoglalt méretének összege, 16-ra kerekítve (a padding-
-    döntés emiatt egy előzetes, semmit ki nem adó menetet igényel, ami
-    kiszámolja `N`-et, mielőtt bármit is kiadna — ld. `gen_user_call`
-    fejlécét).
-- A hívó takarít a hívás után (`add rsp, N`, `N` fordítási időben
-  ismert hívási helyenként — előtte 16-ra kerekítve, ld. 4. fejezet és
-  fent).
-
-**Kikötés, explicit módon kimondva**: az argumentum-kifejezések **jobbról
-balra** értékelődnek ki. Ha két argumentum kiértékelése közös állapotot
-érint (mellékhatásos beágyazott hívásokon, `&`-ból származó pointereken
-keresztül stb.), a jobboldali argumentum mellékhatása történik meg előbb.
-Ez **szándékos, dokumentált** viselkedés, nem hiba. Ugyanígy vonatkozik
-az `extern`/syscall hívási helyekre is (ld. 6. fejezet) — így a teljes
-nyelvre **pontosan egy** kiértékelési sorrend-szabály van, még akkor is,
-ha a két hívásfajta másképp helyezi el a kiértékelt argumentumokat.
-
-### 2.1 Stack-fegyelem
-
-**Minden `push`-nak, amit egy függvény generált kódja kiad, meg kell
-lennie a párja `pop`-jának** (vagy egy azzal egyenértékű tömeges
-`add rsp, ...`-nak) mielőtt a függvény visszatér. Egy függvény saját
-`rsp`-re gyakorolt nettó hatása, a prológus végétől az epilógus elejéig,
-**nulla** kell legyen.
-
-Ez különösen a fenti hívási konvenció miatt fontos: egy hívott fél kap
-egy pointert (`rdi`) olyan memóriába, amit **nem ő maga** push-olt — a
-hívó frissen push-olt argumentum-blokkja, a hívott fél saját `rbp`-je
-*fölött* a hívó frame-jében. Egy függvény szabadon **olvashat** olyan
-stack-memóriát, amit nem ő push-olt (a saját bejövő argumentum-blokkja
-pont ilyen), de sosem `pop`-olhatja, nem írhat bele, és nem kezelheti
-saját lokális scratch területként — csak az veheti vissza egy adott
-területet, aki push-olta.
+- **Output**: `build/codegen` writes **NASM assembly text** to stdout,
+  which the already-existing `nasm`+`ld` toolchain compiles and links
+  (the same chain that `Hoare/scripts/build.sh` itself uses) — there is
+  no custom ELF writer or linker.
+- **Struct layout**: **packed, no padding** — fields laid out one after
+  another in declaration order, with no filler. This is worth
+  revisiting when Stage 1 is written (natural/ABI alignment will likely
+  be the alternative then); for now it is the simplest correct choice
+  for a non-optimizing bootstrap compiler.
+- **Phase 1 scope** — the simplest end-to-end slice that proves out the
+  whole new pipeline (`.ptl` → checked AST → `.asm` text → `nasm`+`ld` →
+  real Linux binary → **run and verified**) before the complexity of
+  memory layout is added: a single function (`main`), scalar types
+  only, full expression/`if`/`while` code generation, calls only to
+  whitelisted `extern` functions.
+- **Phase 2 scope** (see Chapter 6 for details) — everything Phase 1
+  marked as "documented, deferred", except for transferring a
+  struct/array **value** across a call boundary:
+  - Struct/array/pointer-typed `decl`/parameter (in Phase 2, parameters
+    remained **only** scalar/pointer, because a parameter by definition
+    crosses a call boundary, while a `decl` does not — Phase 3 resolves
+    this, see below).
+  - `INDEX`/`FIELD`/`UNARY(*)`/`UNARY(&)` — chainable to arbitrary
+    depth (`*arr[2]`, `*values.value.ptrs[3]`), via a recursive
+    `gen_lvalue`/`gen_rvalue` definition.
+  - `STRUCT_LIT`/`ARRAY_LIT` (in decl-init, and on the right-hand side
+    of both single-pair and multi-pair simultaneous assignment), array
+    broadcast-init, simple struct/array value copying (`p2 := p1;`).
+  - An arbitrary number of `AST_FUNCTION`s, calling each other,
+    including recursion.
+  - `sys_read`/`sys_write`/`sys_mmap` can now actually be called (code
+    generation now exists for their pointer arguments).
+- **Phase 3 scope** (see Chapter 2 and 6.5-6.8 for details) — a
+  struct/array **value** can now cross a user function-call boundary in
+  both directions:
+  - **As an argument**: an incoming 8-byte slot of a composite
+    parameter now holds an **address** instead of a value (the same way
+    a pointer argument already did) — the caller either passes the
+    address of an already-existing lvalue (local, field, element, or
+    the result of another composite-returning call) directly,
+    **without copying**, or (for a struct/array literal argument)
+    materializes it into a fresh temporary area. The **actual**,
+    by-value copy is made by the **callee's own** prologue
+    (`emit_param_copy`'s composite branch, `rep movsb` from the
+    incoming pointer into its own local slot) — so nothing needs to be
+    "protected" on the caller's side after the call; the callee gets
+    its own, independent instance.
+  - **As a return value**: the hidden `rdx` output-pointer convention
+    (see Chapter 2, documented since Phase 2, now wired up) — the
+    caller allocates a fresh temporary area on the target program's own
+    stack (`sub rsp, <size>`), passes its address in `rdx`, and the
+    callee writes the value returned by `return` there directly,
+    instead of into `rax`.
+  - Every other construct (see Chapter 10: a composite-returning call
+    as a struct/array literal field/element value; composite-typed
+    `BINARY` operators) **is documented below**, but **not
+    implemented** — these are cleanly flagged by the
+    `codegen error: ...` diagnostic (exit code 4, see Chapter 9),
+    instead of generating incorrect code.
 
 ---
 
-## 3. Regiszter-konvenció: érték vs. cím
+## 2. Calling Convention
 
-Minden kifejezés-kódgeneráló rutin kétféle egyike, mindegyiknek **saját,
-külön eredmény-regisztere** van — szigorúan szétválasztva, ne mindkettő
-`rax`-on menjen keresztül, hogy egy olyan konstrukció, aminek egyszerre
-kell érték **és** cím (a szimultán értékadás a motiváló eset), sose
-írja felül egymást csendben:
+**Not the platform ABI — a custom, uniform, argument-count-independent
+convention** for user-function calls (`extern`/syscall calls are a
+separate, fixed-shape path, see Chapter 6, `AST_EX_CALL` — this
+decision never needs to interoperate with the real SysV ABI, because
+there is no foreign code that a compiled Postulate function would need
+to make directly callable *from itself* — `extern function` is a
+closed, 4-syscall whitelist, not a general FFI).
 
-- **`gen_rvalue(node) -> érték a target `rax`-ban`** — "mire értékelődik
-  ki ez a kifejezés". Előjeles típusok `movsx`-szel 64 bitre kiterjesztve,
-  előjeltelen/`bool` `movzx`-szel.
-- **`gen_lvalue(node) -> cím a target `rbx`-ben`** — "hol él ez a
-  kifejezés a memóriában". Csak értékadás célpontjára és `&` operandusára
-  használt — és láncoltan, `gen_rvalue` maga is emezt hívja `IDENT`/
-  `INDEX`/`FIELD`/`UNARY(*)` esetén.
+- Arguments are evaluated **right to left**, and are **push**ed
+  immediately, one at a time — regardless of their count. Since `arg1`
+  (the leftmost) is evaluated **last**, it is also pushed last, so it
+  ends up closest to `rsp` on the stack — the stack is readable
+  top-to-bottom in `arg1, arg2, ..., argN` order, in 8-byte slots each
+  (uniformly 8 bytes, regardless of the argument's actual declared size
+  — the simplest addressing: `[block_ptr + (i-1)*8]`). A
+  **scalar/pointer** argument's slot holds its value; a **composite**
+  argument's slot (Phase 3) holds an **address** (see below) — so the
+  slot size and the shape of the convention do not change, only what
+  the 8 bytes inside it mean.
+- The callee receives exactly **two** things, in **`rdi`**/**`rsi`**: a
+  pointer to the first argument (`rdi`) and the argument count (`rsi`)
+  — always these same two registers, regardless of the actual argument
+  count.
+- **Return value**: scalar/pointer types → `rax` (unchanged). `void` →
+  `rax` unused. **Struct/array return types** (Phase 3): the caller
+  passes a third, hidden argument — a pointer to where the result must
+  be written (`rdx`, which this convention otherwise does not use) —
+  and the callee writes the result through this pointer, instead of
+  into `rax`. The caller does **not** keep this pointer alive in a
+  register for the whole duration of argument evaluation (nested calls
+  would freely clobber it) — instead it allocates the target area
+  **ahead of** its own argument block (`sub rsp, <size, rounded up to
+  8>`, `gen_lvalue`'s `CALL` branch, `codegen_expr.asm`), then,
+  immediately before `call pf_<name>`, recomputes its address with a
+  compile-time-known `lea rdx, [rsp + N]` (`N` = the total,
+  by-then-known size of the call's own argument block, see below) — it
+  needs no extra register at all to "survive" the intervening
+  evaluation.
+- **Composite argument materialization** (Phase 3, `gen_user_call`,
+  `codegen_expr.asm`): whether an argument is composite is decided by
+  the callee's own parameter type (not the argument expression's own,
+  possibly different type — though the checker already guarantees the
+  two match). If it is:
+  - **lvalue-shaped source** (`IDENT`/`INDEX`/`FIELD`/`UNARY(*)`/`CALL`):
+    the source's **own** address (`gen_lvalue(arg) -> rbx`) is pushed
+    directly, **without copying** — the callee's own prologue
+    (`emit_param_copy`) copies out its own, independent instance from
+    there, so there is no point copying in advance on the caller's
+    side.
+  - **struct/array literal source**: a fresh temporary area is
+    allocated (`sub rsp, <size, rounded up to 8>`), the literal is
+    materialized into it (`gen_init_push`/`gen_init_pop_store`, see 6.6
+    — the destination address is computed back from `gen_init_push`'s
+    **return value** [total bytes pushed], with a compile-time-known
+    `lea rbx, [rsp + leaf_bytes]`, because the leaves are pushed
+    **after** the allocation), and then the address of this fresh area
+    is pushed.
+  - All such temporary areas (both for composite arguments and for an
+    argument coming from a nested, composite-returning call) are freed
+    by the call's **own** final `add rsp, N` — from this point on `N`
+    is not simply `arg_count*8`, but the sum of every argument's
+    actually allocated size, rounded up to 16 (the padding decision
+    therefore needs a preliminary, nothing-emitting pass that computes
+    `N` before emitting anything — see `gen_user_call`'s header).
+- The caller cleans up after the call (`add rsp, N`, with `N` known at
+  compile time per call site — rounded up to 16 beforehand, see
+  Chapter 4 and above).
 
-`rbx` callee-saved, túléli bármely beágyazott `call`/`syscall`-t extra
-védelem nélkül, és ez a kódbázis már eddig is ezt a szerepet szánta neki
-máshol (pl. `sema_expr.asm` `.struct_lit` scratch-alapja).
+**Stipulation, stated explicitly**: argument expressions are evaluated
+**right to left**. If the evaluation of two arguments touches shared
+state (through side-effecting nested calls, pointers derived from `&`,
+etc.), the right-hand argument's side effect happens first. This is
+**intentional, documented** behavior, not a bug. It applies equally to
+`extern`/syscall call sites (see Chapter 6) — so the whole language has
+**exactly one** evaluation-order rule, even though the two kinds of
+calls place the evaluated arguments differently.
 
-**Megjegyzés a "két világról"**: ez a dokumentum (és a hozzá tartozó
-`codegen_*.asm` fájlok) `rbx`/`r12`-`r15`-öt **a Stage 0 fordító saját**
-fordítási idejű könyveléséhez használják, a kódbázis egyetemes
-konvenciója szerint — ez teljesen elkülönül attól az `rbx`-től, amiről
-fentebb szó volt, ami a **generált** assembly szöveg futásidejű
-regiszterére utal, amit csak az olvas vissza, ami expliciten `"[rbx]"`
-szöveget ír ki (`emit_sized_load`/`emit_sized_store`).
+### 2.1 Stack Discipline
+
+**Every `push` that a function's generated code emits must have a
+matching `pop`** (or an equivalent bulk `add rsp, ...`) before the
+function returns. A function's own net effect on `rsp`, from the end of
+the prologue to the start of the epilogue, must be **zero**.
+
+This matters especially because of the calling convention above: a
+callee receives a pointer (`rdi`) into memory that it did **not** push
+itself — the caller's freshly pushed argument block, located *above*
+the callee's own `rbp` in the caller's frame. A function may freely
+**read** stack memory it did not push (its own incoming argument block
+is exactly this), but it must never `pop` it, write into it, or treat
+it as its own local scratch area — only whoever pushed a given area may
+reclaim it.
 
 ---
 
-## 4. Stack-frame elrendezés
+## 3. Register Convention: Value vs. Address
 
-Klasszikus frame-pointer prológus/epilógus:
+Every expression code-generation routine is one of two kinds, each with
+its **own, separate result register** — strictly kept apart, so that
+they don't both go through `rax`, so that a construct that needs both a
+value **and** an address at once (simultaneous assignment is the
+motivating case) never silently overwrites the other:
+
+- **`gen_rvalue(node) -> value in the target `rax``** — "what does this
+  expression evaluate to". Signed types are sign-extended to 64 bits
+  with `movsx`, unsigned/`bool` with `movzx`.
+- **`gen_lvalue(node) -> address in the target `rbx``** — "where does
+  this expression live in memory". Used only for the target of an
+  assignment and the operand of `&` — and chained, since `gen_rvalue`
+  itself calls this for `IDENT`/`INDEX`/`FIELD`/`UNARY(*)`.
+
+`rbx` is callee-saved, so it survives any nested `call`/`syscall`
+without extra protection, and the codebase has already assigned it this
+role elsewhere (e.g. `sema_expr.asm`'s `.struct_lit` scratch base).
+
+**Note on the "two worlds"**: this document (and the corresponding
+`codegen_*.asm` files) use `rbx`/`r12`-`r15` for **the Stage 0
+compiler's own** compile-time bookkeeping, following the codebase's
+universal convention — this is entirely separate from the `rbx`
+discussed above, which refers to a runtime register of the
+**generated** assembly text, read back only by code that explicitly
+emits the text `"[rbx]"` (`emit_sized_load`/`emit_sized_store`).
+
+---
+
+## 4. Stack Frame Layout
+
+Classic frame-pointer prologue/epilogue:
 
 ```nasm
 pf_main:
     push    rbp
     mov     rbp, rsp
-    sub     rsp, <locals_size>     ; 16 többszörösére kerekítve
-    ; -- egy load+store parametérenként, [rdi + i*8]-ból --
-    ; ... törzs ...
+    sub     rsp, <locals_size>     ; rounded up to a multiple of 16
+    ; -- one load+store per parameter, from [rdi + i*8] --
+    ; ... body ...
 .epilogue:
     mov     rsp, rbp
     pop     rbp
     ret
 ```
 
-`<locals_size>`-nek 16 többszörösének kell lennie: az ABI garantálja,
-hogy `rsp % 16 == 0` közvetlenül egy `call` előtt; a `call` maga push-ol
-egy 8 bájtos visszatérési címet (hívott fél belépéskor: `rsp % 16 == 8`);
-`push rbp` visszaállítja a 16-igazítást (`rsp % 16 == 0`) — tehát
-`sub rsp, N` csak akkor tartja meg ezt az invariánst (ami *ennek* a
-függvénynek a saját beágyazott `call`-jaihoz kell), ha `N % 16 == 0`.
+`<locals_size>` must be a multiple of 16: the ABI guarantees that
+`rsp % 16 == 0` immediately before a `call`; the `call` itself pushes an
+8-byte return address (on callee entry: `rsp % 16 == 8`); `push rbp`
+restores 16-alignment (`rsp % 16 == 0`) — so `sub rsp, N` preserves this
+invariant (which *this* function's own nested `call`s need) only if
+`N % 16 == 0`.
 
-Minden lokális (paraméter vagy `decl`) pontosan **egy fix stack-rést**
-kap, a saját típusa szerint méretezve. A paraméterek egy pointer+szám
-párként érkeznek (ld. 2. fejezet), és azonnal átmásolódnak a saját
-résükbe a prológusban.
+Every local (parameter or `decl`) gets exactly **one fixed stack slot**,
+sized according to its own type. Parameters arrive as a pointer+count
+pair (see Chapter 2), and are copied immediately into their own slot in
+the prologue.
 
-**Újrahasznosítás**: a függvényenkénti lokális lista már megvan a
-szemantikai ellenőrzőtől (`symtab.asm` `build_local_table`/`local_table`)
-— a kódgenerátor nem származtatja újra, hanem újra lefuttatja
-(`build_local_table`, már exportálva), és hozzáad egy **párhuzamos
-tömböt** (`codegen_program.asm` `local_offsets`), ugyanúgy indexelve,
-mint a `local_table`-t — nem `symtab.inc`-módosítás.
+**Reuse**: the per-function local list already exists from the semantic
+checker (`symtab.asm`'s `build_local_table`/`local_table`) — the code
+generator does not re-derive it, but reruns it (`build_local_table`,
+already exported), and adds a **parallel array**
+(`codegen_program.asm`'s `local_offsets`), indexed the same way as
+`local_table` — not a `symtab.inc` modification.
 
 ---
 
-## 5. Típusméretek és struct-elrendezés (`codegen_types.asm`)
+## 5. Type Sizes and Struct Layout (`codegen_types.asm`)
 
-| Típus | Méret | Előjeles? |
+| Type | Size | Signed? |
 |---|---|---|
-| `int8` / `uint8` / `bool` | 1 bájt | igen / nem / n/a |
-| `int16` / `uint16` / `int` / `uint` | 2 bájt | igen / nem |
-| `int32` / `uint32` | 4 bájt | igen / nem |
-| `int64` / `uint64` | 8 bájt | igen / nem |
-| pointer (bármely `AST_TY_POINTER`) | 8 bájt | n/a (cím) |
-| tömb `T[N]` | `size(T) * N`, összefüggő | n/a |
-| struct | mezőméretek packed összege, deklarációs sorrendben | n/a |
+| `int8` / `uint8` / `bool` | 1 byte | yes / no / n/a |
+| `int16` / `uint16` / `int` / `uint` | 2 bytes | yes / no |
+| `int32` / `uint32` | 4 bytes | yes / no |
+| `int64` / `uint64` | 8 bytes | yes / no |
+| pointer (any `AST_TY_POINTER`) | 8 bytes | n/a (address) |
+| array `T[N]` | `size(T) * N`, contiguous | n/a |
+| struct | packed sum of field sizes, in declaration order | n/a |
 
-`type_size(type_node) -> bájt`, `is_signed_type(type_node) -> 1/0`,
-`struct_size(struct_decl) -> bájt`, `field_offset(struct_decl, name) ->
-bájt`, `field_type(struct_decl, name) -> típus` (utóbbi kettő a
-mezőnevek szerinti lineáris kereséssel, ugyanaz az alak, csak más
-visszatérési érték — ld. `sema_expr.asm`'s `.struct_field_scan` minta,
-nem osztott kód).
+`type_size(type_node) -> bytes`, `is_signed_type(type_node) -> 1/0`,
+`struct_size(struct_decl) -> bytes`, `field_offset(struct_decl, name) ->
+bytes`, `field_type(struct_decl, name) -> type` (the latter two via a
+linear search by field name, the same shape, just a different return
+value — see `sema_expr.asm`'s `.struct_field_scan` pattern, not shared
+code).
 
-`is_scalar_loadable_type(type_node) -> 1/0` — igaz, ha a típus tényleg
-elfér egy 8 bájtos regiszterben (beépített bázistípus vagy pointer). A
-`decl`ek **bármilyen** típust elfogadnak (a lokálisok sosem kelnek át
-hívás-határon önmagukban), de ezt a szűkebb ellenőrzést a kódgenerátor
-számos ponton lefuttatja, immár **döntésre**, nem **elutasításra**
-(3. fázis óta — 2. fázisban ugyanezek a pontok még kizárólag
-`codegen_fail`-lel reagáltak egy `false` eredményre):
+`is_scalar_loadable_type(type_node) -> 1/0` — true if the type actually
+fits into an 8-byte register (a built-in base type or a pointer).
+`decl`s accept **any** type (locals never cross a call boundary on
+their own), but the code generator runs this narrower check at a number
+of points, now for a **decision**, not for a **rejection** (since
+Phase 3 — in Phase 2 these same points still reacted to a `false`
+result exclusively with `codegen_fail`):
 
-- `gen_rvalue`'s `IDENT`/`INDEX`/`FIELD`/`UNARY(*)` load-útvonala, mielőtt
-  a betöltött értéket `rax`-ba tenné — egy `false` itt továbbra is
-  `codegen_fail` (`msg_composite_as_scalar`): egy összetett értéket
-  sosem lehet közvetlenül skalárként kezelni, csak a mezőin/elemein
-  keresztül, vagy egy teljes másolással.
-- `gen_rvalue`'s `BINARY` ága (csak a bal operandusra — a jobb oldal
-  garantáltan ugyanaz a típus, ld. `types_equal`) — ugyanígy elutasítva
-  (ld. 10. fejezet: ez a checker egy tudatosan meg nem szüntetett
-  megengedő rése, nem a 3. fázis tárgya).
-- `gen_rvalue`'s `CALL` ága: mielőtt a hívott függvény visszatérési
-  értékét `rax`-ba venné, ellenőrzi, hogy az skalár-e — ha nem,
-  `codegen_fail`, mert `gen_rvalue` sosem adhat vissza összetett
-  értéket (ld. 6.5 lent). Egy összetett-visszatérésű hívás **csak**
-  `gen_lvalue` saját `CALL` ágán át érhető el.
-- `gen_function` a paraméter-/visszatérési típus mentén dönt (ld. 6.8):
-  skalár → a régi, változatlan másolási/visszatérési útvonal; összetett
-  → az új, 3. fázisbeli útvonal (`emit_param_copy` összetett ága, illetve
-  a rejtett output-pointer-rés). **Nincs többé elutasítás** ezen a
-  ponton.
-- `gen_user_call` szintén a hívott fél deklarált visszatérési típusa és
-  minden egyes paramétere mentén dönt (skalár vagy összetett ág), nem
-  utasít el semmit — ld. 6.5.
+- `gen_rvalue`'s `IDENT`/`INDEX`/`FIELD`/`UNARY(*)` load path, before
+  putting the loaded value into `rax` — a `false` here is still
+  `codegen_fail` (`msg_composite_as_scalar`): a composite value can
+  never be treated directly as a scalar, only through its
+  fields/elements, or via a full copy.
+- `gen_rvalue`'s `BINARY` branch (only for the left operand — the right
+  side is guaranteed to be the same type, see `types_equal`) —
+  rejected the same way (see Chapter 10: this is a deliberately-not-
+  closed permissive gap in the checker, not the subject of Phase 3).
+- `gen_rvalue`'s `CALL` branch: before taking the called function's
+  return value into `rax`, it checks whether it is scalar — if not,
+  `codegen_fail`, because `gen_rvalue` may never return a composite
+  value (see 6.5 below). A composite-returning call is reachable
+  **only** through `gen_lvalue`'s own `CALL` branch.
+- `gen_function` decides based on the parameter/return type (see 6.8):
+  scalar → the old, unchanged copy/return path; composite → the new,
+  Phase-3 path (`emit_param_copy`'s composite branch, and the hidden
+  output-pointer slot). **There is no longer a rejection** at this
+  point.
+- `gen_user_call` likewise decides based on the callee's declared
+  return type and each individual parameter (scalar or composite
+  branch), rejecting nothing — see 6.5.
 
 ---
 
-## 6. AST-csomópont → assembly, megvalósítási állapottal
+## 6. AST Node → Assembly, with Implementation Status
 
-### 6.1 Literálok, azonosító (megvalósítva)
+### 6.1 Literals, Identifier (implemented)
 
-`AST_EX_INT`/`AST_EX_BOOL`: `mov rax, <érték>`. `AST_EX_NULL`:
-`mov rax, 0` (a gyakorlatban elérhetetlen egy jól tipizált, csak-skalár
-programban, mivel pointer-kontextus nélkül sosem szerepelhetne érvényes
-programban — pointerek ebben a fázisban nincsenek). `AST_EX_IDENT`:
-`gen_lvalue` (`lea rbx, [rbp - offset]`), majd `emit_sized_load`.
+`AST_EX_INT`/`AST_EX_BOOL`: `mov rax, <value>`. `AST_EX_NULL`:
+`mov rax, 0` (in practice unreachable in a well-typed, scalar-only
+program, since without a pointer context it could never appear in a
+valid program — pointers do not exist in this phase). `AST_EX_IDENT`:
+`gen_lvalue` (`lea rbx, [rbp - offset]`), then `emit_sized_load`.
 
-### 6.2 Unáris (megvalósítva: mind)
+### 6.2 Unary (implemented: all)
 
-| op | kódgenerálás |
+| op | code generation |
 |---|---|
 | `-` | `gen_rvalue(operand)`; `neg rax` |
 | `!` | `gen_rvalue(operand)`; `xor rax, 1` |
-| `*` (deref) | rvalue: `gen_lvalue` (a pointer értéke *maga* a cél cím: `gen_rvalue(operand) -> rax`; `mov rbx, rax`), majd guardolt `emit_sized_load` — ugyanaz az útvonal, mint `IDENT`/`INDEX`/`FIELD` |
-| `&` (address-of) | csak rvalue: `gen_lvalue(operand) -> rbx`; `mov rax, rbx`; eredmény típusa egy frissen szintetizált `AST_TY_POINTER` (`ast_alloc_node`, ugyanaz a minta, mint `sema_expr.asm`'s `.unary_addr`-je) |
+| `*` (deref) | rvalue: `gen_lvalue` (the pointer's value *is itself* the target address: `gen_rvalue(operand) -> rax`; `mov rbx, rax`), then guarded `emit_sized_load` — the same path as `IDENT`/`INDEX`/`FIELD` |
+| `&` (address-of) | rvalue only: `gen_lvalue(operand) -> rbx`; `mov rax, rbx`; the result type is a freshly synthesized `AST_TY_POINTER` (`ast_alloc_node`, the same pattern as `sema_expr.asm`'s `.unary_addr`) |
 
-### 6.3 Bináris (megvalósítva: mind)
+### 6.3 Binary (implemented: all)
 
-Általános minta (a `&&`/`||` kivételével):
+General pattern (except for `&&`/`||`):
 
 ```nasm
     ; gen_rvalue(left)
@@ -342,16 +343,16 @@ programban — pointerek ebben a fázisban nincsenek). `AST_EX_IDENT`:
     ; gen_rvalue(right)
     mov     rcx, rax        ; rcx = right
     pop     rax             ; rax = left
-    ; kombinálás (op-specifikus) -- eredmény rax-ban
+    ; combine (op-specific) -- result in rax
 ```
 
-| Op-ok | Kombináló lépés |
+| Ops | Combining step |
 |---|---|
 | `+ - * & \| ^` | `add/sub/imul/and/or/xor rax, rcx` |
-| `<< >>` | `shl rax, cl` mindig; `>>`: `sar` (előjeles) / `shr` (előjeltelen) |
-| `/ %` | `cqo`+`idiv rcx` (előjeles) vagy `xor rdx,rdx`+`div rcx` (előjeltelen); `%` a `rdx`-et mozgatja `rax`-ba |
-| `== != < > <= >=` | `cmp rax, rcx` + `setcc al` (`==`/`!=` előjelfüggetlen; `< > <= >=` `setl/setg/setle/setge` előjeles, `setb/seta/setbe/setae` előjeltelen) + `movzx rax, al` |
-| `&& \|\|` | rövidzár, egyedi `.L<N>_false`/`.L<N>_true`/`.L<N>_end` címkékkel — ld. lent |
+| `<< >>` | `shl rax, cl` always; `>>`: `sar` (signed) / `shr` (unsigned) |
+| `/ %` | `cqo`+`idiv rcx` (signed) or `xor rdx,rdx`+`div rcx` (unsigned); `%` moves `rdx` into `rax` |
+| `== != < > <= >=` | `cmp rax, rcx` + `setcc al` (`==`/`!=` sign-independent; `< > <= >=` `setl/setg/setle/setge` signed, `setb/seta/setbe/setae` unsigned) + `movzx rax, al` |
+| `&& \|\|` | short-circuit, with unique `.L<N>_false`/`.L<N>_true`/`.L<N>_end` labels — see below |
 
 ```nasm
 ; a && b
@@ -365,278 +366,285 @@ programban — pointerek ebben a fázisban nincsenek). `AST_EX_IDENT`:
 .L<N>_end:
 ```
 
-### 6.4 `INDEX` / `FIELD` (megvalósítva)
+### 6.4 `INDEX` / `FIELD` (implemented)
 
 Lvalue: `gen_lvalue(base) -> rbx`; `INDEX`: `push rbx; gen_rvalue(index);
 imul rax, elem_size; pop rbx; add rbx, rax`. `FIELD`: `gen_lvalue(base)`
-(mindig struct-típusú, `add rbx, field_offset(struct_decl, name)`.
-Mindkettő tetszőleges mélységben összeköthető más lvalue-alakokkal
-(`*arr[2]`, `*values.value.ptrs[3]`), mivel `gen_lvalue`/`gen_rvalue`
-rekurzívan van definiálva a teljes kifejezés-nyelvtanon, nem alak
-szerinti mintaillesztéssel — a mélység "ingyenes". Nincs futásidejű
-`INDEX`-bounds-check (a "nincs rejtett futásidejű költség" elvvel
-összhangban) — egy fordítási idejű, bare-literál-indexre szűkített
-tartomány-ellenőrzés a szemantikai elemzőben már ezt megelőzően kiszűri
-a konstans-index-túlcímzést (ld.
+(always struct-typed), `add rbx, field_offset(struct_decl, name)`. Both
+can be chained to arbitrary depth with other lvalue shapes (`*arr[2]`,
+`*values.value.ptrs[3]`), since `gen_lvalue`/`gen_rvalue` are defined
+recursively over the whole expression grammar, not by shape-based
+pattern matching — the depth is "free". There is no runtime `INDEX`
+bounds check (in keeping with the "no hidden runtime cost" principle) —
+a compile-time range check, limited to bare-literal indices, in the
+semantic analyzer already filters out constant-index out-of-bounds
+addressing beforehand (see
 [postulate_stage0_semantics_spec.md](postulate_stage0_semantics_spec.md)
-§7.6); egy valódi dinamikus index sosem kerül ellenőrzésre.
+§7.6); a genuinely dynamic index is never checked.
 
-### 6.5 `CALL` (megvalósítva: `extern` fehérlista és felhasználói függvény, tetszőleges argumentum-/visszatérési típussal)
+### 6.5 `CALL` (implemented: `extern` whitelist and user functions, with arbitrary argument/return types)
 
 ```nasm
-    ; argN..arg1, jobbról balra, egyenként push-olva
+    ; argN..arg1, right to left, pushed one at a time
 .push_loop:
     ; gen_rvalue(arg_i); push rax
-    ; -- extern (syscall) eset --
-    pop     rdi                 ; ha arg_count >= 1
-    pop     rsi                 ; ha >= 2
-    pop     rdx                 ; ha >= 3
-    pop     rcx                 ; ha >= 4
-    mov     r10, rcx            ; syscall lenullázza rcx/r11-et, ezért r10
-    pop     r8                  ; ha >= 5
-    pop     r9                  ; ha >= 6
-    mov     rax, <syscall szám>
+    ; -- extern (syscall) case --
+    pop     rdi                 ; if arg_count >= 1
+    pop     rsi                 ; if >= 2
+    pop     rdx                 ; if >= 3
+    pop     rcx                 ; if >= 4
+    mov     r10, rcx            ; syscall clobbers rcx/r11, hence r10
+    pop     r8                  ; if >= 5
+    pop     r9                  ; if >= 6
+    mov     rax, <syscall number>
     syscall
 ```
 
-A syscall-számok (`sys_read`=0, `sys_write`=1, `sys_mmap`=9,
-`sys_exit`=60) ugyanazok, mint amiket `runtime.asm` már használ,
-keresztellenőrizve, nem újra kitalálva.
+The syscall numbers (`sys_read`=0, `sys_write`=1, `sys_mmap`=9,
+`sys_exit`=60) are the same ones `runtime.asm` already uses,
+cross-checked, not reinvented.
 
-1. fázisban `sys_read`/`sys_write`/`sys_mmap` mindegyike legalább egy
-`*uint8` (pointer) paramétert igényelt, ami akkor még nem volt
-kódgenerálva — 2. fázistól kezdve mindhárom ténylegesen hívható
-(`21_sys_write_real_buffer` fixture: valódi buffer, `&msg[0]`).
+In Phase 1, `sys_read`/`sys_write`/`sys_mmap` each required at least one
+`*uint8` (pointer) parameter, which was not yet code-generated at the
+time — from Phase 2 onward all three can actually be called
+(`21_sys_write_real_buffer` fixture: a real buffer, `&msg[0]`).
 
-**Felhasználói függvényhívás** (`gen_user_call`, `codegen_expr.asm`) —
-pontosan a fent leírt konvenció: jobbról balra kiértékelve és push-olva
-(egy dummy padding-push **elsőként**, ha szükséges — ld. 2. fejezet a
-padding-döntés 3. fázisbeli általánosításáról); `mov rdi, rsp; mov rsi,
-N; [lea rdx, [rsp + N'], ha a visszatérési típus összetett]; call
-pf_<name>; add rsp, <N', 16-ra kerekítve>`. Minden argumentum a hívott
-fél **saját, deklarált** paramétertípusa (nem az argumentum-kifejezés
-saját típusa) mentén dől el skalár/összetett ágra:
+**User function call** (`gen_user_call`, `codegen_expr.asm`) — exactly
+the convention described above: evaluated and pushed right to left (a
+dummy padding push **first**, if needed — see Chapter 2 on the Phase-3
+generalization of the padding decision); `mov rdi, rsp; mov rsi, N;
+[lea rdx, [rsp + N'], if the return type is composite]; call pf_<name>;
+add rsp, <N', rounded up to 16>`. Every argument resolves to the
+scalar/composite branch based on the callee's **own, declared**
+parameter type (not the argument expression's own type):
 
-- **skalár/pointer**: változatlan, `gen_rvalue(arg) -> rax`; `push rax`.
-- **összetett**: ld. 2. fejezet ("Összetett argumentum-materializáció")
-  — vagy a forrás **saját** címe push-olva (lvalue-alak), vagy egy
-  friss ideiglenes terület materializálva és annak címe push-olva
-  (literál-alak).
+- **scalar/pointer**: unchanged, `gen_rvalue(arg) -> rax`; `push rax`.
+- **composite**: see Chapter 2 ("Composite argument materialization")
+  — either the source's **own** address is pushed (lvalue shape), or a
+  fresh temporary area is materialized and its address is pushed
+  (literal shape).
 
-A hívott függvény saját visszatérési típusa is a deklarált típus
-mentén dől el (`gen_user_call` a `call` közvetlen előtt): `void`/skalár
-→ változatlan; összetett → a rejtett `rdx` output-pointer bekötve (ld.
-2. fejezet). Rekurzió (közvetlen vagy kölcsönös) semmi extrát nem
-igényel: minden hívás a saját, friss `rsp`-nél kap frame-et, és a
-`local_table`/`local_offsets` csak *generáláskor* (fordítási idő), sosem
-futásidőben kerül felhasználásra — ez összetett paraméterrel/
-visszatérési típussal rekurzáló függvényre is igaz (ld. `codegen_cases/
+The callee's own return type is likewise resolved based on its
+declared type (`gen_user_call`, immediately before `call`): `void`/
+scalar → unchanged; composite → the hidden `rdx` output pointer wired
+up (see Chapter 2). Recursion (direct or mutual) needs nothing extra:
+every call gets a frame at its own fresh `rsp`, and
+`local_table`/`local_offsets` are used only *at generation time*
+(compile time), never at runtime — this holds equally for a function
+recursing with a composite parameter/return type (see `codegen_cases/
 27_composite_recursion.ptl`).
 
-**Miért nem kell `BINARY`-nak külön guard**: `gen_rvalue` maga **sosem**
-ad vissza összetett (struct/tömb) típust — `.load_via_lvalue`/`.deref`
-saját maguk guardolnak (`is_scalar_loadable_type`), `INT`/`BOOL`/`NULL`/
-`neg`/`lnot`/`addr` mindig skalár/pointer a saját szabályuk szerint,
-`.call` pedig a hívott függvény visszatérési típusát már guardolta,
-mielőtt visszatérne (ld. 5. fejezet) — egy összetett-visszatérésű hívás
-csak `gen_lvalue`-n át érhető el, sosem `gen_rvalue`-n. Ez az invariáns
-indukcióval öröklődik: semmi, ami `gen_rvalue`-n átmegy, sosem lehet
-összetett típusú, tehát `BINARY` operandusai (mindkét oldal `gen_rvalue`-n
-át kerül kiértékelésre) sosem lehetnek azok.
+**Why `BINARY` needs no separate guard**: `gen_rvalue` itself **never**
+returns a composite (struct/array) type — `.load_via_lvalue`/`.deref`
+guard themselves (`is_scalar_loadable_type`), `INT`/`BOOL`/`NULL`/
+`neg`/`lnot`/`addr` are always scalar/pointer by their own rules, and
+`.call` already guarded the callee's return type before returning (see
+Chapter 5) — a composite-returning call is reachable only through
+`gen_lvalue`, never through `gen_rvalue`. This invariant is inherited
+by induction: nothing that passes through `gen_rvalue` can ever be
+composite-typed, so `BINARY`'s operands (both sides evaluated through
+`gen_rvalue`) can never be either.
 
-**`gen_lvalue`'s `CALL` ága** (3. fázis, `codegen_expr.asm`) — az
-egyetlen útvonal, amin egy összetett-visszatérésű hívás elérhető:
-lefoglal egy friss területet a hívott fél visszatérési típusának
-méretével (`sub rsp, <méret, 8-ra kerekítve>` — ez a terület, mielőtt
-`gen_user_call` egyáltalán elkezdené kiértékelni az argumentumokat, már
-megvan, tehát azok elhelyezkedése *alatta* van a stack-en, sosem zavarja
-meg), meghívja `gen_user_call`-t (a rejtett `rdx` így ezt a területet
-kapja), majd ennek a területnek a címét adja vissza saját eredményként
-(target `rbx`). **Tudatosan nem szabadítja fel** ezt a területet — a
-hívó (akárki is legyen: decl-init/assign másolás, egy skalár mező/elem
-kiolvasása, vagy egy beágyazott, összetett argumentum materializálása)
-kapja meg ezt a felelősséget egy harmadik, `gen_lvalue`-ból visszaadott
-kimeneti értékkel (`r8` a fordító saját regiszterében, "cleanup size"):
-`0`, ha nincs mit felszabadítani (létező lokális címe), vagy a
-lefoglalt bájtszám, ha van — a `INDEX`/`FIELD` ágak ezt változatlanul
-továbbadják, ha az ő saját báziscímük is egy ilyen hívásból ered
-(`f().mező`, `f()[i]`). Enélkül a mechanizmus nélkül egy ismételten
-hívott, összetett-visszatérésű függvény (pl. egy ciklusban, vagy egy
-kifejezésben többször) korlátlanul "szivárogtatná" a stack-területet,
-egészen a függvény epilógusáig — ez volt a tervezés során felfedezett,
-és a `r8`/cleanup mechanizmussal lezárt valódi kockázat.
+**`gen_lvalue`'s own `CALL` branch** (Phase 3, `codegen_expr.asm`) —
+the only path through which a composite-returning call is reachable: it
+allocates a fresh area sized to the callee's return type (`sub rsp,
+<size, rounded up to 8>` — this area already exists before
+`gen_user_call` even starts evaluating the arguments, so their
+placement on the stack is *below* it and never disturbs it), calls
+`gen_user_call` (so the hidden `rdx` receives this area), then returns
+this area's address as its own result (target `rbx`). It **deliberately
+does not free** this area — the caller (whoever that may be:
+decl-init/assign copy, reading out a scalar field/element, or
+materializing a nested composite argument) is handed this
+responsibility via a third output value returned from `gen_lvalue`
+(`r8`, in the compiler's own register, the "cleanup size"): `0` if
+there is nothing to free (the address of an existing local), or the
+allocated byte count if there is — the `INDEX`/`FIELD` branches pass
+this through unchanged if their own base address likewise originates
+from such a call (`f().field`, `f()[i]`). Without this mechanism, a
+repeatedly called, composite-returning function (e.g. in a loop, or
+used multiple times in an expression) would leak stack space without
+bound, all the way to the function's epilogue — this was a real risk
+discovered during design, and closed off by the `r8`/cleanup mechanism.
 
-### 6.6 `STRUCT_LIT` / `ARRAY_LIT` (megvalósítva) + tömb broadcast-init + struct-/tömb-másolás
+### 6.6 `STRUCT_LIT` / `ARRAY_LIT` (implemented) + array broadcast-init + struct/array copying
 
-Új fájl: `codegen_composite.asm`. Egy harmadik kódgenerálási mód,
-**egységesen** használva decl-init, egy-páros és több-páros szimultán
-értékadás jobb oldalán is (nincs külön gyors-útvonal) — két függvény,
-mindig együtt hívva:
+New file: `codegen_composite.asm`. A third code-generation mode, used
+**uniformly** in decl-init, and on the right-hand side of both
+single-pair and multi-pair simultaneous assignment (no separate fast
+path) — two functions, always called together:
 
-- **`gen_init_push(node)`** (1. menet): a literált **előre**, deklaráció-/
-  index-sorrendben járja be; minden **levél** (skalár/pointer) mező/elem
-  esetén `gen_rvalue(levél) -> rax`; `push rax`. Egy beágyazott összetett
-  mező/elem inline rekurzióval csatlakozik ugyanahhoz a lapos,
-  előre-sorrendű push-sorozathoz — **egyetlen cím sem** kerül elő ebben a
-  menetben, tisztán érték-kiszámítás, tehát minden levél tényleg a
-  *utasítás-előtti* állapotot látja, függetlenül attól, melyik páros
-  vagy pozíció része.
-- A célcím **utolsóként**, a `gen_init_push` visszatérése **után**
-  kerül kiszámításra és push-olásra (`gen_lvalue(lhs) -> rbx`; `push
-  rbx`) — biztonságos, mert semmi ez után nem nyúl `rbx`-hez ennél a
-  párosnál, és az, hogy *utólag* (nem előbb, mint a skalár eset) kerül
-  kiszámításra, nem változtat azon, milyen előtte-állapotot lát, mivel
-  ebben a menetben semmi nem *ír* még.
-- **`gen_init_pop_store(node, elvárt_típus, offset)`** (2. menet, amikor
-  ennek a párosnak a sora jön a párok saját fordított sorrendjében): előbb
-  `pop rbx` (a cím, ami utoljára lett push-olva az 1. menetben, tehát
-  legfelül van); majd ugyanazt a struktúrát **fordított** sorrendben
-  bejárva, `offset` fordítási idejű aritmetikaként halmozódik a beágyazott
-  rekurzión át (nincs külön stack-bejegyzés szintenként — minden a
-  megtartott `rbx`-ről címzett); minden levélre (fordítva bejárva, LIFO
-  pop-sorrendnek megfelelően): `pop rax`; tárolás egy új
-  `emit_sized_store_rbx_plus(type, offset)`-tel (ugyanaz, mint
-  `emit_sized_store`, csak `"[rbx + <offset>]"`-tal `"[rbx]"` helyett —
-  mert egyetlen megtartott báziscím sok, különböző offszetű tárolást
-  szolgál ki egy literálon belül).
-- Mező-név → deklarált-mező megfeleltetés (melyik `field_init` melyik
-  struct-mezőnek felel meg, és milyen sorrendben kell push/pop-olni) egy
-  új `find_field_init` segéddel — ugyanaz az alak, mint `sema_expr.asm`'s
-  `.struct_field_scan`-je, nem osztott kód.
+- **`gen_init_push(node)`** (pass 1): walks the literal **forward**, in
+  declaration/index order; for every **leaf** (scalar/pointer)
+  field/element: `gen_rvalue(leaf) -> rax`; `push rax`. A nested
+  composite field/element joins the same flat, forward-order push
+  sequence via inline recursion — **no address whatsoever** surfaces in
+  this pass, it is purely value computation, so every leaf really does
+  see the *pre-statement* state, regardless of which pair or position
+  it is part of.
+- The destination address is computed and pushed **last**, **after**
+  `gen_init_push` returns (`gen_lvalue(lhs) -> rbx`; `push rbx`) — safe,
+  because nothing after this touches `rbx` for this pair, and the fact
+  that it is computed *afterward* (rather than earlier, as in the
+  scalar case) does not change what pre-state it sees, since nothing
+  *writes* yet in this pass.
+- **`gen_init_pop_store(node, expected_type, offset)`** (pass 2, when
+  this pair's turn comes in the pairs' own reversed order): first
+  `pop rbx` (the address that was pushed last in pass 1, so it is on
+  top); then, walking the same structure in **reverse** order, `offset`
+  accumulates as compile-time arithmetic through the nested recursion
+  (no separate stack entry per level — everything is addressed off the
+  retained `rbx`); for every leaf (walked in reverse, matching LIFO pop
+  order): `pop rax`; store with a new
+  `emit_sized_store_rbx_plus(type, offset)` (the same as
+  `emit_sized_store`, just with `"[rbx + <offset>]"` instead of
+  `"[rbx]"` — because a single retained base address serves many
+  differently-offset stores within one literal).
+- Field-name → declared-field mapping (which `field_init` corresponds
+  to which struct field, and in what order they must be pushed/popped)
+  via a new `find_field_init` helper — the same shape as
+  `sema_expr.asm`'s `.struct_field_scan`, not shared code.
 
-**Struct-/tömb-érték egyszerű másolása** (`p2 := p1;`, ellenőrizve a
-checker ellen — egy struct-típusú `IDENT` tökéletesen jó jobb oldal egy
-azonos típusú célnak, ugyanaz a strukturális `types_equal`): egyenes
-`rep movsb` memóriamásolás (`emit_rep_movsb_copy`, `rdi`=cél, `rsi`=forrás
-már beállítva a hívó által, `cld` az irány-flag tisztázására).
+**Simple struct/array value copying** (`p2 := p1;`, checked against the
+checker — a struct-typed `IDENT` is a perfectly valid right-hand side
+for a target of the same type, per the same structural `types_equal`):
+a straight `rep movsb` memory copy (`emit_rep_movsb_copy`,
+`rdi`=destination, `rsi`=source, already set up by the caller, `cld` to
+clear the direction flag).
 
-**Tömb broadcast-init** (`mut arr: int32[5] := 7;` — a szemantikai
-elemző 3. fázisának új szabálya tette elérhetővé, ld.
+**Array broadcast-init** (`mut arr: int32[5] := 7;` — made possible by
+a new rule in the semantic analyzer's Phase 3, see
 [postulate_stage0_semantics_spec.md](postulate_stage0_semantics_spec.md)
-§A1/§8.2): a skalár kifejezés **egyszer** kiértékelve (`gen_rvalue ->
-rax`), majd egy futásidejű, számlált ciklus (`gen_composite_broadcast`)
-tárolja ugyanazt az egy értéket mind az `N` elem-résbe (`elem_type`
-sized `mov [rbx], r12<b/w/d/->` + `add rbx, elem_size` + `dec rcx`
-ciklus, egyedi `.L<N>_start`/`.L<N>_end` címkékkel). Egy **összetett**
-broadcast-forrás (amikor az elemtípus maga struct/tömb) tudatosan
-`codegen_fail`-lel elutasítva — ritka, ebben a fázisban nem
-implementált eset.
+§A1/§8.2): the scalar expression is evaluated **once** (`gen_rvalue ->
+rax`), then a runtime, counted loop (`gen_composite_broadcast`) stores
+that same one value into all `N` element slots (`elem_type`-sized
+`mov [rbx], r12<b/w/d/->` + `add rbx, elem_size` + `dec rcx` loop, with
+unique `.L<N>_start`/`.L<N>_end` labels). A **composite** broadcast
+source (when the element type is itself a struct/array) is deliberately
+rejected with `codegen_fail` — a rare case, not implemented in this
+phase.
 
-### 6.7 Utasítások (megvalósítva: mind)
+### 6.7 Statements (implemented: all)
 
-- **`AST_DECL_MUT`/`CONST`**: init nélkül nincs kiadás. Van init esetén
-  négyfelé ágazik a deklarált típus és az init-kifejezés alakja szerint:
-  - **skalár/pointer** (`is_scalar_loadable_type`): `gen_rvalue` majd
-    `gen_named_local_addr` majd `emit_sized_store` — ebben a sorrendben
-    biztonságos, mert egy egyszerű lokális cím-számítása sosem nyúl
-    `rax`-hoz (változatlan az 1. fázis óta).
-  - **összetett, init egy `STRUCT_LIT`/`ARRAY_LIT`**: `gen_init_push`
-    majd `gen_named_local_addr` majd `gen_init_pop_store` (ld. 6.6) —
-    egyetlen írás, nincs szimultaneitási kockázat, ezért itt nem kell a
-    cím push/pop-os védelme (szemben a több-páros `ASSIGN`-nal alább).
-  - **összetett, init egy ugyanolyan típusú lvalue** (`IDENT`/`INDEX`/
-    `FIELD`/`UNARY(*)`/`CALL` — utóbbi 3. fázis óta, ld. 6.5, és
-    `gen_lvalue`+`types_equal` a deklarált típus ellen egyezést ad):
-    struct-/tömb-másolás (ld. 6.6); ha a forrás egy `CALL` volt,
-    `gen_lvalue` saját `r8` (cleanup) kimenete a másolás **után**
-    felszabadításra kerül (`add rsp, r8`, ha nem nulla — ld. 6.5).
-  - **összetett, init bármi más** (garantáltan skalár/pointer, ld. 6.5
-    indukciós érv): tömb broadcast-init (ld. 6.6) — csak érvényes, ha a
-    deklarált típus tömb (a checker sosem enged struct-broadcastot).
-- **`AST_STMT_ASSIGN`**: Dijkstra/Hoare szimultán szemantika, **két
-  menetben**, **páronként négyféle alakban** (skalár, összetett-literál,
-  összetett-másolás, tömb-broadcast — ugyanaz a négy eset, mint fent, csak
-  a két-menetes push/pop-sémára szabva). Minden páros saját (alak, típus)
-  párja egy 2-qword-per-páros scratch-tömbben van eltárolva a Stage 0
-  fordító **saját natív** stack-jén — teljesen elkülönítve attól a
-  "push"/"pop" **szövegtől**, amit ez a rutin a *cél* program stack-jére
-  ír ki:
-  - **skalár**: 1. menet `gen_lvalue(lhs)` (push cím), `gen_rvalue(rhs)`
-    (push érték) — cím **előbb**. 2. menet: pop érték, pop cím, tárolás.
-  - **összetett-literál**: 1. menet `gen_init_push(rhs)` (levelek
-    push-olva, előre sorrendben), **majd** `gen_lvalue(lhs)` (cím
-    push-olva **utoljára**) — fordított sorrend a skalár esethez képest,
-    ld. 6.6-nál a részletes indoklást. 2. menet: pop cím,
+- **`AST_DECL_MUT`/`CONST`**: without an init, nothing is emitted. With
+  an init, it branches four ways based on the declared type and the
+  shape of the init expression:
+  - **scalar/pointer** (`is_scalar_loadable_type`): `gen_rvalue` then
+    `gen_named_local_addr` then `emit_sized_store` — safe in this
+    order, because computing a simple local's address never touches
+    `rax` (unchanged since Phase 1).
+  - **composite, init is a `STRUCT_LIT`/`ARRAY_LIT`**: `gen_init_push`
+    then `gen_named_local_addr` then `gen_init_pop_store` (see 6.6) —
+    a single write, no simultaneity risk, so the push/pop protection of
+    the address is not needed here (unlike multi-pair `ASSIGN` below).
+  - **composite, init is an lvalue of the same type** (`IDENT`/`INDEX`/
+    `FIELD`/`UNARY(*)`/`CALL` — the latter since Phase 3, see 6.5, with
+    `gen_lvalue`+`types_equal` matching against the declared type):
+    struct/array copy (see 6.6); if the source was a `CALL`,
+    `gen_lvalue`'s own `r8` (cleanup) output is freed **after** the
+    copy (`add rsp, r8`, if nonzero — see 6.5).
+  - **composite, init is anything else** (guaranteed scalar/pointer,
+    see the induction argument in 6.5): array broadcast-init (see 6.6)
+    — valid only if the declared type is an array (the checker never
+    allows struct broadcast).
+- **`AST_STMT_ASSIGN`**: Dijkstra/Hoare simultaneous semantics, in
+  **two passes**, **per pair, in one of four shapes** (scalar,
+  composite literal, composite copy, array broadcast — the same four
+  cases as above, just adapted to the two-pass push/pop scheme). Each
+  pair's own (shape, type) pair is stored in a 2-qword-per-pair scratch
+  array on the Stage 0 compiler's **own native** stack — entirely
+  separate from the "push"/"pop" **text** that this routine emits into
+  the *target* program's stack:
+  - **scalar**: pass 1: `gen_lvalue(lhs)` (push address),
+    `gen_rvalue(rhs)` (push value) — address **first**. Pass 2: pop
+    value, pop address, store.
+  - **composite literal**: pass 1: `gen_init_push(rhs)` (leaves pushed,
+    in forward order), **then** `gen_lvalue(lhs)` (address pushed
+    **last**) — reversed order compared to the scalar case, see the
+    detailed reasoning in 6.6. Pass 2: pop address,
     `gen_init_pop_store`.
-  - **összetett-másolás**: 1. menet `gen_lvalue(lhs)` (push cél-cím),
-    `gen_lvalue(rhs)` (push forrás-cím, forrásalak `IDENT`/`INDEX`/
-    `FIELD`/`UNARY(*)`/`CALL` — utóbbi 3. fázis óta) — mindkettő tiszta
-    olvasás, sorrend-független. 2. menet: pop forrás → `rsi`, pop cél →
-    `rdi`, `emit_rep_movsb_copy`, majd ha a forrás `gen_lvalue`-ja
-    nemnulla `r8` (cleanup) kimenettel tért vissza, ennek felszabadítása
-    (`add rsp, r8`) — a páros saját scratch-bejegyzése emiatt 3. fázistól
-    3 qword/páros (alak, bal oldali típus, cleanup), nem 2.
-  - **tömb-broadcast**: ugyanaz a push-alak, mint a skalár eset (cím,
-    érték), de a 2. menetben `gen_composite_broadcast` a sima
-    `emit_sized_store` helyett.
+  - **composite copy**: pass 1: `gen_lvalue(lhs)` (push destination
+    address), `gen_lvalue(rhs)` (push source address; source shape
+    `IDENT`/`INDEX`/`FIELD`/`UNARY(*)`/`CALL` — the latter since
+    Phase 3) — both are pure reads, order-independent. Pass 2: pop
+    source → `rsi`, pop destination → `rdi`, `emit_rep_movsb_copy`,
+    then, if the source's `gen_lvalue` returned a nonzero `r8`
+    (cleanup) output, free it (`add rsp, r8`) — because of this, the
+    pair's own scratch entry is 3 qwords/pair since Phase 3 (shape,
+    left-hand type, cleanup), not 2.
+  - **array broadcast**: the same push shape as the scalar case
+    (address, value), but in pass 2 `gen_composite_broadcast` is used
+    instead of plain `emit_sized_store`.
   
-  A négy alak közötti döntés (páronként) tisztán strukturális — a bal
-  oldal deklarált típusát és a jobb oldal AST-alakját nézi, nincs hozzá
-  szükség kiértékelésre/emisszióra, tehát a döntés a 2. menetben (ahol a
-  kiértékelés nélkül kell újra "tudni", melyik alak volt) is
-  reprodukálható anélkül, hogy bármit újra kiadna.
-- **`AST_STMT_IF`/`AST_STMT_WHILE`**: egyedi `.L<N>_else`/`.L<N>_end`
-  illetve `.L<N>_start`/`.L<N>_end` címkékkel, `cmp rax, 0`+`je`
-  vezérléssel.
-- **`AST_STMT_RETURN`**: az enclosing függvény deklarált visszatérési
-  típusa dönt (`cur_func_return_type`/`cur_func_out_ptr_offset`, két
-  modul-szintű globális, amit `gen_function` állít be egyszer, mielőtt a
-  törzs kódgenerálása elkezdődne — ld. 6.8; nem paraméterként fűzve át
-  `gen_func_block`/`gen_block`/`gen_stmt`-en, mert `gen_function` sosem
-  reentráns, tehát mindig pontosan egy érvényes érték él egyszerre):
-  - **skalár/`void`**: változatlan — kifejezéssel `gen_rvalue` (az érték
-    `rax`-ban, az ABI visszatérési regiszter), `jmp .epilogue`;
-    kifejezés nélkül `jmp .epilogue` közvetlenül.
-  - **összetett** (3. fázis): a célcím a hívó által mentett rejtett
-    résből töltődik be (`[rbp - cur_func_out_ptr_offset]`, ld. 6.8), és
-    az érték oda íródik közvetlenül — struct-/tömb-literál esetén
-    `gen_init_push`/`gen_init_pop_store` (ld. 6.6, a célcím a levelek
-    push-olása **után** kerül kiszámításra, ugyanúgy, ahogy decl-init/
-    assign esetén); egyébként (lvalue-alak, `CALL`-t is beleértve)
-    `gen_lvalue(kif) -> rbx` + `emit_rep_movsb_copy`. A forrás esetleges
-    `r8` (cleanup) kimenete itt **szándékosan nincs felszabadítva** — a
-    közvetlenül utána következő `.epilogue` (`mov rsp, rbp`) úgyis
-    eldobja a teljes frame-et, cleanup nélkül is.
-  Minden függvénynek pontosan egy epilógus címkéje van.
-- **`AST_STMT_EXPR`**: `gen_rvalue`, az eredmény eldobva.
+  The decision among the four shapes (per pair) is purely structural —
+  it looks at the left-hand declared type and the right-hand AST shape,
+  requiring no evaluation/emission, so the decision is also
+  reproducible in pass 2 (where it must again "know" which shape it
+  was, without evaluation) without re-emitting anything.
+- **`AST_STMT_IF`/`AST_STMT_WHILE`**: with unique `.L<N>_else`/
+  `.L<N>_end` and `.L<N>_start`/`.L<N>_end` labels respectively,
+  controlled by `cmp rax, 0`+`je`.
+- **`AST_STMT_RETURN`**: decided by the enclosing function's declared
+  return type (`cur_func_return_type`/`cur_func_out_ptr_offset`, two
+  module-level globals that `gen_function` sets once before the body's
+  code generation begins — see 6.8; not threaded through
+  `gen_func_block`/`gen_block`/`gen_stmt` as a parameter, because
+  `gen_function` is never reentrant, so exactly one valid value is ever
+  alive at a time):
+  - **scalar/`void`**: unchanged — with an expression, `gen_rvalue`
+    (the value in `rax`, the ABI return register), `jmp .epilogue`;
+    without an expression, `jmp .epilogue` directly.
+  - **composite** (Phase 3): the destination address is loaded from the
+    hidden slot saved by the caller (`[rbp - cur_func_out_ptr_offset]`,
+    see 6.8), and the value is written there directly — for a
+    struct/array literal, `gen_init_push`/`gen_init_pop_store` (see
+    6.6, the destination address is computed **after** the leaves are
+    pushed, the same as for decl-init/assign); otherwise (lvalue shape,
+    including `CALL`) `gen_lvalue(expr) -> rbx` + `emit_rep_movsb_copy`.
+    Any `r8` (cleanup) output from the source is **deliberately not
+    freed** here — the `.epilogue` (`mov rsp, rbp`) that follows
+    immediately after discards the whole frame anyway, cleanup or not.
+  Every function has exactly one epilogue label.
+- **`AST_STMT_EXPR`**: `gen_rvalue`, the result discarded.
 
-### 6.8 Felső szint (megvalósítva: `AST_FUNCTION`+`AST_PROGRAM`; `AST_EXTERN_DECL`/`AST_STRUCT_DECL` nem adnak ki semmit)
+### 6.8 Top Level (implemented: `AST_FUNCTION`+`AST_PROGRAM`; `AST_EXTERN_DECL`/`AST_STRUCT_DECL` emit nothing)
 
-- **`AST_FUNCTION`**: `pf_<name>` címke (a függvény saját nevéből
-  dinamikusan összerakva, nem csak `main`-re hardkódolva). 3. fázis óta
-  a visszatérési típus **és** minden paraméter típusa tetszőleges lehet
-  (nincs többé `codegen_fail`-lel elutasított eset itt):
-  - **skalár/pointer paraméter**: változatlan sized-load+store másolás a
-    bejövő résből (`emit_param_copy` skalár ága).
-  - **összetett paraméter**: a bejövő rés egy **pointert** tartalmaz —
-    `emit_param_copy` összetett ága `rep movsb`-vel másolja a mutatott
-    memóriából a saját lokális résébe (a bejövő argumentum-blokk saját
-    báziscíme, target `rdi`, ideiglenesen elmentve/visszaállítva egy
-    `push`/`pop` párral, amíg `rdi`/`rsi` a `rep movsb` cél/forrás
-    szerepét játssza).
-  - **`void`/skalár visszatérési típus**: változatlan.
-  - **összetett visszatérési típus**: a prológus egy extra, mindig
-    8 bájtos rejtett rést foglal (a látható lokálisok mérete után
-    közvetlenül, a `sub rsp, ...` teljes mérete emiatt újra 16-ra
-    kerekítve), és ide menti el a bejövő `rdx`-et (a hívó output-
-    pointere, ld. 2. fejezet) — közvetlenül a prológus után, mielőtt a
-    törzs bármi mást tehetne vele. Ez a rés címe (`cur_func_out_ptr_offset`)
-    és a deklarált visszatérési típus (`cur_func_return_type`) két
-    modul-szintű globálisban kerül átadásra `gen_stmt`'s `.return_stmt`
-    ágának (ld. 6.7) — **nem** a `local_table`/`compute_local_offsets`
-    részeként (az tisztán felhasználó-deklarálta lokálisok/paraméterek
-    dolga marad).
-  Prológus a saját lokális táblájából méretezve; törzs `gen_func_block`-on
-  át; egy epilógus. Tetszőleges számú `AST_FUNCTION` engedélyezett,
-  **deklarációs sorrendben** generálva (a címke-hivatkozások egymás közt
-  fordítási időben, NASM szinten oldódnak fel, függetlenül a kiadási
-  sorrendtől — a kölcsönös rekurzió emiatt nem igényel külön kezelést).
-  Pontosan egynek kell `main` nevűnek lennie (a `_start` belépési pont
-  ezt hívja) — ha nincs, `codegen error`. `main`-nek **nulla**
-  paraméterrel kell rendelkeznie (a `_start` sosem állítja be
-  `rdi`/`rsi`-t a `call pf_main` előtt) — ezt `gen_program` explicit
-  ellenőrzi, `codegen error`-ral, ha sérül.
-- **Belépési pont / `AST_PROGRAM`**:
+- **`AST_FUNCTION`**: a `pf_<name>` label (assembled dynamically from
+  the function's own name, not just hardcoded for `main`). Since
+  Phase 3 the return type **and** every parameter's type may be
+  arbitrary (there is no longer a case rejected with `codegen_fail`
+  here):
+  - **scalar/pointer parameter**: an unchanged sized-load+store copy
+    from the incoming slot (`emit_param_copy`'s scalar branch).
+  - **composite parameter**: the incoming slot holds a **pointer** —
+    `emit_param_copy`'s composite branch copies, with `rep movsb`, from
+    the pointed-to memory into its own local slot (the incoming
+    argument block's own base address, target `rdi`, temporarily
+    saved/restored with a `push`/`pop` pair while `rdi`/`rsi` play the
+    role of `rep movsb`'s destination/source).
+  - **`void`/scalar return type**: unchanged.
+  - **composite return type**: the prologue allocates one extra,
+    always 8-byte, hidden slot (immediately after the size of the
+    visible locals, so the total `sub rsp, ...` size is again rounded
+    up to 16), and saves the incoming `rdx` there (the caller's output
+    pointer, see Chapter 2) — right after the prologue, before the body
+    can do anything else with it. This slot's address
+    (`cur_func_out_ptr_offset`) and the declared return type
+    (`cur_func_return_type`) are passed to `gen_stmt`'s `.return_stmt`
+    branch (see 6.7) via two module-level globals — **not** as part of
+    `local_table`/`compute_local_offsets` (which remains purely for
+    user-declared locals/parameters).
+  Prologue sized from its own local table; body via `gen_func_block`;
+  one epilogue. An arbitrary number of `AST_FUNCTION`s is allowed,
+  generated **in declaration order** (label references among them are
+  resolved at compile time, at the NASM level, independent of emission
+  order — mutual recursion therefore needs no special handling).
+  Exactly one of them must be named `main` (the `_start` entry point
+  calls it) — if there is none, `codegen error`. `main` must have
+  **zero** parameters (`_start` never sets up `rdi`/`rsi` before
+  `call pf_main`) — `gen_program` checks this explicitly, with a
+  `codegen error` if violated.
+- **Entry point / `AST_PROGRAM`**:
 
 ```nasm
 BITS 64
@@ -645,8 +653,8 @@ global _start
 
 _start:
     call    pf_main
-    mov     rdi, rax        ; main visszatérési értéke -> kilépőkód
-                             ; (mov rdi, 0, ha main : void)
+    mov     rdi, rax        ; main's return value -> exit code
+                             ; (mov rdi, 0, if main : void)
     mov     rax, 60         ; sys_exit
     syscall
 
@@ -656,111 +664,112 @@ pf_main:
 
 ---
 
-## 7. Új bináris: `build/codegen`
+## 7. New Binary: `build/codegen`
 
-Negyedik menet, ugyanazzal a rétegződési fegyelemmel, mint
-`lexer → parser → checker`: az egész meglévő lexer/parser verem
-(változatlan), plusz a szemantikai ellenőrző `symtab.asm`/
-`sema_types.asm`-je (közvetlenül újrahasznosítva — `build_global_tables`/
-`build_local_table`/típus-felbontás céljából), de **nem**
-`sema_expr.asm`/`sema_stmt.asm` *ellenőrző* logikája (a kódgenerátor csak
-a `check_program` által épített táblákat akarja, nem az igen/nem
-verdiktjét — újra fut `parse_program` + `check_program` a `build/checker`
-mintájára, majd `gen_program`).
+The fourth pass, with the same layering discipline as
+`lexer → parser → checker`: the entire existing lexer/parser stack
+(unchanged), plus the semantic checker's `symtab.asm`/`sema_types.asm`
+(reused directly — for `build_global_tables`/`build_local_table`/type
+resolution), but **not** the *checking* logic of `sema_expr.asm`/
+`sema_stmt.asm` (the code generator only wants the tables built by
+`check_program`, not its yes/no verdict — `parse_program` +
+`check_program` are rerun following `build/checker`'s pattern, then
+`gen_program`).
 
-**Fázis-hatókör kikényszerítés** (2. fázistól): nincs pontos "egy
-függvény" megkötés többé — `AST_STRUCT_DECL` és `AST_EXTERN_DECL` egyaránt
-csendben kimarad a kódgenerálásból (nem hiba), tetszőleges számú
-`AST_FUNCTION` megengedett. Az egyetlen kikényszerített dolog: pontosan
-egy `main` nevű, nulla-paraméteres függvény kell legyen jelen
-(`gen_program`). 3. fázis óta egy függvény visszatérési típusára/
-paramétereire **nincs** többé megszorítás (ld. 6.8) — a `codegen_fail`
-felület a 10. fejezetben leírt két, jóval szűkebb esetre korlátozódik.
+**Phase-scope enforcement** (from Phase 2 onward): there is no longer
+an exact "single function" restriction — both `AST_STRUCT_DECL` and
+`AST_EXTERN_DECL` are silently left out of code generation (not an
+error), and an arbitrary number of `AST_FUNCTION`s is allowed. The only
+thing enforced: exactly one zero-parameter function named `main` must
+be present (`gen_program`). Since Phase 3 there is **no** longer any
+restriction on a function's return type/parameters (see 6.8) — the
+`codegen_fail` surface is limited to the two, much narrower cases
+described in Chapter 10.
 
-Fájlok: `codegen_types.asm`, `codegen_expr.asm`, `codegen_stmt.asm`,
-`codegen_program.asm`, `codegen_composite.asm` (2. fázistól, ld. 6.6),
+Files: `codegen_types.asm`, `codegen_expr.asm`, `codegen_stmt.asm`,
+`codegen_program.asm`, `codegen_composite.asm` (from Phase 2, see 6.6),
 `codegen_main.asm`.
 
 ---
 
-## 8. Tesztelés — új típusú ellenőrzés
+## 8. Testing — a New Kind of Verification
 
-Minden korábbi menet fixture-je **statikus szöveget** hasonlított össze.
-A kódgenerátor fixture-jeinek erősebbet kell bizonyítaniuk: hogy a
-**generált assembly, lefordítva, linkelve és ténylegesen lefuttatva,
-helyesen viselkedik**. `Stage0/scripts/run_codegen_tests.sh`: minden
-`tests/codegen_cases/*.ptl`-re `build/codegen` → `.asm` szöveg → `nasm
--f elf64` → `ld -static -no-pie` → **a kapott bináris lefuttatása** →
-a valódi kilépőkód (és stdout, ha van `.expected.stdout`)
-összehasonlítása a becsomagolt `.expected.exit`/`.expected.stdout`
-párral.
+Every previous pass's fixtures compared **static text**. The code
+generator's fixtures must prove something stronger: that the
+**generated assembly, compiled, linked, and actually run, behaves
+correctly**. `Hoare/scripts/run_codegen_tests.sh`: for every
+`tests/codegen_cases/*.ptl`, `build/codegen` → `.asm` text →
+`nasm -f elf64` → `ld -static -no-pie` → **running the resulting
+binary** → comparing the real exit code (and stdout, if there is an
+`.expected.stdout`) against the packaged `.expected.exit`/
+`.expected.stdout` pair.
 
-A `tests/codegen_cases/` alatti 29 fixture (10 az 1., 12 a 2., 7 a 3.
-fázisból) lefedi: aritmetikát, összehasonlításokat (előjeles és
-előjeltelen), `if`/`else`-t, `while`-t, `&&`/`||` rövidzárat
-(megfigyelhető módon — egy nullával osztás, ami csak akkor futna le, ha
-rosszul lenne kiértékelve), egy explicit `sys_exit`-hívást, unáris/
-bitwise operátorokat, osztást/maradékot, szimultán értékadást,
-struct-mező olvasás/írás, tömb-index olvasás/írás, pointer írás
-dereferálson át, struct-/tömb-literál decl-init (beágyazott
-tömb-struct-tömb literállal is), struct-érték másolás, **egy több-páros
-szimultán értékadás, amiben egy struct-literál páros mezőkifejezése egy
-másik páros által UGYANABBAN az utasításban módosított változót olvas**
-(a legfontosabb 2. fázisbeli korrektségi teszt — csak akkor ad helyes
-eredményt, ha a literál mezője valóban az *utasítás-előtti* értéket
-látta), két-függvényes program, rekurzió (faktoriális), valódi
-`sys_write` egy tényleges bufferrel, tömb broadcast-init.
+The 29 fixtures under `tests/codegen_cases/` (10 from Phase 1, 12 from
+Phase 2, 7 from Phase 3) cover: arithmetic, comparisons (signed and
+unsigned), `if`/`else`, `while`, `&&`/`||` short-circuiting
+(observably — a division by zero that would only run if evaluated
+incorrectly), an explicit `sys_exit` call, unary/bitwise operators,
+division/remainder, simultaneous assignment, struct field read/write,
+array index read/write, pointer write through a dereference,
+struct/array literal decl-init (including a nested array-struct-array
+literal), struct value copying, **a multi-pair simultaneous assignment
+in which a struct-literal pair's field expression reads a variable
+modified by another pair in the SAME statement** (the most important
+Phase-2 correctness test — only correct if the literal's field really
+did see the *pre-statement* value), a two-function program, recursion
+(factorial), a real `sys_write` with an actual buffer, array
+broadcast-init.
 
-**3. fázis fixture-jei**: struct-argumentum érték szerint (a hívott fél
-a saját másolatát módosítja, a hívó eredeti példánya bizonyítottan
-változatlan marad utána — `23_composite_param`), ugyanez tömb-
-argumentumra (`25_composite_array_param`), struct visszatérési érték
-decl-initben felhasználva (`24_composite_return`), láncolt/beágyazott
-hívás: `f().mező` közvetlen olvasása (nincs köztes névvel ellátott
-változó) **és** `g(f())` (egy összetett-visszatérésű hívás eredménye
-közvetlenül egy másik összetett paraméterbe táplálva) egyazon
-fixture-ben (`26_composite_chained_and_nested_call`), rekurzió összetett
-paraméterrel **és** visszatérési típussal egyszerre
-(`27_composite_recursion` — bizonyítja, hogy az ideiglenes-terület-
-foglalás/felszabadítás-történet ismételt, beágyazott hívások alatt is
-helyes marad), egy packed, nem-8-tal-osztható méretű struct (két
-`int8` mező) mind argumentumként, mind visszatérési értékként
-(`28_composite_packed_odd_size` — az általánosított igazítás-kerekítés
-konkrét próbája), és egy `codegen_fail`-t váró fixture a tudatosan
-hatókörön kívül hagyott esetre (`29_composite_call_as_literal_field_
-deferred`, ld. 10. fejezet) — ez utóbbi az `.expected.codegen_exit`
-opcionális fixture-konvenciót használja (ld. `run_codegen_tests.sh`).
+**Phase 3's fixtures**: a struct argument passed by value (the callee
+modifies its own copy, and the caller's original instance is verifiably
+still unchanged afterward — `23_composite_param`), the same for an
+array argument (`25_composite_array_param`), a struct return value used
+in a decl-init (`24_composite_return`), a chained/nested call: reading
+`f().field` directly (no intermediate named variable) **and** `g(f())`
+(the result of a composite-returning call fed directly into another
+composite parameter) in the same fixture
+(`26_composite_chained_and_nested_call`), recursion with a composite
+parameter **and** return type at once (`27_composite_recursion` —
+proves that the temporary-area allocation/freeing story stays correct
+under repeated, nested calls as well), a packed struct with a
+not-divisible-by-8 size (two `int8` fields) both as an argument and as
+a return value (`28_composite_packed_odd_size` — a concrete test of the
+generalized alignment rounding), and a fixture expecting `codegen_fail`
+for the deliberately out-of-scope case
+(`29_composite_call_as_literal_field_deferred`, see Chapter 10) — the
+latter uses the optional `.expected.codegen_exit` fixture convention
+(see `run_codegen_tests.sh`).
 
 ---
 
-## 9. Kilépőkódok — kiegészítés
+## 9. Exit Codes — Addendum
 
-A meglévő táblázat (ld. `Stage0/README.md`) egy új sorral egészül ki:
+The existing table (see `Hoare/README.md`) gets one new row added:
 
-| Kód | Jelentés |
+| Code | Meaning |
 |---|---|
-| `4` | Kódgenerátor-hiba (`build/codegen` only). A program **szemantikailag érvényes**, de a kért konstrukció ezen a fázison kívül esik (struct/tömb/pointer, felhasználói függvényhívás, több függvényes program, stb.) — diagnosztika stderr-re, `codegen error:` prefixszel. Nem összekeverendő a 3-as (szemantikai hiba) kóddal: a 4-es soha nem jelent érvénytelen Postulate-forrást, csak a fordító jelenlegi hatókörén kívül esőt. |
+| `4` | Code generator error (`build/codegen` only). The program is **semantically valid**, but the requested construct falls outside this phase's scope (struct/array/pointer, user function call, multi-function program, etc.) — diagnostic to stderr, with the `codegen error:` prefix. Not to be confused with code 3 (semantic error): 4 never means invalid Postulate source, only something outside the compiler's current scope. |
 
 ---
 
-## 10. Ismert, ebben a fázisban tudatosan meg nem valósított tételek
+## 10. Known Items Deliberately Not Implemented in This Phase
 
-Az 1. fázis listája a 2. fázissal gyakorlatilag lefedésre került, a 3.
-fázis pedig lezárta a hívás-határ kérdését (struct/tömb *érték* immár
-argumentumként **és** visszatérési értékként is átmehet egy felhasználói
-függvényhívás határán, ld. 2. és 6.5-6.8. fejezet). Két, jóval szűkebb
-tétel maradt nyitva:
+Phase 1's list has effectively been covered by Phase 2, and Phase 3
+closed the call-boundary question (a struct/array *value* can now
+cross a user function-call boundary both as an argument **and** as a
+return value, see Chapter 2 and 6.5-6.8). Two, much narrower items
+remain open:
 
-- **Egy összetett-visszatérésű `CALL`, mint egy `STRUCT_LIT`/`ARRAY_LIT`
-  mező-/elem-értéke.** `gen_init_push` (ld. 6.6) jelenlegi kétkategóriás
-  levél-modellje ("skalár érték, push-olva" vagy "beágyazott literál,
-  rekurzálva") nem számol egy harmadik, "`CALL`, cím kell neki, amibe
-  írhat" kategóriával — az 1. menet előre haladó, csak-push-oló bejárása
-  még nem rendelkezik ehhez egy céllal. Konkrét, jelenleg el nem
-  fogadott példa (`codegen_fail`-lel tisztán elutasítva, nem rossz kódot
-  generálva — a `gen_rvalue` `CALL`-ágának meglévő guardján keresztül,
-  ld. 6.5, mert `gen_init_push` a `CALL`-levelet egyszerű skalár
-  leaf-ként próbálja `gen_rvalue`-val kiértékelni):
+- **A composite-returning `CALL` used as a `STRUCT_LIT`/`ARRAY_LIT`
+  field/element value.** `gen_init_push`'s (see 6.6) current
+  two-category leaf model ("scalar value, pushed" or "nested literal,
+  recursed into") does not account for a third category, "`CALL`,
+  needs an address to write into" — pass 1's forward, push-only walk
+  does not yet have a destination for this. A concrete, currently
+  unaccepted example (cleanly rejected with `codegen_fail`, not
+  generating incorrect code — via `gen_rvalue`'s `CALL` branch's
+  existing guard, see 6.5, because `gen_init_push` tries to evaluate
+  the `CALL` leaf as a simple scalar leaf, with `gen_rvalue`):
 
   ```postulate
   struct Point { x: int32; y: int32; }
@@ -771,36 +780,37 @@ tétel maradt nyitva:
   }
 
   function main() : int32 {
-    // end mezőjének inicializálója egy beágyazott STRUCT_LIT -- ez már
-    // megy (2. fázis óta). start mezőjének inicializálója egy
-    // összetett-visszatérésű CALL -- ez NEM megy még: gen_init_push-nak
-    // nincs `CALL`-levél esete. codegen_fail egy tiszta diagnosztikával,
-    // nem rossz kód generálásával.
+    // end's initializer is a nested STRUCT_LIT -- this already works
+    // (since Phase 2). start's initializer is a composite-returning
+    // CALL -- this does NOT work yet: gen_init_push has no case for a
+    // CALL leaf. codegen_fail with a clean diagnostic, instead of
+    // generating incorrect code.
     mut l: Line := Line { start := make_point(1, 2), end := Point { x := 3, y := 4 } };
     return l.start.x;
   }
   ```
 
-  Kerülőút, ami ma is működik: a hívás eredményének előzetes,
-  **névvel ellátott** helyi változóba mentése — `mut s: Point :=
+  A workaround that already works today: saving the call's result
+  beforehand into a **named** local variable — `mut s: Point :=
   make_point(1, 2); mut l: Line := Line { start := s, end := ... };` —
-  mivel egy sima `IDENT` mező-inicializáló érték már működik (2. fázis
-  óta), és `s` saját decl-initje `make_point(1, 2)`-ből pontosan a 3.
-  fázis alap-esete (ld. 6.5/6.7). Csak a *közvetlen, névtelen* hívás
-  mint mező-érték írásmódja van elhalasztva. (`tests/codegen_cases/
-  29_composite_call_as_literal_field_deferred.ptl` ezt a pontos, elutasított
-  esetet gyakorolja.)
-- **Összetett típusú `BINARY` operátorok** (`==`, `<`, stb. struct/tömb
-  operandusokon) — ez egy már **meglévő**, a checker `types_equal`-jából
-  fakadó megengedő rés (`sema_expr.asm`'s `.binary_compare` nem korlátozza
-  az operandus-kategóriát), amit ez a fázis nem hozott létre, és nem is
-  köteles lezárni — a kódgenerátor oldalán ez már ma is tisztán zárva
-  van: `gen_rvalue` sosem ad vissza összetett típust (ld. 6.5 indukciós
-  érve), tehát egy összetett `BINARY` operandus `is_scalar_loadable_type`
-  guardon bukik el, mielőtt bármi rosszul sülne el.
-- Összetett (struct/tömb elemtípusú) tömb-broadcast-forrás (ld. 6.6) —
-  ritka, tudatosan `codegen_fail`-lel elutasított eset, nem a
-  hívás-határ-kérdés része, 2. fázis óta változatlan.
+  since a plain `IDENT` field-initializer value already works (since
+  Phase 2), and `s`'s own decl-init from `make_point(1, 2)` is exactly
+  Phase 3's basic case (see 6.5/6.7). Only the *direct, unnamed* call
+  used as a field value is deferred. (`tests/codegen_cases/
+  29_composite_call_as_literal_field_deferred.ptl` exercises exactly
+  this rejected case.)
+- **Composite-typed `BINARY` operators** (`==`, `<`, etc. on
+  struct/array operands) — this is an already-**existing** permissive
+  gap stemming from the checker's `types_equal` (`sema_expr.asm`'s
+  `.binary_compare` does not restrict the operand category), which
+  this phase did not create and is not obligated to close either — on
+  the code generator's side, this is already cleanly closed today:
+  `gen_rvalue` never returns a composite type (see 6.5's induction
+  argument), so a composite `BINARY` operand fails the
+  `is_scalar_loadable_type` guard before anything can go wrong.
+- A composite (struct/array element-typed) array broadcast source (see
+  6.6) — a rare case, deliberately rejected with `codegen_fail`, not
+  part of the call-boundary question, unchanged since Phase 2.
 
-Ezek egy külön, még meg nem tervezett jövőbeli fázisra várnak; ekkor ez a
-dokumentum bővül, nem cserélődik le.
+These await a separate, not-yet-planned future phase; at that point
+this document will be extended, not replaced.

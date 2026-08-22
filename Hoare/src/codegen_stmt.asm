@@ -107,7 +107,7 @@ section .text
 ;   target address (gen_named_local_addr -> target rbx) -- safe in this
 ;   order specifically because address computation for a plain local
 ;   never touches rax, so no push/pop staging is needed (unlike
-;   AST_STMT_ASSIGN's general two-pass scheme, ld. gen_stmt below).
+;   AST_STMT_ASSIGN's general two-pass scheme, see gen_stmt below).
 ; - struct/array, init is a STRUCT_LIT/ARRAY_LIT: gen_init_push (pass 1)
 ;   then gen_named_local_addr + gen_init_pop_store (pass 2) -- no
 ;   push/pop of the address needed here either (single-write, no
@@ -181,7 +181,7 @@ gen_decl:
     push    r12
     call    gen_lvalue                  ; -> target rbx = src addr;
                                          ; rax(ours) = resolved type;
-                                         ; r8(ours) = cleanup size (ld.
+                                         ; r8(ours) = cleanup size (see
                                          ; gen_lvalue's own header)
     pop     r12
     pop     rbx
@@ -278,7 +278,7 @@ gen_decl:
     je      .done
     mov     rsi, s_add_rsp_             ; free the temp the source came
     mov     rdx, s_add_rsp__len         ; from, now that we're done
-    push    r8                          ; reading it (ld. gen_lvalue
+    push    r8                          ; reading it (see gen_lvalue
     call    emit_str                    ; header -- no leak)
     pop     r8
     mov     rax, r8
@@ -364,7 +364,7 @@ gen_decl:
 ; ===========================================================================
 ; gen_stmt: in rdi = stmt node ptr. Emits the statement's code. No
 ; return-type parameter -- RETURN's own codegen never needs one: with
-; scalar-only returns (rax, ld. Calling convention), no sizing/conversion
+; scalar-only returns (rax, see Calling convention), no sizing/conversion
 ; is needed, and the value's type was already checker-validated before
 ; codegen ever runs.
 ; ===========================================================================
@@ -586,7 +586,7 @@ gen_stmt:
     je      .return_jmp
     mov     r12, rax                    ; expr node -- ours, protected
                                          ; throughout
-    mov     r13, [cur_func_return_type] ; ld. codegen_program.asm's
+    mov     r13, [cur_func_return_type] ; see codegen_program.asm's
                                          ; gen_function header -- set
                                          ; once, before this function's
                                          ; body is ever generated
@@ -608,7 +608,7 @@ gen_stmt:
 
     ; --- composite return: write straight into the caller-provided
     ; destination (its address was saved into this frame's hidden slot
-    ; right after the prologue, ld. gen_function) ---
+    ; right after the prologue, see gen_function) ---
     mov     rax, [r12 + AST_KIND_OFF]
     cmp     rax, AST_EX_STRUCT_LIT
     je      .return_literal
@@ -618,7 +618,7 @@ gen_stmt:
     ; lvalue-shaped source: gen_lvalue's own cleanup output (r8), if
     ; any, is deliberately left unhandled here -- we're about to jmp
     ; .epilogue, whose "mov rsp, rbp" tears down this whole frame
-    ; (reservation included) regardless, ld. gen_lvalue's own header
+    ; (reservation included) regardless, see gen_lvalue's own header
     mov     rdi, r12
     push    r12
     push    r13
@@ -679,7 +679,7 @@ gen_stmt:
     push    r13
     call    emit_str                    ; target rbx = the SAVED output
     pop     r13                         ; pointer VALUE, computed AFTER
-    pop     r12                         ; the leaves (deliberately, ld.
+    pop     r12                         ; the leaves (deliberately, see
                                          ; gen_init_push's own header)
     mov     rdi, r12                    ; literal node
     mov     rsi, r13                    ; expected type = declared
@@ -703,11 +703,11 @@ gen_stmt:
 ; --- ASSIGN: Dijkstra/Hoare simultaneous-assignment. Two passes, per
 ; pair, in one of four shapes (classified structurally, no emission
 ; needed to decide which): SCALAR/pointer (unchanged from Phase 1),
-; composite LITERAL (ld. codegen_composite.asm's gen_init_push/
+; composite LITERAL (see codegen_composite.asm's gen_init_push/
 ; gen_init_pop_store), composite COPY (`p2 := p1;`-shaped), and array
 ; BROADCAST (Part A1's checker rule). Each pair's own (shape, lhs type)
-; is stashed in a 2-qword-per-pair scratch array on OUR OWN (the Stage0
-; compiler's) native stack -- entirely separate from the "push"/"pop"
+; is stashed in a 2-qword-per-pair scratch array on OUR OWN (this
+; compiler's, Hoare's) native stack -- entirely separate from the "push"/"pop"
 ; TEXT this routine emits into the output buffer for the *target*
 ; program's stack. rbx is repurposed as that scratch array's base
 ; pointer once the pairs ptr/count are safely off it into r12/r13 (same
@@ -718,7 +718,7 @@ gen_stmt:
 ; call below -- never assumed to simply survive it.
 ;
 ; Push-pattern per shape, pass 1 (address-vs-value/leaves ordering
-; matters -- ld. codegen spec for why): SCALAR/BROADCAST = address then
+; matters -- see codegen spec for why): SCALAR/BROADCAST = address then
 ; value; LITERAL = leaves (gen_init_push) then address, address pushed
 ; LAST; COPY = dest address then src address. Pass 2 (this pair's turn,
 ; overall pairs processed in reverse) undoes exactly that shape's
@@ -728,7 +728,7 @@ gen_stmt:
     mov     r13, [rbx + AST_B_OFF]      ; pair_count
     sub     rsp, MAX_LIST_ARITY * 24    ; scratch: 3 qwords per pair --
                                          ; shape tag, lhs type, cleanup
-                                         ; size (COPY shape only, ld.
+                                         ; size (COPY shape only, see
                                          ; .p1_maybe_copy/.p2_copy)
     mov     rbx, rsp                    ; rbx repurposed -- the original
                                          ; stmt node is never read again
@@ -927,7 +927,7 @@ gen_stmt:
     push    r14
     push    r15
     call    gen_lvalue                  ; -> rax(ours) = rhs type; r8
-                                         ; (ours) = cleanup size (ld.
+                                         ; (ours) = cleanup size (see
                                          ; gen_lvalue's own header);
                                          ; emits src address computation
     pop     r15
@@ -991,7 +991,7 @@ gen_stmt:
     mov     qword [r9], 2               ; shape = COPY
     mov     [r9 + 8], r15
     mov     [r9 + 16], r8               ; cleanup, freed after the copy in
-                                         ; pass 2 (ld. .p2_copy)
+                                         ; pass 2 (see .p2_copy)
     jmp     .p1_next
 
 .p1_broadcast_composite_check:
@@ -1000,12 +1000,12 @@ gen_stmt:
     push    r13
     push    r14
     push    r15
-    push    r8                          ; cleanup -- protect it too, ld.
+    push    r8                          ; cleanup -- protect it too, see
                                          ; header rule
     push    rcx                         ; rhs type -- protect across
                                          ; is_scalar_loadable_type below;
                                          ; rcx is never trustworthy across
-                                         ; a call in this codebase (ld.
+                                         ; a call in this codebase (see
                                          ; type_size's own scratch use)
     mov     rdi, rcx
     call    is_scalar_loadable_type
@@ -1140,7 +1140,7 @@ gen_stmt:
     mov     rax, [r9]                   ; shape tag
     mov     r15, [r9 + 8]               ; lhs type
     mov     r8, [r9 + 16]               ; cleanup size -- meaningful only
-                                         ; for shape == 2 (COPY), ld.
+                                         ; for shape == 2 (COPY), see
                                          ; .p1_maybe_copy/.p2_copy
     cmp     rax, 0
     je      .p2_scalar

@@ -268,7 +268,7 @@ emit_rep_movsb_copy:
 
 ; ===========================================================================
 ; gen_init_push: in rdi = AST_EX_STRUCT_LIT/AST_EX_ARRAY_LIT node. Pass 1
-; of composite-literal codegen (ld. file header) -- walks the literal in
+; of composite-literal codegen (see file header) -- walks the literal in
 ; forward, declaration/index order; for every leaf (scalar/pointer)
 ; field/element, gen_rvalue + push; a nested composite field/element is
 ; recursed into inline, joining the same flat push sequence. No
@@ -278,7 +278,7 @@ emit_rep_movsb_copy:
 ; address independently and simply ignores this; Phase 3's composite
 ; call-argument materialization needs it to recover a fresh reservation's
 ; address via a compile-time-known "[rsp + this]" offset once pass 1's
-; leaves are on top of it (ld. codegen_expr.asm's gen_user_call).
+; leaves are on top of it (see codegen_expr.asm's gen_user_call).
 ; ===========================================================================
 gen_init_push:
     mov     rbx, rdi
@@ -441,7 +441,7 @@ gen_init_push:
 ; from the ultimate target base address (0 at the top-level call). Pass
 ; 2 of composite-literal codegen: PRECONDITION -- the target program's
 ; rbx already holds the ultimate target base address (popped by the
-; caller from what gen_init_push's caller pushed -- ld. file header),
+; caller from what gen_init_push's caller pushed -- see file header),
 ; and this routine never modifies it. Walks the SAME structure gen_init_push
 ; just walked, in REVERSE order, popping each leaf and storing it via
 ; emit_sized_store_rbx_plus(type, accumulated_offset + this leaf's own

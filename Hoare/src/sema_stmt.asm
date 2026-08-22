@@ -76,7 +76,7 @@ section .text
 ; lvalue_equal: in rdi = expr node, rsi = expr node. out: rax = 1/0 --
 ; exact structural equality over IDENT/UNARY/INDEX/FIELD shapes only (any
 ; other kind, e.g. a non-lvalue-shaped index sub-expression, conservatively
-; compares "not equal" -- no aliasing analysis, ld. plan/spec scope: this
+; compares "not equal" -- no aliasing analysis, see plan/spec scope: this
 ; only catches syntactically-identical duplicate targets, e.g. "x := 1,
 ; x := 2;", not "arr[i] := 1, arr[j] := 2;" even if i == j at runtime).
 ; ===========================================================================
@@ -205,7 +205,7 @@ check_const_reassignment:
 ; treated as broadcast) and its own type, checked against the array's
 ; ELEMENT type specifically, matches. Used as a fallback wherever a
 ; direct types_equal(actual, array_type) comparison already failed --
-; ld. check_decl / check_stmt's .assign pair loop.
+; see check_decl / check_stmt's .assign pair loop.
 ; ===========================================================================
 check_array_broadcast_compatible:
     push    rbx
@@ -239,7 +239,7 @@ check_array_broadcast_compatible:
 ; check_decl: in rdi = AST_DECL_MUT/CONST ptr. If an init is present,
 ; checks it against the declared type -- an array-typed decl whose init
 ; isn't an ARRAY_LIT falls back to a broadcast-compatibility check
-; before being reported as a mismatch (ld. check_array_broadcast_compatible).
+; before being reported as a mismatch (see check_array_broadcast_compatible).
 ; ===========================================================================
 check_decl:
     push    rbx

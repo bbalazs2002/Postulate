@@ -1,82 +1,90 @@
-# Postulate — Stage 0 nyelvi specifikáció
+# Postulate — Stage 0 Language Specification
 
-> Ez a dokumentum minden információt tartalmaz, ami a **Postulate** nyelv Stage 0
-> bootstrap fordítójának elkészítéséhez szükséges. Célja, hogy egy másik
-> munkamenetben is folytatható legyen a fejlesztés, előzmények nélkül is.
-
----
-
-## 1. Projekt kontextus
-
-A Postulate egy **saját tervezésű, C-szerű programozási nyelv**, amelynek célja egy
-saját, moduláris, multi-architektúrás hobbi operációs rendszer megírása. A nyelv fő
-tervezési célja **nem** a maximális kifejezőerő vagy kényelem, hanem hogy:
-
-1. Alkalmas legyen **matematikai pontosságú, specifikáció szintű helyesség-bizonyításra**
-   (Hoare-logika, ELTE IK "Bevezetés a programozáshoz" / Fóthi Ákos-féle relációs
-   modell alapján — állapottér, paramétertér, elő-/utófeltétel, leggyengébb előfeltétel).
-2. Szintaxisában is tükrözze ezt a formális, pszeudokód-szerű gondolkodásmódot.
-3. Imperatív **és** funkcionális stílusú használatra is alkalmas legyen.
-4. Kernel-fejlesztésre (rendszerprogramozásra) legyen alkalmas: nincs GC, nincs
-   rejtett futásidejű overhead, explicit memóriakezelés.
-
-### Névválasztás
-
-A nyelv neve **Postulate**. Elutasított jelöltek és okuk:
-- `N` — foglalt (N-lang, ALGOL N)
-- `Nerd` — foglalt, aktív, friss projekt (LLM-natív nyelv, nerd-lang.org)
-- `Axiom` — foglalt (ismert számítógépes algebra rendszer)
-- `QED` — foglalt (több projekt is, egyikük pont formális verifikáció témában)
-- `Certus` — részben foglalt (2025-ös publikáció, assurance-case DSL)
-- `Verus` — foglalt (jelentős, aktív Rust-verifikációs eszköz)
-- `Praecis` — szabad volt, de fonetikailag közel áll a "Praxis" névhez (SPARK Ada
-  előd cég neve), ezért mellőzve
-
-A `Postulate` szabad, jelentése (posztulátum = bizonyítás nélkül elfogadott,
-alapul szolgáló állítás) illeszkedik a verifikációs célhoz. Bónusz: hasonlít a
-magyar "pusztulat" szóra (önironikus utalás a nyelv szigorúságára/nehézségére).
-
-### Fájlkiterjesztés
-
-**`.ptl`** — enyhe, de elhanyagolható ütközés van: IBM Rational Rose "Petal" UML
-fájlformátum (inaktív eszköz), és a Python Quixote sablonnyelv (elavult). Egyik sem
-aktív programozási nyelv, a gyakorlati kockázat alacsonynak ítélve elfogadva.
+> This document contains all the information needed to build the **Postulate**
+> language's Stage 0 bootstrap compiler. Its purpose is to allow development to
+> continue in a different session, without prior history.
 
 ---
 
-## 2. Bootstrap terv (nagy kép)
+## 1. Project context
+
+Postulate is a **custom-designed, C-like programming language**, whose purpose
+is to write a custom, modular, multi-architecture hobby operating system. The
+language's main design goal is **not** maximal expressiveness or convenience,
+but rather:
+
+1. To be suitable for **mathematically precise, specification-level correctness
+   proofs** (Hoare logic, based on the relational model from ELTE IK's
+   "Introduction to Programming" course / Ákos Fóthi's model — state space,
+   parameter space, pre-/postcondition, weakest precondition).
+2. To reflect this formal, pseudocode-like way of thinking in its syntax as well.
+3. To be suitable for both imperative **and** functional-style use.
+4. To be suitable for kernel development (systems programming): no GC, no
+   hidden runtime overhead, explicit memory management.
+
+### Name selection
+
+The language's name is **Postulate**. Rejected candidates and their reasons:
+- `N` — taken (N-lang, ALGOL N)
+- `Nerd` — taken, active, recent project (LLM-native language, nerd-lang.org)
+- `Axiom` — taken (well-known computer algebra system)
+- `QED` — taken (multiple projects, one of them specifically in the formal
+  verification space)
+- `Certus` — partially taken (2025 publication, assurance-case DSL)
+- `Verus` — taken (significant, active Rust verification tool)
+- `Praecis` — was free, but phonetically close to "Praxis" (the name of a
+  predecessor company of SPARK Ada), so it was dropped
+
+`Postulate` is free, and its meaning (a postulate is a statement accepted
+without proof, serving as a foundation) fits the verification goal. Bonus: it
+resembles the Hungarian word "pusztulat" [destruction/ruin] (a self-ironic nod
+to the language's strictness/difficulty).
+
+### File extension
+
+**`.ptl`** — there is a mild, but negligible, clash: the IBM Rational Rose
+"Petal" UML file format (inactive tool), and the Python Quixote template
+language (obsolete). Neither is an active programming language, so the
+practical risk is judged low and accepted.
+
+---
+
+## 2. Bootstrap plan (big picture)
 
 ```
 Stage 0 (assembly, x86_64, Linux host)
-   │  fordítja a Stage 1 forráskódját
+   │  compiles the Stage 1 source code
    ▼
-Stage 1 (Postulate nyelven írva, LLVM IR célkódot generál)
-   │  self-hosting: Stage 1 lefordítja saját magát
+Stage 1 (written in the Postulate language, generates LLVM IR target code)
+   │  self-hosting: Stage 1 compiles itself
    ▼
-Self-hosting elérve — Stage 0 ("bootstrap mag") ezután történeti/eldobható
+Self-hosting achieved — Stage 0 (the "bootstrap core") becomes historical/disposable thereafter
 ```
 
-- **Stage 0 célja kizárólag annyi**, hogy a Stage 1 fordítót (ami már magán a
-  Postulate nyelven van írva) le tudja fordítani. Nem kell a teljes nyelvet
-  támogatnia — csak egy minimális, jól körülhatárolt részhalmazt (ez a jelen
-  dokumentum tárgya).
-- **Stage 1-től kezdve** LLVM IR-t generál a fordító, kihasználva az LLVM kész,
-  kiforrott backend-jeit minden célarchitektúrához (x86_64, ARM, RISC-V stb.) —
-  így nem kell saját codegent írni minden architektúrához.
-- **Host környezet:** a fejlesztő gépén Windows 11 x64 fut, de a Stage 0/Stage 1
-  fordítók **Linux x86_64 hoszton** futnak (Docker-en keresztül), hogy megegyezzen
-  a GitHub Actions CI (ubuntu-latest) syscall-környezetével. A Stage 0 assembly
-  közvetlenül a **Linux x86_64 syscall ABI-t** (System V AMD64 calling convention)
-  éri el — nincs libc, nincs dinamikus linkelés, statikus, syscall-alapú bináris.
-- Stage 0/Stage 1 **a fejlesztői (host) gépen fut**, nem a majdani saját OS-en —
-  az még nem létezik, amikor a fordítót futtatod. Ezért a Stage 0-nak saját
-  I/O-t és memóriafoglalást (`mmap`, `read`, `write`, `exit` syscall-okon
-  keresztül) kell biztosítania, libc nélkül.
-- **A Postulate nyelv maga is eléri ugyanezeket a syscallokat**, `extern function`
-  deklarációkon keresztül (ld. 4. fejezet nyelvtan) — enélkül a Stage 1 fordító
-  (ami már Postulate-ben van írva) nem tudna forrásfájlt olvasni vagy LLVM IR-t
-  kiírni. A Stage 0 fordító egy **fix, zárt szimbólumnév-listát** ismer fel és
-  fordít le közvetlen syscall-hívássá — nincs általános linker/FFI:
+- **Stage 0's sole purpose** is to be able to compile the Stage 1 compiler
+  (which is already written in the Postulate language itself). It does not
+  need to support the full language — only a minimal, well-defined subset
+  (this is the subject of the present document).
+- **Starting from Stage 1**, the compiler generates LLVM IR, taking advantage
+  of LLVM's ready-made, mature backends for every target architecture
+  (x86_64, ARM, RISC-V, etc.) — so there is no need to write a custom codegen
+  for every architecture.
+- **Host environment:** the developer's machine runs Windows 11 x64, but the
+  Stage 0/Stage 1 compilers run **on a Linux x86_64 host** (via Docker), to
+  match the syscall environment of GitHub Actions CI (ubuntu-latest). Stage 0
+  assembly accesses the **Linux x86_64 syscall ABI** (System V AMD64 calling
+  convention) directly — there is no libc, no dynamic linking, it is a static,
+  syscall-based binary.
+- Stage 0/Stage 1 **run on the developer's (host) machine**, not on the
+  eventual custom OS — that does not exist yet when you run the compiler.
+  Therefore Stage 0 must provide its own I/O and memory allocation (via the
+  `mmap`, `read`, `write`, `exit` syscalls), without libc.
+- **The Postulate language itself also accesses these same syscalls**, via
+  `extern function` declarations (see chapter 4 grammar) — without this, the
+  Stage 1 compiler (which is already written in Postulate) would not be able
+  to read a source file or write out LLVM IR. The Stage 0 compiler recognizes
+  a **fixed, closed list of symbol names** and compiles them directly into
+  syscall invocations — there is no general linker/FFI:
 
   ```postulate
   extern function sys_read(fd: int64, buf: *uint8, count: uint64) : int64;
@@ -88,39 +96,41 @@ Self-hosting elérve — Stage 0 ("bootstrap mag") ezután történeti/eldobhat�
 
 ---
 
-## 3. Stage 0 — mit tartalmaz és mit nem
+## 3. Stage 0 — what it includes and what it doesn't
 
-### Mit tartalmaz (indoklással)
+### What it includes (with rationale)
 
-A Stage 0 pontosan annyit tartalmaz, amennyi egy **lexer + rekurzív leszállásos
-parser + AST-építés + szöveges LLVM IR-kiírás** megírásához szükséges a Stage 1
-fordító megírásához:
+Stage 0 includes exactly as much as is needed to write a **lexer + recursive
+descent parser + AST construction + textual LLVM IR emission** for compiling
+the Stage 1 compiler:
 
-- Fix méretű egész típusok, `bool`, nyers pointer, fix méretű tömb (elemenként
-  bázistípusból vagy pointerből), `struct`, `void`
-- Csak függvény-elején történő deklaráció (állapottér rögzítése — Hoare-logika-barát)
+- Fixed-size integer types, `bool`, raw pointer, fixed-size array (elements of
+  a base type or pointer), `struct`, `void`
+- Only function-start declarations (fixing the state space — Hoare-logic
+  friendly)
 - `if`/`else`, `while`, `return`
-- Szimultán értékadás (`:=`), Dijkstra/Hoare-szemantikával
-- Teljes kifejezés-nyelvtan operátor-precedenciával
-- Több számrendszerű egész literál, `bool` literál, `null`
-- `//` és `/* */` kommentek
-- `extern function` deklaráció, fix syscall-whitelisttel — ez teszi lehetővé,
-  hogy a Stage 1 fordító (Postulate-ben írva) egyáltalán olvasni/írni tudjon
-  fájlt, enélkül a bootstrap-lánc nem folytatódhatna Stage 1-re
+- Simultaneous assignment (`:=`), with Dijkstra/Hoare semantics
+- A complete expression grammar with operator precedence
+- Multi-radix integer literals, `bool` literal, `null`
+- `//` and `/* */` comments
+- `extern function` declaration, with a fixed syscall whitelist — this is what
+  makes it possible for the Stage 1 compiler (written in Postulate) to read
+  and write files at all; without it the bootstrap chain could not proceed to
+  Stage 1
 
-### Mit szándékosan kizártunk Stage 0-ból
+### What is intentionally excluded from Stage 0
 
-- Generikusok, closure-ök, kivételkezelés, OOP (öröklés, dinamikus diszpatch), GC
-- Sztenderd könyvtár, string típus, char típus, float típus
-- Verifikációs kontraktus-szintaxis (`requires`/`ensures`/invariáns) — ez a nyelv
-  *fő* célja lesz, de csak Stage 1-től kezdve jelenik meg
-- Többfájlos modul-/include-rendszer
-- Referencia szerinti paraméterátadás (csak érték szerint, ld. lentebb)
-- `**` hatványozó operátor (ld. "Későbbre halasztott döntések")
+- Generics, closures, exception handling, OOP (inheritance, dynamic dispatch), GC
+- Standard library, string type, char type, float type
+- Verification contract syntax (`requires`/`ensures`/invariant) — this will be
+  the language's *main* goal, but it only appears starting from Stage 1
+- Multi-file module/include system
+- Pass-by-reference parameter passing (only by value, see below)
+- The `**` exponentiation operator (see "Decisions deferred to later phases")
 
 ---
 
-## 4. Teljes formális nyelvtan (EBNF) — Stage 0
+## 4. Complete formal grammar (EBNF) — Stage 0
 
 ```ebnf
 program        ::= top_level_decl+
@@ -189,16 +199,20 @@ type           ::= "*" base_type "[" integer_literal "]"
                   | base_type
 ```
 
-A `type` szabály alternatívái **sorrendben, elsőtalálat-elvvel** (PEG-stílusban) értendők — az első
-alternatíva mindig elsőbbséget élvez, ha illeszkedik:
+The alternatives of the `type` rule are to be understood **in order, with a
+first-match rule** (PEG-style) — the first alternative always takes priority
+if it matches:
 
-- **`*T[N]` (zárójel nélkül) → N darab `*T` pointer tömbje.** Ez a rövid, alapértelmezett forma —
-  fordítói adatszerkezeteknél (AST gyerek-listák, szimbólumtábla-bejegyzések) ez a gyakoribb eset.
-- **`*(T[N])` (explicit zárójellel) → pointer egy N-elemű `T`-tömbre.** A ritkább eset zárójelet
-  igényel — a `"(" type ")"` csoportosító szabály teszi lehetővé.
-- Zárójel nélkül a `*` mindig a *közvetlenül utána következő, még fel nem bontott* elemre
-  vonatkozik — ha az rögtön egy `base_type "[" N "]"` mintát alkot, az egész `*base_type[N]`
-  egységet "pointer-tömbként" kell olvasni, nem "pointerré csomagolt tömbként".
+- **`*T[N]` (without parentheses) → an array of N `*T` pointers.** This is the
+  short, default form — for compiler data structures (AST child lists, symbol
+  table entries) this is the more common case.
+- **`*(T[N])` (with explicit parentheses) → a pointer to an N-element array of
+  `T`.** The rarer case requires parentheses — made possible by the grouping
+  rule `"(" type ")"`.
+- Without parentheses, `*` always applies to the *element immediately
+  following it, not yet decomposed* — if that immediately forms a
+  `base_type "[" N "]"` pattern, the whole `*base_type[N]` unit must be read
+  as an "array of pointers", not as an "array wrapped into a pointer".
 
 ```ebnf
 
@@ -216,178 +230,184 @@ keywords       ::= "function" | "struct" | "extern" | "mut" | "const" | "if" | "
                   | "uint8" | "uint16" | "uint" | "uint32" | "uint64" | "bool" | "void"
 ```
 
-### Szemantikai megkötések (nem nyelvtaniak — a fordító szemantikai elemző
-fázisában ellenőrizendők, nem a lexer/parser szintjén)
+### Semantic constraints (not grammatical — to be checked in the compiler's
+semantic analysis phase, not at the lexer/parser level)
 
-| Terület | Szabály |
+| Area | Rule |
 |---|---|
-| Számrendszer-bázis | Kizárólag `{2, 8, 10, 16}` lehet a `based_form` bázisa; minden `value_digit` kisebb kell legyen a bázisnál. **Tudatosan megengedőbb a nyelvtan, mint a szemantika** — később bővíthető a bázishalmaz a szemantikai elemző módosításával, a nyelvtan változatlanul hagyásával. |
-| Deklaráció helye | Kizárólag a `func_block` legelején — beágyazott blokkokban (`if`/`while` teste) nem lehet `decl`. Ez a `func_block` vs. `block` külön szabállyal már a nyelvtan szintjén ki van zárva. |
-| Paraméterátadás | Mindig **érték szerint** Stage 0-ban (nincs referencia-átadás). |
-| `const` | Kötelező inline `:=` inicializálás; a `const` azonosító **soha** nem lehet `lvalue` célpont `assign_stmt`-ben. |
-| `mut` (skalár típus) | Opcionális inline inicializálás; tetszőlegesen újraírható. |
-| `mut`/`const` (tömb-típus) | **Kötelező** `:=` inicializálás; az érték egyetlen kifejezés, amit **minden tömbelemre alkalmaz (broadcast)**. Pl. `mut arr : int32[10] := 0;` → mind a 10 elem 0. |
-| `mut`/`const` (struct-típus) | **Kötelező** `:=` inicializálás, kizárólag `struct_literal` formában. |
-| `struct_literal` | A hivatkozott `struct` **minden** mezőjét pontosan egyszer, explicit módon meg kell adnia — hiányzó vagy duplikált mező fordítási hiba. Cél: soha ne jöhessen létre inicializálatlan ("szemét") memóriatartalmú struct-példány. |
-| `comparison` | **Nem láncolható** — `a < b < c` nyelvtanilag hibás (a `?` jelöli a nyelvtanban: legfeljebb egy összehasonlító operátor). Ez tudatos eltérés a matematikai konvenciótól, hogy elkerüljük a C öröklött, megtévesztő láncolási viselkedését. |
-| `int` / `uint` | `int` ≡ `int16`, `uint` ≡ `uint16` — teljesen ekvivalens alul fekvő típusok, nem külön típusok. |
-| Implicit típuskonverzió | **Tilos.** Bináris operátorok mindkét operandusának szigorúan azonos típusúnak kell lennie (pl. `int8 + int32` fordítási hiba). Ez kiküszöböli a komplex implicit coercion/zext/sext logikát a Stage 0 kódgenerátorból, és összhangban van a nyelv "explicit mindenben" alapkonvenciójával. |
-| `array_literal` | Az elemek száma pontosan meg kell egyezzen a deklarált tömbmérettel (`N`). Eltérés esetén fordítási hiba — köztes, részleges lista nem megengedett (ugyanaz a "nincs szemét memória" elv, mint a struct-oknál). A fordító a listát belsőleg sorozatos indexelt értékadásra bontja szét (`arr[0] := e0; arr[1] := e1; ...`), nincs hozzá külön kódgenerálási eset. |
-| Pointer-aritmetika | **Tiltott Stage 0-ban.** Pointereken kizárólag címképzés (`&`) és dereferálás (`*`) megengedett — `p + 1` stílusú kifejezések fordítási hibát adnak. A tömbelérés `arr[i]` formában továbbra is támogatott. Ez a megkötés **később, egy adott fázisban feloldásra kerül** — ld. "Későbbi fázisokra halasztott döntések". |
-| Szimultán értékadás | `assign_stmt`-ben minden `lvalue` célpontnak különbözőnek kell lennie egy soron belül. A jobb oldalak kiértékelése az utasítás **előtti** állapoton történik; az összes hozzárendelés csak ez után, egyszerre lép érvénybe (Dijkstra/Hoare-szemantika). |
-| `extern function` | A deklarált név kizárólag a Stage 0 fordító által ismert, **fix, zárt szimbólumnév-listából** választható (ld. 2. fejezet kiegészítése) — jelenleg `sys_read`, `sys_write`, `sys_mmap`, `sys_exit`. A paraméter- és visszatérési típusoknak pontosan meg kell egyezniük az adott szimbólumhoz Stage 0-ban rögzített aláírással. Nincs `func_block` teste (a `;` zárja), és nincs általános linker/FFI — bármely más néven történő `extern` deklaráció fordítási hiba. |
-| `return` / visszatérési típus | `void` visszatérési típusú függvényben a `return` kizárólag kifejezés nélkül szerepelhet (`return;`). Minden más (nem-`void`) visszatérési típus esetén a `return` kötelezően tartalmaz kifejezést, aminek típusa szigorúan meg kell egyezzen a függvény deklarált visszatérési típusával — ugyanaz az "Implicit típuskonverzió: Tilos" szabály érvényes itt is (ld. fent), tehát pl. egy `int16`-ot visszaadó kifejezés nem fogadható el `int32` visszatérési típusnál. Minden végrehajtási útnak `return`-nel kell záródnia nem-`void` függvényben. |
+| Numeral system base | The base of `based_form` can only be `{2, 8, 10, 16}`; every `value_digit` must be smaller than the base. **The grammar is deliberately more permissive than the semantics** — the set of allowed bases can be extended later by modifying the semantic analyzer, leaving the grammar unchanged. |
+| Declaration location | Only at the very start of `func_block` — nested blocks (`if`/`while` bodies) may not contain a `decl`. This is already excluded at the grammar level by the separate `func_block` vs. `block` rules. |
+| Parameter passing | Always **by value** in Stage 0 (no pass-by-reference). |
+| `const` | Requires mandatory inline `:=` initialization; a `const` identifier may **never** be an `lvalue` target in an `assign_stmt`. |
+| `mut` (scalar type) | Optional inline initialization; can be reassigned arbitrarily. |
+| `mut`/`const` (array type) | **Mandatory** `:=` initialization; the value is a single expression that is **broadcast to every array element**. E.g. `mut arr : int32[10] := 0;` → all 10 elements are 0. |
+| `mut`/`const` (struct type) | **Mandatory** `:=` initialization, exclusively in `struct_literal` form. |
+| `struct_literal` | Must specify **every** field of the referenced `struct` exactly once, explicitly — a missing or duplicated field is a compile error. Goal: an uninitialized ("garbage") struct instance can never come into existence. |
+| `comparison` | **Not chainable** — `a < b < c` is grammatically invalid (marked by `?` in the grammar: at most one comparison operator). This is a deliberate departure from mathematical convention, to avoid C's inherited, misleading chaining behavior. |
+| `int` / `uint` | `int` ≡ `int16`, `uint` ≡ `uint16` — fully equivalent underlying types, not separate types. |
+| Implicit type conversion | **Forbidden.** Both operands of a binary operator must be of strictly identical type (e.g. `int8 + int32` is a compile error). This eliminates complex implicit coercion/zext/sext logic from the Stage 0 code generator, and is consistent with the language's core "explicit in everything" convention. |
+| `array_literal` | The number of elements must exactly match the declared array size (`N`). Any mismatch is a compile error — an intermediate, partial list is not allowed (the same "no garbage memory" principle as with structs). The compiler internally desugars the list into a sequence of indexed assignments (`arr[0] := e0; arr[1] := e1; ...`), with no separate code generation case for it. |
+| Pointer arithmetic | **Forbidden in Stage 0.** Only address-of (`&`) and dereference (`*`) are allowed on pointers — expressions in the style of `p + 1` result in a compile error. Array access in the form `arr[i]` remains supported. This restriction **will be lifted in a later phase** — see "Decisions deferred to later phases". |
+| Simultaneous assignment | In an `assign_stmt`, every `lvalue` target must be distinct within a single line. The right-hand sides are evaluated against the state **before** the statement; all assignments only take effect afterward, simultaneously (Dijkstra/Hoare semantics). |
+| `extern function` | The declared name may only be chosen from the **fixed, closed list of symbol names** known to the Stage 0 compiler (see the addendum to chapter 2) — currently `sys_read`, `sys_write`, `sys_mmap`, `sys_exit`. The parameter and return types must exactly match the signature fixed for that symbol in Stage 0. There is no `func_block` body (it is closed by `;`), and there is no general linker/FFI — an `extern` declaration under any other name is a compile error. |
+| `return` / return type | In a function with `void` return type, `return` may only appear without an expression (`return;`). For every other (non-`void`) return type, `return` must include an expression, whose type must strictly match the function's declared return type — the same "Implicit type conversion: forbidden" rule applies here as well (see above), so e.g. an expression returning `int16` is not acceptable for an `int32` return type. Every execution path in a non-`void` function must end with a `return`. |
 
-### Operátor-precedencia és asszociativitás (a nyelvtani lánc sorrendje már ezt
-tükrözi, legerősebbtől leggyengébbig)
+### Operator precedence and associativity (the order of the grammar chain
+already reflects this, from strongest to weakest)
 
-| Szint (erős→gyenge) | Operátorok | Asszociativitás |
+| Level (strong→weak) | Operators | Associativity |
 |---|---|---|
-| `postfix` | `[]`, `.`, `()` | bal |
-| `unary` | `!`, `-`, `*` (dereferencia), `&` (cím) | jobb (prefix-lánc) |
-| `multiplicative` | `*`, `/`, `%` | bal |
-| `additive` | `+`, `-` | bal |
-| `shift` | `<<`, `>>` | bal |
-| `bit_and` | `&` | bal |
-| `bit_xor` | `^` | bal |
-| `bit_or` | `\|` | bal |
-| `comparison` | `==`, `!=`, `<`, `>`, `<=`, `>=` | **nem láncolható** |
-| `logic_and` | `&&` | bal |
-| `logic_or` | `\|\|` | bal |
+| `postfix` | `[]`, `.`, `()` | left |
+| `unary` | `!`, `-`, `*` (dereference), `&` (address-of) | right (prefix chain) |
+| `multiplicative` | `*`, `/`, `%` | left |
+| `additive` | `+`, `-` | left |
+| `shift` | `<<`, `>>` | left |
+| `bit_and` | `&` | left |
+| `bit_xor` | `^` | left |
+| `bit_or` | `\|` | left |
+| `comparison` | `==`, `!=`, `<`, `>`, `<=`, `>=` | **not chainable** |
+| `logic_and` | `&&` | left |
+| `logic_or` | `\|\|` | left |
 
-**Fontos:** a bitwise operátorok szorosabban kötnek, mint az összehasonlítás
-(Python-stílus) — ez tudatosan megfordítja a klasszikus C-hibát, ahol pl.
-`e & 1 == 1` a `e & (1 == 1)`-ként értelmeződik. Nálunk `e & 1 == 1` ≡
-`(e & 1) == 1`.
-
----
-
-## 5. Tervezési döntések — indoklással (gyors referencia)
-
-- **`:=` értékadás, nem `=`** — az ELTE programozáselméleti (Dijkstra/Hoare)
-  jelöléshagyományt követi; szó szerint megegyezik Fóthi Ákos *Bevezetés a
-  programozáshoz* c. könyvének jelölésével.
-- **Csak `mut` és `const`, nincs `let`** — a `let` felesleges lett volna, mivel a
-  cél csak kétfajta változó (tetszőlegesen módosítható / állandó).
-- **Deklaráció csak a függvény elején** — rögzíti az "állapotteret" a függvény
-  teljes törzsére, megkönnyítve a Hoare-hármas alapú bizonyítást.
-- **`function name(params) : type { }`** — nem `fn`/`->`, hanem `function`/`:`.
-- **Azonosítókban nincs kötőjel** — ütközne a kivonás operátorral (`a-b`
-  kétértelmű lenne maximális illesztés esetén); csak `_` engedélyezett.
-- **Kommentek C-stílusúak** (`//`, `/* */`).
-- **Több számrendszerű literál `BÁZISnÉRTÉK` formában** (pl. `16n1F`), nem
-  `0x`/`0b` prefixekkel — nyitva hagyja a jövőbeli bázisbővítést; csak a
-  szemantikai elemzőt kell módosítani, a nyelvtant nem.
-- **`^` marad bitwise XOR**, nem hatványozás — a hatványozáshoz `**` lesz
-  bevezetve, de **később**, nem Stage 0-ban (ld. lent).
-- **Tömbméret postfix jelölésű** (`int32[10]`, nem `[10]int32`).
-- **Struct- és tömb-deklarációknál kötelező a teljes inicializálás** — nincs
-  "szemét" memóriatartalmú összetett érték; ez matematikailag is konzisztens
-  Fóthi könyvének rekord-definíciójával (a rekord *maga* a teljes komponens-n-es,
-  fogalmilag nem létezhet részleges kitöltés).
-- **`void` visszatérési típus, külön `return_type` szabályként** — kizárólag
-  függvény visszatérési típusaként használható, nem a általános `type`
-  szabály része, tehát nem lehet változó, mező vagy paraméter típusa. Azoknak
-  a függvényeknek kell, amelyek csak mellékhatásért (pl. pointeren keresztüli
-  írásért) hívódnak, és nincs értelmes visszatérési értékük.
-- **`*T[N]` alapértelmezés szerint "N pointer tömbje", nem "pointer egy
-  tömbre"** — a fordítói adatszerkezeteknél (AST gyerek-listák, szimbólumtábla)
-  a pointer-tömb a gyakoribb eset, ezért ez kapja a rövid formát; a ritkább
-  "pointer egy tömbre" esetet explicit zárójel jelöli (`*(T[N])`).
-- **`extern function`, fix syscall-whitelisttel, nem `syscall()` primitív vagy
-  `asm` blokk** — a Hoare-logikás, modularis bizonyítás lényege, hogy egy
-  függvényhívás a *szerződése* (típusos aláírás, később `requires`/`ensures`)
-  alapján ellenőrizhető anélkül, hogy a törzsébe kellene nézni. Egy típusos,
-  névvel ellátott `extern` deklaráció pontosan ez — "fekete doboz" szerződéssel.
-  Egy nyers `syscall(nr, args...)` hívás szétszórná a szemantikát típus nélküli
-  hívási helyekre, egy `asm` blokk pedig teljesen átlátszatlan lenne bármilyen
-  statikus/formális elemzés számára — mindkettő a bizonyíthatósági cél ellen
-  dolgozna.
+**Important:** bitwise operators bind tighter than comparison (Python-style)
+— this deliberately reverses the classic C pitfall, where e.g. `e & 1 == 1` is
+interpreted as `e & (1 == 1)`. In our case, `e & 1 == 1` ≡ `(e & 1) == 1`.
 
 ---
 
-## 6. Későbbi fázisokra (nem Stage 0-ra) halasztott döntések
+## 5. Design decisions — with rationale (quick reference)
 
-1. **UTF-8 forráskód-kódolás támogatása** — a Stage 0 egyelőre ASCII-alapú,
-   de a Postulate-nek végül UTF-8-at kell támogatnia (nem csak ASCII-t).
-2. **`**` hatványozó operátor**, jobbról balra asszociatívan
-   (`2**3**2 = 2**(3**2)`), `^` marad XOR-ra fenntartva. Nincs natív x86_64
-   egész-hatványozó utasítás — szoftveresen, ismételt négyzetreemeléssel
-   (exponentiation by squaring) implementálandó, ha bevezetésre kerül.
-3. **Referencia szerinti paraméterátadás** — Stage 0-ban minden paraméter
-   érték szerint adódik át. Később az érték szerinti átadás marad az
-   alapértelmezett, de explicit jelöléssel (szintaxisa még kidolgozandó)
-   lehetővé válik a referencia-átadás is.
-4. **Pointer-aritmetika** — Stage 0-ban tiltott (csak `&`/`*` engedélyezett),
-   de egy későbbi fázisban bevezetésre kerül. A bevezetés módja (pl. csak
-   típusméret-skálázott léptetés, vagy nyers byte-offset) még kidolgozandó.
-5. **Figyelmeztetés a figyelmen kívül hagyott visszatérési értékre** — a
-   végleges (nem Stage 0) fordítónak külön diagnosztikai figyelmeztetést kell
-   adnia (nem hibát), ha egy program egy nem-`void` visszatérési típusú
-   függvényt `expr_stmt`-ként hív meg úgy, hogy a visszaadott értéket nem
-   használja fel (pl. `mult(4);` önálló utasításként). A `void` visszatérési
-   típus bevezetése (ld. 4–5. fejezet) pontosan ezt a különbséget teszi
-   explicitté: egy függvény vagy deklaráltan nem ad vissza értéket (`void`,
-   nincs mit eldobni), vagy ad, és annak eldobása valószínűleg hiba a hívó
-   kódban.
-6. **Függvény deklaráció definíció nélkül (forward declaration)** — a
-   `function` szabály jelenleg mindig megköveteli a `func_block` testet, tehát
-   nincs mód egy Postulate-ben megvalósítandó függvényt csak deklarálni, testet
-   később megadni (pl. kölcsönösen rekurzív függvényekhez, vagy hogy a hívási
-   sorrend ne kösse meg a definíciók sorrendjét). Ez **nem** ugyanaz, mint az
-   `extern function` (ld. 2–4. fejezet) — az egy Stage 0 által ismert,
-   syscallra leképzett, véglegesen testetlen deklaráció; ez itt egy Postulate
-   nyelven megírt függvény halasztott teste lenne. A pontos szintaxis (pl.
-   `function name(params) : return_type;` test nélkül, majd egy külön
-   `function name(params) : return_type { ... }` a tényleges definícióval, a
-   kettő aláírásának kötelező egyezésével) még kidolgozandó.
-
----
-
-## 7. Nyitott, még véglegesen el nem döntött kérdések
-
-- **String/char típus** — Stage 0-ban tudatosan nincs, a Stage 1 lexer/parser
-  nyers `uint8` bájtokként kezeli a szöveget. Később, ha a nyelv bővül,
-  újra átgondolandó.
-- **`postfix_op` külön szabályként** — nyelvtanilag és **kódgenerálásban is**
-  külön AST-csomópont-típusként kezelendő (nem összeolvasztva a `postfix`
-  szabállyal) — ez explicit kérés volt, tartsd meg az implementáció során.
-
-*(A tömb-literál (`array_literal`) korábban nyitott kérdés volt, mostanra
-véglegesítve — ld. a 4. fejezet nyelvtanát és az 5. szemantikai táblázat
-`array_literal` sorát.)*
+- **`:=` for assignment, not `=`** — follows the ELTE programming-theory
+  (Dijkstra/Hoare) notational tradition; literally matches the notation of
+  Ákos Fóthi's book *Introduction to Programming*.
+- **Only `mut` and `const`, no `let`** — `let` would have been redundant,
+  since the goal is only two kinds of variable (freely modifiable / constant).
+- **Declaration only at the start of a function** — fixes the "state space"
+  for the entire body of the function, making Hoare-triple-based proofs
+  easier.
+- **`function name(params) : type { }`** — not `fn`/`->`, but `function`/`:`.
+- **No hyphens in identifiers** — this would clash with the subtraction
+  operator (`a-b` would be ambiguous under maximal-munch matching); only `_`
+  is allowed.
+- **C-style comments** (`//`, `/* */`).
+- **Multi-radix literals in `BASEnVALUE` form** (e.g. `16n1F`), not `0x`/`0b`
+  prefixes — this leaves room for future base expansion; only the semantic
+  analyzer needs to be modified, not the grammar.
+- **`^` remains bitwise XOR**, not exponentiation — exponentiation will be
+  introduced via `**`, but **later**, not in Stage 0 (see below).
+- **Array size uses postfix notation** (`int32[10]`, not `[10]int32`).
+- **Struct and array declarations require full initialization** — there is no
+  composite value with "garbage" memory content; this is also mathematically
+  consistent with Fóthi's book's definition of records (the record *is*
+  itself the complete n-tuple of components, and conceptually cannot exist
+  partially filled).
+- **`void` return type, as a separate `return_type` rule** — usable
+  exclusively as a function's return type, not part of the general `type`
+  rule, so it cannot be the type of a variable, field, or parameter. This is
+  needed for functions that are called only for a side effect (e.g. writing
+  through a pointer) and have no meaningful return value.
+- **`*T[N]` defaults to "array of N pointers", not "pointer to an array"** —
+  for compiler data structures (AST child lists, symbol table) an array of
+  pointers is the more common case, so it gets the short form; the rarer
+  "pointer to an array" case is marked by explicit parentheses (`*(T[N])`).
+- **`extern function`, with a fixed syscall whitelist, not a `syscall()`
+  primitive or an `asm` block** — the essence of Hoare-logic-based, modular
+  proof is that a function call can be checked based on its *contract*
+  (typed signature, later `requires`/`ensures`) without needing to look into
+  its body. A typed, named `extern` declaration is exactly that — a "black
+  box" with a contract. A raw `syscall(nr, args...)` call would scatter the
+  semantics across untyped call sites, and an `asm` block would be completely
+  opaque to any static/formal analysis — both would work against the
+  provability goal.
 
 ---
 
-## 8. Formális háttér — megfelelés Fóthi Ákos *Bevezetés a programozáshoz* c.
-könyvének relációs modelljével
+## 6. Decisions deferred to later phases (not Stage 0)
 
-A nyelv konstrukciói közvetlenül visszavezethetők a könyv formalizmusára — ez
-lesz a bizonyítási apparátus alapja, amikor a verifikációs szintaxis (Stage 1+)
-bevezetésre kerül:
-
-- **`while_stmt`** ≡ könyv `DO(π, S0)` konstrukciója (6.3, 7.3 fejezet) — a
-  ciklus levezetési szabálya (invariáns `P`, terminálófüggvény `t`) közvetlenül
-  alkalmazható.
-- **`assign_stmt`** (szimultán értékadás) ≡ könyv 8.4. definíciója (Elemi
-  programok — Értékadás), szó szerint ugyanaz a `:=` jelölés és szemantika.
-- **`struct`** ≡ könyv "rekord" típuskonstrukciója (11.1–11.2 fejezet) —
-  szelektorfüggvények (`t.si`), mezőértékadás (`t.si := ti`) pontosan egyeznek.
-- **`if`/`else`** a könyv általánosabb, nemdeterminisztikus `IF(π1:S1,...,πn:Sn)`
-  konstrukciójának (6.2, 7.2 fejezet) egy determinisztikus, kéttagú, kimerítő
-  speciális esete. `else` nélküli `if` megfeleltethető `IF(π: S, ¬π: SKIP)`-nek,
-  ahol `SKIP` a könyv 8.2. definíciója szerinti identitás-program.
-- Tudatosan **nem** vettük át: `ABORT` (soha nem terminál), értékkiválasztás
-  (`:∈`, nemdeterminisztikus) — ezek a relációs modell nemdeterminizmus-kezeléséhez
-  kellenek, de egy tényleges, determinisztikus fordítóprogram célnyelvéhez nem
-  szükségesek.
+1. **UTF-8 source code encoding support** — Stage 0 is ASCII-based for now,
+   but Postulate must eventually support UTF-8 (not just ASCII).
+2. **The `**` exponentiation operator**, right-to-left associative
+   (`2**3**2 = 2**(3**2)`), with `^` remaining reserved for XOR. There is no
+   native x86_64 integer exponentiation instruction — it must be implemented
+   in software, via repeated squaring (exponentiation by squaring), once
+   introduced.
+3. **Pass-by-reference parameter passing** — in Stage 0 every parameter is
+   passed by value. Later, pass-by-value will remain the default, but
+   pass-by-reference will also become available via explicit notation (syntax
+   still to be worked out).
+4. **Pointer arithmetic** — forbidden in Stage 0 (only `&`/`*` allowed), but
+   will be introduced in a later phase. The manner of introduction (e.g. only
+   type-size-scaled stepping, or raw byte offsets) is still to be worked out.
+5. **Warning for an ignored return value** — the final (non-Stage-0) compiler
+   must issue a separate diagnostic warning (not an error) if a program calls
+   a function with a non-`void` return type as an `expr_stmt` without using
+   the returned value (e.g. `mult(4);` as a standalone statement). The
+   introduction of the `void` return type (see chapters 4–5) makes exactly
+   this distinction explicit: a function either declaredly returns no value
+   (`void`, nothing to discard), or it does, and discarding it is likely a
+   bug in the calling code.
+6. **Function declaration without a definition (forward declaration)** — the
+   `function` rule currently always requires a `func_block` body, so there is
+   no way to merely declare a function to be implemented in Postulate and
+   supply the body later (e.g. for mutually recursive functions, or so that
+   call order does not constrain definition order). This is **not** the same
+   as `extern function` (see chapters 2–4) — that is a declaration known to
+   Stage 0, mapped to a syscall, permanently bodiless; this would be a
+   deferred body for a function written in the Postulate language. The exact
+   syntax (e.g. `function name(params) : return_type;` without a body,
+   followed by a separate `function name(params) : return_type { ... }` with
+   the actual definition, with the two signatures required to match) is still
+   to be worked out.
 
 ---
 
-## 9. Minta program (a legutóbb egyeztetett szintaxis szerint)
+## 7. Open questions, not yet finally decided
+
+- **String/char type** — deliberately absent in Stage 0; the Stage 1
+  lexer/parser handles text as raw `uint8` bytes. To be reconsidered later,
+  once the language is extended.
+- **`postfix_op` as a separate rule** — must be treated as a separate AST node
+  type both grammatically and **in code generation** (not merged with the
+  `postfix` rule) — this was an explicit request, keep it during
+  implementation.
+
+*(The array literal (`array_literal`) was previously an open question, now
+finalized — see the grammar in chapter 4 and the `array_literal` row of the
+semantic table in chapter 5.)*
+
+---
+
+## 8. Formal background — correspondence with the relational model of Ákos
+Fóthi's book *Introduction to Programming*
+
+The language's constructs can be traced directly back to the book's
+formalism — this will be the basis of the proof apparatus once the
+verification syntax (Stage 1+) is introduced:
+
+- **`while_stmt`** ≡ the book's `DO(π, S0)` construct (sections 6.3, 7.3) — the
+  loop derivation rule (invariant `P`, terminating function `t`) applies
+  directly.
+- **`assign_stmt`** (simultaneous assignment) ≡ the book's definition 8.4
+  (Elementary programs — Assignment), literally the same `:=` notation and
+  semantics.
+- **`struct`** ≡ the book's "record" type construct (sections 11.1–11.2) —
+  selector functions (`t.si`), field assignment (`t.si := ti`) match exactly.
+- **`if`/`else`** is a deterministic, two-branch, exhaustive special case of
+  the book's more general, nondeterministic `IF(π1:S1,...,πn:Sn)` construct
+  (sections 6.2, 7.2). An `if` without `else` corresponds to
+  `IF(π: S, ¬π: SKIP)`, where `SKIP` is the identity program per the book's
+  definition 8.2.
+- Deliberately **not** adopted: `ABORT` (never terminates), value selection
+  (`:∈`, nondeterministic) — these are needed for the relational model's
+  handling of nondeterminism, but are not needed for the target language of
+  an actual, deterministic compiler.
+
+---
+
+## 9. Sample program (per the most recently agreed syntax)
 
 ```postulate
-// Szintaxis-bemutató a Postulate nyelvhez.
+// Syntax demonstration for the Postulate language.
 
 extern function sys_write(fd: int64, buf: *uint8, count: uint64) : int64;
 extern function sys_exit(code: int64) : void;
@@ -428,7 +448,7 @@ function swap_values(x : int32, y : int32) : int32 {
   mut a : int32 := x;
   mut b : int32 := y;
 
-  // Szimultán értékadás: a jobb oldalak az eredeti állapotban értékelődnek ki
+  // Simultaneous assignment: the right-hand sides are evaluated in the original state
   a := b, b := a;
 
   return a;
@@ -447,28 +467,28 @@ function increment(p : *int32) : void {
 }
 
 function main() : int32 {
-  // Minden deklaráció a blokk elején (func_block ::= decl* stmt*) —
-  // utána kizárólag utasítások következhetnek.
+  // All declarations at the start of the block (func_block ::= decl* stmt*) —
+  // only statements may follow after that.
   const pair : Pair := Pair { a := 8n17, b := 16n1F };
   const total : uint := 16n64;            // uint ≡ uint16
 
   mut n2 : Node := Node { value := 99, next := null };
   mut n1 : Node := Node { value := 1,  next := &n2 };
 
-  // pointer-tömb: 3 darab *Node, alapból mind null-ra broadcast-olva (ld. 4. fejezet)
+  // array of pointers: 3 *Node entries, all broadcast to null by default (see chapter 4)
   mut node_list : *Node[3] := null;
 
-  mut arr : int32[10] := 0;               // minden elem 0-ra inicializálva
+  mut arr : int32[10] := 0;               // every element initialized to 0
 
-  // array_literal: pontosan 10 elem, tetszőleges expr (pl. függvényhívás) is lehet
+  // array_literal: exactly 10 elements, an arbitrary expr (e.g. a function call) is also allowed
   mut arr2 : int32[10] := {1, 2, 3, 4, 5, 6, 7, mult(4), 9, 10};
 
-  mut p   : *int32 := &arr[0];            // csak címképzés, arr tartalmától független
-  mut sum : int32;                        // skalár mut: opcionális inicializálás
+  mut p   : *int32 := &arr[0];            // address-of only, independent of arr's contents
+  mut sum : int32;                        // scalar mut: optional initialization
 
-  mut msg : uint8[5] := {72, 101, 108, 108, 111};   // "Hello" nyers bájtjai (nincs string típus)
+  mut msg : uint8[5] := {72, 101, 108, 108, 111};   // raw bytes of "Hello" (no string type)
 
-  // --- innentől csak utasítások ---
+  // --- statements only from here on ---
 
   node_list[0] := &n1;
   node_list[1] := &n2;
@@ -484,9 +504,9 @@ function main() : int32 {
     sum := sum + 1;
   }
 
-  increment(&sum);   // void függvény: mellékhatás pointeren keresztül, nincs visszatérési érték
+  increment(&sum);   // void function: side effect via pointer, no return value
 
-  sys_write(1, &msg[0], 5);   // extern function: nyers syscall-hívás
+  sys_write(1, &msg[0], 5);   // extern function: raw syscall call
 
   return sum;
 }
@@ -494,17 +514,17 @@ function main() : int32 {
 
 ---
 
-## 10. Következő lépés (ahol a tervezés abbamaradt)
+## 10. Next step (where the design was left off)
 
-A Stage 0 nyelvtan **formálisan lezártnak** tekinthető (a 7. pontban jelzett
-nyitott kérdések kivételével, amik nem blokkolják az indulást) — beleértve a
-pointer-tömb jelölést és az `extern function`/syscall-whitelistet is, amik
-korábban blokkolták volna a Stage 1 önhordó fordító tényleges megírhatóságát
-(ld. 2–5. fejezet). A logikus következő lépések egy új munkamenetben:
+The Stage 0 grammar can be considered **formally closed** (except for the open
+questions noted in section 7, which do not block getting started) — including
+the array-of-pointers notation and the `extern function`/syscall whitelist,
+which had previously blocked the Stage 1 self-hosting compiler from actually
+being written (see chapters 2–5). The logical next steps in a new session are:
 
-1. Lexer implementációjának megkezdése x86_64 assembly-ben (Linux syscall ABI),
-   a fenti `identifier`/`literal`/`comment`/`keywords` szabályok alapján.
-2. Rekurzív leszállásos parser felépítése a fenti EBNF alapján.
-3. GitHub Actions CI beállítása (QEMU + Docker-alapú build környezet) —
-   ez a projekt egy korábbi, ehhez a dokumentumhoz nem tartozó megbeszélésének
-   témája volt, érdemes külön összefoglalni, ha szükséges.
+1. Begin implementing the lexer in x86_64 assembly (Linux syscall ABI), based
+   on the `identifier`/`literal`/`comment`/`keywords` rules above.
+2. Build a recursive descent parser based on the EBNF above.
+3. Set up GitHub Actions CI (QEMU + Docker-based build environment) — this was
+   the topic of an earlier discussion for this project not covered by this
+   document; worth summarizing separately if needed.

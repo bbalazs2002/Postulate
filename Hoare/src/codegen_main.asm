@@ -3,7 +3,7 @@
 ; Same shape as checker_main.asm: parse the entire stdin as a `program`,
 ; no directive line. Unlike build/checker, generated code is only ever
 ; emitted for a program that has already passed check_program in full --
-; codegen never runs on unchecked input, ld. docs/postulate_stage0_
+; codegen never runs on unchecked input, see docs/postulate_stage0_
 ; codegen_spec.md.
 
 %include "config.inc"

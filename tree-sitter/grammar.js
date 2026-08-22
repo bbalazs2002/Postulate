@@ -189,10 +189,10 @@ module.exports = grammar({
       $.base_type
     ),
 
-    // A tömbképzés erősebb (precedencia: 2)
+    // Array formation binds tighter (precedence: 2)
     array_type: $ => prec(2, seq($.type, '[', $.integer_literal, ']')),
 
-    // A mutatóképzés gyengébb (precedencia: 1)
+    // Pointer formation binds looser (precedence: 1)
     pointer_type: $ => prec(1, seq('*', $.type)),
 
     // --- IDENTIFIERS & COMMENTS ---

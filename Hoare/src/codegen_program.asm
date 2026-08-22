@@ -8,7 +8,7 @@
 ; arguments -- so main itself must take zero params). A function's
 ; return type, and every one of its PARAMS specifically (params cross
 ; the function-call boundary, unlike plain locals/decls, which may be
-; any type -- ld. gen_function/gen_decl respectively), must be
+; any type -- see gen_function/gen_decl respectively), must be
 ; scalar-loadable -- passing/returning a struct/array *by value* through
 ; a call is a separate, not-yet-designed future phase. AST_STRUCT_DECL
 ; contributes nothing at this level (purely a layout fact, consumed via
@@ -57,7 +57,7 @@ global cur_func_out_ptr_offset
 section .bss
 local_offsets: resq MAX_LIST_ARITY
 ; set once by gen_function, right before it calls gen_func_block; read by
-; codegen_stmt.asm's gen_stmt .return_stmt case (ld. gen_function header)
+; codegen_stmt.asm's gen_stmt .return_stmt case (see gen_function header)
 cur_func_return_type: resq 1
 cur_func_out_ptr_offset: resq 1
 
@@ -168,7 +168,7 @@ local_stack_offset:
 ; only, no alignment concern beyond the final round-up below -- scalar
 ; sizes are all powers of two <= 8, so a running byte-sum never misaligns
 ; any individual load/store). out: rax = total locals_size, rounded up to
-; a multiple of 16 (ld. "Stack frame layout"'s alignment invariant).
+; a multiple of 16 (see "Stack frame layout"'s alignment invariant).
 ; ===========================================================================
 compute_local_offsets:
     mov     rbx, [local_count]
@@ -205,8 +205,8 @@ compute_local_offsets:
 ; for the i-th param, 0-based), rdx = its own local stack offset.
 ; Scalar/pointer: emits a sized load from "[rdi + <arg offset>]" into
 ; rax, then a sized store into "[rbp - <local offset>]" -- the
-; prologue's per-param copy step (ld. "Stack frame layout"). Composite
-; (Phase 3): the incoming slot holds a POINTER instead of a value (ld.
+; prologue's per-param copy step (see "Stack frame layout"). Composite
+; (Phase 3): the incoming slot holds a POINTER instead of a value (see
 ; gen_user_call's own header) -- copies `size` bytes FROM [that pointer]
 ; into this function's own local slot via rep movsb, giving this
 ; function a true, independent-by-value copy (mirrors the already-built
@@ -438,7 +438,7 @@ emit_param_copy:
 ; table + stack offsets, then emits its pf_<name> label, prologue (incl.
 ; per-param copy), body, and epilogue. Phase 3: both a composite return
 ; type and composite param types are now accepted -- a composite param's
-; incoming slot holds a POINTER (ld. emit_param_copy's composite branch,
+; incoming slot holds a POINTER (see emit_param_copy's composite branch,
 ; which copies FROM it, giving this function its own independent-by-
 ; value copy); a composite return type additionally reserves one hidden,
 ; always-8-byte frame slot (immediately below the user-visible locals,
@@ -447,7 +447,7 @@ emit_param_copy:
 ; saved there right after the prologue -- before ANYTHING else in this
 ; function's body gets a chance to clobber rdx -- and threaded down into
 ; gen_func_block/gen_block/gen_stmt (rsi = declared return type, rdx =
-; this hidden slot's offset, 0/0 for void or a scalar return -- ld.
+; this hidden slot's offset, 0/0 for void or a scalar return -- see
 ; codegen_stmt.asm's .return_stmt) so a composite RETURN statement knows
 ; where to write its result.
 ; ===========================================================================
@@ -713,7 +713,7 @@ gen_function:
     ; rather than threaded as parameters through gen_func_block/gen_block
     ; /gen_stmt's own call chain: gen_function is never reentrant (a
     ; function body never triggers codegen of another function's body
-    ; mid-flight, ld. gen_program), so there is exactly one live value
+    ; mid-flight, see gen_program), so there is exactly one live value
     ; at a time -- no risk of one function's return context leaking into
     ; another's.
     mov     [cur_func_return_type], r8
@@ -738,7 +738,7 @@ gen_function:
 
 ; ===========================================================================
 ; gen_program: in rdi = AST_PROGRAM ptr. Finds the (exactly one) function
-; named "main" (0-param, ld. file header), emits the _start entry point
+; named "main" (0-param, see file header), emits the _start entry point
 ; wired to call pf_main and sys_exit its result, then generates EVERY
 ; AST_FUNCTION decl (not just main) -- struct decls and extern decls
 ; contribute nothing at this level, silently skipped. Functions are

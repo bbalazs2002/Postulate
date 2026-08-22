@@ -1,489 +1,495 @@
-# Postulate Stage 0 — Szemantikai elemző technikai specifikáció
+# Postulate Stage 0 — Semantic Analyzer Technical Specification
 
-> Ez a dokumentum a Stage 0 bootstrap fordító **szemantikai elemzőjének**
-> technikai specifikációja — három menetben: **1. fázis** (névfeloldás +
-> alap típusellenőrzés), **2. fázis** (tömb-/struct-literál teljesség,
-> based-form számjegy-tartomány, "minden végrehajtási út return-nel
-> zárul" vezérlésfolyam-elemzés) és **3. fázis** (tömb broadcast-init,
-> fordítási idejű tömbindex-tartomány — mindkettő a kódgenerátor Phase 2
-> tervezése közben talált, a fő specben már implicit módon jelen lévő, de
-> a checkerben eddig hiányzó szabály). A 3. fázissal a fő spec teljes
-> szemantikai szabálylistája lefedésre kerül, a benne magában is
-> kifejezetten Stage 0-n túlinak jelölt két tétel kivételével (ld. 10.
-> fejezet). Előfeltétele a
-> [postulate_stage0_spec.md](postulate_stage0_spec.md) (nyelvtan,
-> szemantikai megkötések 4. fejezete) és a
-> [postulate_stage0_parser_spec.md](postulate_stage0_parser_spec.md) (a
-> már elkészült, teljes nyelvtant lefedő parser — ennek `parse_program`
-> kimenetére épül minden itt leírtak). A cél egy **harmadik, önálló
-> `build/checker` bináris** — a `lexer → parser → checker` rétegződés
-> folytatása, a Stage 0 bootstrap fordító végleges neve **Hoare** lesz,
-> ez a menet még nem az a végleges, egyesített `hoare` parancssori eszköz,
-> hanem annak egy köztes építőeleme.
-
----
-
-## 1. Cél és hatókör
-
-A fő spec 4. fejezetének "Szemantikai megkötések" táblázata 16+ szabályt
-sorol fel, amiket a parser tudatosan nem ellenőriz (`"parser megenged,
-szemantika utasít el"` elv). A parser saját, fokozatos fejlesztési
-fegyelmét folytatva, ez két menetben valósult meg.
-
-**1. fázisban megvalósítva** (az alap, amire minden további szabály épül):
-- Felső szintű névregisztráció (struct/function/extern), duplikált név tiltása.
-- Extern-fehérlista validáció (név + pontos aláírás-egyezés).
-- Függvényenkénti lapos helyi szimbólumtábla (param + decl), duplikátum tiltás.
-- Azonosító-felbontás (identifier → local; call → global callable).
-- Típus-felbontás (struct-név hivatkozások érvényessége mindenhol, ahol
-  típus szerepel: mező, paraméter, visszatérési típus, helyi decl).
-- Bináris/érték­adás/return/hívás-argumentum típusegyezés (`int`≡`int16`,
-  `uint`≡`uint16` foldolással).
-- Mező- és index-hozzáférés érvényessége (struct/tömb/pointer alak).
-- `lvalue`-alak ellenőrzése értékadás célpontjára és `&`-ra.
-- `const` újraírásának tiltása (pointeren keresztüli írás kivételével).
-- Szimultán értékadás cél-egyediség (szintaktikai azonosság szerint).
-- `if`/`while` feltétel `bool` volta.
-- Tömb-/struct-literál **elemenkénti** típuspropagáció (a teljesség
-  ekkor még elhalasztva).
-
-**2. fázisban megvalósítva** (ld. 7.4/7.5/8.1 fejezet a részletekért):
-- Tömb-literál elemszáma pontosan a deklarált tömbmérettel egyezik.
-- Struct-literál minden mezője pontosan egyszer szerepel (duplikátum és
-  hiányzó mező egyaránt hiba).
-- Based-form számjegy-tartomány: a bázis `{2, 8, 10, 16}` egyike, minden
-  számjegy `< bázis`.
-- "Minden végrehajtási út return-nel zárul" nem-`void` függvényekben.
-
-**3. fázisban megvalósítva** (ld. 7.6/8.2 fejezet a részletekért):
-- Tömb broadcast-init: egy skalár kezdőérték/érték szórása minden elemre,
-  ha a típusa a tömb elemtípusával egyezik.
-- Tömbindex fordítási idejű tartomány-ellenőrzése bare integer-literál
-  indexre.
-
-**Tudatosan Stage 0-n túlra hagyva** (a fő spec is így jelöli, nem
-elhalasztott, hanem kizárt tétel ebből a fordítóból, ld. 10. fejezet):
-"figyelmen kívül hagyott visszatérési érték" figyelmeztetés, előre
-deklarált (test nélküli) függvények.
+> This document is the technical specification for the Stage 0 bootstrap
+> compiler's **semantic analyzer** — in three passes: **Phase 1** (name
+> resolution + basic type checking), **Phase 2** (array/struct literal
+> completeness, based-form digit-range validation, "every execution path
+> ends with a return" control-flow analysis), and **Phase 3** (array
+> broadcast-init, compile-time array-index range checking — both found
+> while designing Phase 2 of the code generator, already implicitly
+> present in the main spec but so far missing from the checker). Phase 3
+> completes coverage of the full semantic rule list in the main spec,
+> with the exception of the two items explicitly marked there as beyond
+> Stage 0's scope (see chapter 10). Its prerequisites are
+> [postulate_stage0_spec.md](postulate_stage0_spec.md) (grammar, chapter
+> 4 "semantic constraints") and
+> [postulate_stage0_parser_spec.md](postulate_stage0_parser_spec.md) (the
+> already-completed parser covering the full grammar — everything
+> described here builds on its `parse_program` output). The goal is a
+> **third, standalone `build/checker` binary** — continuing the
+> `lexer → parser → checker` layering; the Stage 0 bootstrap compiler's
+> final name will be **Hoare**, but this pass is not yet the final,
+> unified `hoare` command-line tool, only an intermediate building block
+> of it.
 
 ---
 
-## 2. Három nyitott kérdés a nyelvi specifikációban — itt eldöntve
+## 1. Goal and scope
 
-A tervezés/implementáció során három olyan pont derült ki, amit a fő spec
-nem mond ki explicit módon. Mindhárom eldöntésre került (a döntés
-indoklásával), de érdemes lenne a fő specbe is felvenni — ez nem történt
-meg ebben a menetben, csak itt van rögzítve.
+The "Semantic constraints" table in chapter 4 of the main spec lists 16+
+rules that the parser deliberately does not check (the principle "the
+parser permits, semantics rejects"). Continuing the parser's own
+disciplined, incremental development approach, this was implemented in
+two passes.
 
-### 2.1 Literál-tipizálás
+**Implemented in Phase 1** (the foundation everything else builds on):
+- Top-level name registration (struct/function/extern), duplicate names
+  forbidden.
+- Extern-whitelist validation (name + exact signature match).
+- Per-function flat local symbol table (params + decls), duplicates
+  forbidden.
+- Identifier resolution (identifier → local; call → global callable).
+- Type resolution (validity of struct-name references everywhere a type
+  appears: field, parameter, return type, local decl).
+- Binary/assignment/return/call-argument type matching (`int`≡`int16`,
+  `uint`≡`uint16` folding).
+- Field- and index-access validity (struct/array/pointer shape).
+- `lvalue`-shape checking for assignment targets and for `&`.
+- Prohibition of `const` reassignment (except writes through a pointer).
+- Simultaneous-assignment target uniqueness (by syntactic identity).
+- `if`/`while` condition must be `bool`.
+- Array-/struct-literal **per-element** type propagation (completeness
+  checking deferred at this point).
 
-A nyelvtanban nincs literál-utótag (`5i32` stílusú jelölés nincs), tehát
-egy csupasz `5`-nek nem lehet önmagában rögzített típusa — miközben az
-"Implicit típuskonverzió: Tilos" szabály megköveteli, hogy minden
-kifejezésnek legyen *pontos* típusa az összehasonlításhoz. Az egyetlen
-életképes olvasat (és az egyetlen, ami összhangban van a fő spec saját
-mintaprogramjával, ahol csupasz literálok kerülnek különböző méretű
-mezőkbe): **kontextuális/tipizálatlan konstans** modell, Go mintájára — az
-`int`/`bool`/`null` literáloknak nincs saját, rögzített típusuk;
-`check_expr` egy `expected_type` paramétert kap, amit **kizárólag** a
-literálok fogyasztanak el ténylegesen.
+**Implemented in Phase 2** (see chapters 7.4/7.5/8.1 for details):
+- Array-literal element count matches the declared array size exactly.
+- Every field of a struct literal appears exactly once (both duplicate
+  and missing fields are errors).
+- Based-form digit range: the base must be one of `{2, 8, 10, 16}`, every
+  digit must be `< base`.
+- "Every execution path ends with a return" in non-`void` functions.
 
-### 2.2 A formális `lvalue` szabály nem fedi le a `(*arr)[i]` alakot
+**Implemented in Phase 3** (see chapters 7.6/8.2 for details):
+- Array broadcast-init: broadcasting a single scalar initial value/value
+  to every element, if its type matches the array's element type.
+- Compile-time range checking of array indices for bare integer-literal
+  indices.
 
-`lvalue ::= "*" lvalue | identifier ("[" expr "]" | "." identifier)*` — ez
-csak azt engedi meg, hogy a `*` egy **másik `lvalue`-t** előzzön meg, nem
-egy zárójelezett-majd-indexelt kifejezést. De a `(*arr)[i] := ...`
-pontosan az a minta, amit a `*(T[N])` pointer-tömb tervezési döntés
-(kifejezés-parser fázis) lehetővé tesz, és amit a fekete doboz
-tesztkészlet is végig használ. A parser már elfogadja (megengedő
-tervezésű, a szemantika dönt). **Ez a fázis strukturálisan definiálja az
-"érvényes lvalue"-t**, nem a nyelvtan betűje szerint: bármely kifejezés,
-ami **kizárólag** `IDENT`/`UNARY(*)`/`INDEX`/`FIELD` csomópontokból épül
-fel, végül egy csupasz azonosítónál záródva — ez természetesen elfogadja
-a `(*arr)[i]`-t is.
-
-### 2.3 `const` és `*` kölcsönhatása
-
-Hibás-e a `*p := 5;`, ha `p` egy `const` pointer? Maga `p` újraírása hiba
-lenne, de a rajta keresztüli írás más eset — a Stage 0-nak nincs külön
-`const T` vs. `T` típus-minősítője, a `const` a **kötésre** vonatkozó
-egyszeri-értékadás tulajdonság, nem a mutatott értékre. Szabály: az
-`lvalue`-láncot kívülről befelé bejárva, ha egy `*` dereferencia
-**előbb** előfordul, mint hogy elérnénk az alap-azonosítót, az
-"íráson-keresztül-pointer" — a `const` állapota innentől irreleváns. Csak
-az a lánc kap `const`-ellenőrzést, ami **deref nélkül** éri el az
-alap-azonosítót.
+**Deliberately left beyond Stage 0** (marked as such in the main spec
+too — not deferred but excluded outright from this compiler, see
+chapter 10): the "ignored return value" warning, forward-declared
+(bodyless) functions.
 
 ---
 
-## 3. Architektúra: `build/checker` (harmadik, önálló bináris)
+## 2. Three open questions in the language specification — settled here
 
-Ugyanaz a rétegződés, mint lexer→parser: a checker linkeli a teljes
-meglévő parser-/lexer-kódot (`lexer.asm`, `parser_tokens.asm`,
-`type_parser.asm`, `expr_parser.asm`, `stmt_parser.asm`, `top_parser.asm`,
-`ast.asm`, `runtime.asm`), de **nem** linkeli `ast_dump.asm`-et (nincs rá
-szüksége — a checker sikeres futás esetén csak `OK`-t ír, nem AST-dumpot).
+During design/implementation, three points emerged that the main spec
+does not state explicitly. All three were settled (with rationale for
+the decision), but it would be worth adding them to the main spec as
+well — that has not been done in this pass, they are only recorded here.
 
-`checker_main.asm` driverje **nem** irányjelző-alapú (szemben
-`parser_main.asm` teszt-driverjével) — a teljes stdin-t egyetlen
-`program`-ként olvassa be és ellenőrzi, mert ellenőrzés mindig a teljes
-programra vonatkozik. Ez a jelenleg elkészült binárisok közül a
-legközelebbi ahhoz, ahogy a végleges `hoare` parancssori eszköz egy `.ptl`
-fájlt kap.
+### 2.1 Literal typing
 
-**Kilépési kódok**, kiegészítve:
+The grammar has no literal suffix (there is no `5i32`-style notation),
+so a bare `5` cannot have a fixed type on its own — while the "Implicit
+type conversion: forbidden" rule requires every expression to have an
+*exact* type for comparison purposes. The only viable reading (and the
+only one consistent with the main spec's own sample program, where bare
+literals are placed into fields of different sizes): the
+**contextual/untyped constant** model, following Go's example — `int`/
+`bool`/`null` literals have no fixed type of their own; `check_expr`
+takes an `expected_type` parameter, which is **only** actually consumed
+by literals.
 
-| Kód | Jelentés |
+### 2.2 The formal `lvalue` rule does not cover the `(*arr)[i]` form
+
+`lvalue ::= "*" lvalue | identifier ("[" expr "]" | "." identifier)*` —
+this only allows `*` to precede **another `lvalue`**, not a
+parenthesized-then-indexed expression. But `(*arr)[i] := ...` is exactly
+the pattern that the `*(T[N])` pointer-to-array design decision
+(expression-parser phase) enables, and one that the black-box test suite
+uses throughout. The parser already accepts it (permissive design,
+semantics decides). **This phase structurally defines "valid lvalue"**,
+not by the letter of the grammar: any expression built **exclusively**
+from `IDENT`/`UNARY(*)`/`INDEX`/`FIELD` nodes, ultimately terminating in
+a bare identifier — this naturally accepts `(*arr)[i]` as well.
+
+### 2.3 Interaction of `const` and `*`
+
+Is `*p := 5;` an error if `p` is a `const` pointer? Reassigning `p`
+itself would be an error, but writing through it is a different case —
+Stage 0 has no separate `const T` vs. `T` type qualifier; `const` is a
+one-time-assignment property of the **binding**, not of the pointee
+value. Rule: walking the `lvalue` chain from outside in, if a `*`
+dereference occurs **before** reaching the base identifier, this is
+"write-through-pointer" — the `const` status is irrelevant from that
+point on. Only a chain that reaches the base identifier **without** a
+deref receives `const` checking.
+
+---
+
+## 3. Architecture: `build/checker` (a third, standalone binary)
+
+Same layering as lexer→parser: the checker links the entire existing
+parser/lexer code (`lexer.asm`, `parser_tokens.asm`, `type_parser.asm`,
+`expr_parser.asm`, `stmt_parser.asm`, `top_parser.asm`, `ast.asm`,
+`runtime.asm`), but does **not** link `ast_dump.asm` (not needed — on a
+successful run the checker only prints `OK`, not an AST dump).
+
+The `checker_main.asm` driver is **not** directive-based (unlike
+`parser_main.asm`'s test driver) — it reads the entire stdin as a single
+`program` and checks it, because checking always applies to the whole
+program. Of the binaries built so far, this is the closest to how the
+final `hoare` command-line tool will receive a `.ptl` file.
+
+**Exit codes**, extended:
+
+| Code | Meaning |
 |---|---|
-| `0` | Siker — `OK\n` stdoutra. |
-| `1` | Lexikai/szintaktikai hiba (változatlan, a parsertől örökölve). |
-| `2` | Erőforrás-jellegű hiba (változatlan). |
-| `3` | **Új: szemantikai hiba.** `semantic error: <üzenet> at line L, col C (byte offset O)` stderr-re. |
+| `0` | Success — `OK\n` to stdout. |
+| `1` | Lexical/syntax error (unchanged, inherited from the parser). |
+| `2` | Resource-related error (unchanged). |
+| `3` | **New: semantic error.** `semantic error: <message> at line L, col C (byte offset O)` to stderr. |
 
 ---
 
-## 4. Nincs új AST-csomópont — egy kivétellel
+## 4. No new AST node — with one exception
 
-A szimbólumtáblák és a típusellenőrzés **csak-olvasás** jellegű bejárás a
-meglévő AST fölött — nincs új `AST_*` kind, nincs visszaírt annotáció,
-nincs perzisztens "dekorált AST" (semmi nem fogyasztja még — egy jövőbeli
-kódgeneráló fázis eldöntheti majd, kell-e neki perzisztens típus-annotáció
-vagy újra lefuttatja az inferenciát; ez a döntés **nem** ebben a fázisban
-születik).
+Symbol tables and type checking form a **read-only** traversal over the
+existing AST — no new `AST_*` kind, no annotation written back, no
+persistent "decorated AST" (nothing consumes one yet — a future
+code-generation phase may decide whether it needs a persistent type
+annotation or will re-run inference; that decision is **not** made in
+this phase).
 
-**Az egyetlen kivétel:** `AST_EX_INT`/`AST_EX_BOOL`/`AST_EX_NULL` eredetileg
-csak az értéket tárolta (`a` mező; `b`/`c`/`d` üres) — a többi "névvel
-bíró" csomóponttal (`AST_EX_IDENT`, `AST_TY_BASE` névhivatkozás esete)
-ellentétben nem őrizte meg a forrás-span-t. Egy literálra összpontosuló
-típushiba (pl. `if (5) { ... }`) diagnosztikájához **kell** valamilyen
-pozíció. Javítás: `AST_EX_INT` `b`/`c` mezője mostantól `name_offset`/
-`name_len` (az `a`-ban maradó érték mellett); `AST_EX_BOOL`/`AST_EX_NULL`
-`a`/`b` (illetve `b`/`c`) mezője ugyanez — additív, nem-törő változtatás
-(`dump_expr` `.int`/`.bool`/`.null` esetei nem olvassák ezeket a mezőket,
-nem kellett módosítani). `expr_parser.asm` `.int`/`.true`/`.false`/`.null`
-ágai kaptak pár extra `mov`-ot a `parser_advance` **előtt**, hogy a tokent
-el ne veszítsék.
+**The single exception:** `AST_EX_INT`/`AST_EX_BOOL`/`AST_EX_NULL`
+originally only stored the value (`a` field; `b`/`c`/`d` unused) —
+unlike the other "named" nodes (`AST_EX_IDENT`, the `AST_TY_BASE`
+name-reference case), it did not retain the source span. Diagnosing a
+type error centered on a literal (e.g. `if (5) { ... }`) **requires**
+some position. Fix: `AST_EX_INT`'s `b`/`c` fields are now `name_offset`/
+`name_len` (alongside the value that stays in `a`); `AST_EX_BOOL`/
+`AST_EX_NULL`'s `a`/`b` (respectively `b`/`c`) fields are the same —
+additive, non-breaking change (`dump_expr`'s `.int`/`.bool`/`.null`
+cases do not read these fields, so no changes were needed there). The
+`.int`/`.true`/`.false`/`.null` branches of `expr_parser.asm` gained a
+few extra `mov`s **before** `parser_advance`, so the token is not lost.
 
-**Egy második, hasonló kiegészítés:** `AST_STMT_RETURN` `b` mezője
-mostantól a `return` kulcsszó saját forrás-offszetje — az egyetlen
-utasítás-fajta, aminek erre szüksége volt, mert a "hiányzó return érték"
-hiba (`return;` egy nem-`void` függvényben) esetén nincs kifejezés,
-amire a diagnosztika pozícióját rá lehetne akasztani, és semmilyen más
-mező nem ad erre alternatívát.
+**A second, similar addition:** the `b` field of `AST_STMT_RETURN` is
+now the `return` keyword's own source offset — the only statement kind
+that needed this, because the "missing return value" error (`return;`
+in a non-`void` function) has no expression to hang the diagnostic
+position on, and no other field offers an alternative.
 
 ---
 
-## 5. Szimbólumtáblák (`symtab.asm`)
+## 5. Symbol tables (`symtab.asm`)
 
-Nincs beágyazott hatókör modellezendő: a Stage 0 kizárólag a `func_block`
-elején enged `decl`-t (soha `if`/`while` testében) — tehát **pontosan egy**
-lapos hatókör van függvényenként (param-jai + saját decl-jei), nincs
-árnyékolási szabály. Mindhárom tábla lapos, `MAX_LIST_ARITY`-korlátos
-tömb, lineáris kereséssel — ugyanaz a minta, mint minden más változó
-aritású lista a kódbázisban (`symtab.inc` rögzíti a rekord-elrendezéseket,
-megosztva az író `symtab.asm` és az olvasó `sema_expr.asm`/`sema_stmt.asm`
-között).
+There is no nested scope to model: Stage 0 only allows `decl` at the
+start of a `func_block` (never inside an `if`/`while` body) — so there
+is **exactly one** flat scope per function (its params + its own decls),
+with no shadowing rule. All three tables are flat, `MAX_LIST_ARITY`-bounded
+arrays with linear search — the same pattern as every other
+variable-arity list in the codebase (`symtab.inc` fixes the record
+layouts, shared between the writer `symtab.asm` and the readers
+`sema_expr.asm`/`sema_stmt.asm`).
 
-- **Globális tábla**, `AST_PROGRAM`-onként egyszer, két al-menetben, hogy
-  a deklarációs sorrend és a kölcsönös/előre hivatkozások (egy később
-  deklarált függvényt hívó függvény, önmagát hívó `gcd`, egy később
-  deklarált structra hivatkozó struct) sorrendtől függetlenül működjenek:
-  - *1a menet — nevek regisztrálása*: `struct_table` (`{name_offset,
+- **Global table**, built once per `AST_PROGRAM` in two sub-passes, so
+  that declaration order and mutual/forward references (a function
+  calling a function declared later, a self-calling `gcd`, a struct
+  referencing a struct declared later) work regardless of order:
+  - *Pass 1a — register names*: `struct_table` (`{name_offset,
     name_len, AST_STRUCT_DECL ptr}`), `callable_table` (`{name_offset,
     name_len, is_extern, AST_SIGNATURE ptr, return_type ptr}` —
-    function+extern egyesítve, mindkettő azonosan "névvel hívható").
-    Duplikátum-ellenőrzés **egy közös névtérben**, struct+function+extern
-    együtt (egyszerűsítő, felülvizsgálható döntés — nem nyelvi
-    követelmény).
-  - *1b menet — minden deklarált típus felbontása*: minden típus-előfordulás
-    (struct-mezők, paraméterek, visszatérési típusok) végigfut a
-    `resolve_type`-on, miután minden név ismert.
-  - *2. menet — minden függvénytörzs ellenőrzése* a most már teljes
-    globális táblával.
-- **Helyi tábla**, függvényenként újraépítve: lapos `{name_offset,
-  name_len, type ptr, is_const}` lista a szignatúra param-jaiból + a
-  `func_block` decl-jeiből. Ugyanúgy duplikátum-ellenőrzött (param/param,
-  param/decl, decl/decl — nincs mit árnyékolni). **Itt** történik minden
-  helyi decl saját típusának felbontása is (nem az 1b menetben — csak
-  akkor kell érvényesnek lennie, amikor az adott függvény törzsét
-  ellenőrizzük, nem korábban).
-- **Keresés**: lineáris scan + `bytes_equal` (a `parser_main.asm`-ből
-  ismert minta helyi másolata, a kódbázis "kis segédfüggvények
-  fájlonként duplikálva" konvenciója szerint).
+    function+extern unified, both are equally "callable by name").
+    Duplicate checking happens in **one shared namespace**, struct +
+    function + extern together (a simplifying, revisitable decision —
+    not a language requirement).
+  - *Pass 1b — resolve every declared type*: every type occurrence
+    (struct fields, parameters, return types) runs through
+    `resolve_type`, once every name is known.
+  - *Pass 2 — check every function body*, now with the complete global
+    table.
+- **Local table**, rebuilt per function: a flat `{name_offset,
+  name_len, type ptr, is_const}` list from the signature's params plus
+  the `func_block`'s decls. Duplicate-checked the same way (param/param,
+  param/decl, decl/decl — nothing to shadow). **This is also where** each
+  local decl's own type is resolved (not in pass 1b — it only needs to
+  be valid when that function's body is being checked, not earlier).
+- **Lookup**: linear scan + `bytes_equal` (a local copy of the pattern
+  known from `parser_main.asm`, following the codebase's convention of
+  duplicating small helper functions per file).
 
 ---
 
-## 6. Típusok (`sema_types.asm`)
+## 6. Types (`sema_types.asm`)
 
-Egy "típus" itt egyszerűen egy már létező `AST_TY_*` csomópontra mutató
-pointer — leggyakrabban egy már az AST-ban ülő csomópont (egy decl saját
-típusa, egy szimbólumtábla-bejegyzés típusa), esetenként frissen
-szintetizált (`get_bool_type`/`get_int_type`/`get_null_default_type`
-kanonikus szingletonok, vagy `&x` eredménytípusa `sema_expr.asm`-ben) —
-`ast_alloc_node`-on keresztül.
+A "type" here is simply a pointer to an already-existing `AST_TY_*`
+node — most often a node already sitting in the AST (a decl's own type,
+a symbol-table entry's type), occasionally freshly synthesized
+(`get_bool_type`/`get_int_type`/`get_null_default_type` canonical
+singletons, or the result type of `&x` in `sema_expr.asm`) — via
+`ast_alloc_node`.
 
-- **`resolve_type`**: rekurzív érvényesség-ellenőrzés — `POINTER` a belsőre
-  rekurzál, `ARRAY` az elemre, beépített `BASE` mindig érvényes,
-  struct-név `BASE` (tag=0) a globális struct-táblában keresendő, hiba ha
-  nincs.
-- **`types_equal`**: strukturális összehasonlítás, `int`≡`int16` /
-  `uint`≡`uint16` foldolással (a fő spec "int/uint" sora — más
-  `TOK_KW_*` tag, azonos alul fekvő típus); struct-név `BASE`-ek
-  névspan-összehasonlítással; `ARRAY` emellett elemszám-egyezést is
-  megkövetel. **0 ("void") egyik oldalon sem egyenlő semmivel** — ez a
-  kikötés zárja le egyöntetűen azt az esetet, amikor egy `void`
-  visszatérésű hívás eredményét értékként próbálják felhasználni (ld. 7.
-  fejezet).
-
----
-
-## 7. Kifejezés-ellenőrzés (`sema_expr.asm`)
-
-`check_expr(node, expected_type) -> resolved type ptr` — egy nagy
-diszpatcher, `dump_expr` csomópont-fajtánkénti alakját követve, formázás
-helyett számítással/ellenőrzéssel. Az `expected_type`-ot **csak** a
-literálok (`INT`/`BOOL`/`NULL`) és az `array_literal` fogyasztja
-ténylegesen (utóbbi az elemtípust tanulja meg belőle, mivel önmagában
-nincs típus-annotációja).
-
-Bináris/aritmetikai kifejezéseknél: **amelyik oldal NEM csupasz literál,
-azt ellenőrizzük előbb**, és az ő eredménye horgonyozza a másik oldalt (ha
-mindkettő literál, a külső `expected_type` horgonyozza az elsőt, az pedig
-a másodikat) — ld. 2.1. fejezet. `CALL`: a hívott kizárólag csupasz
-`IDENT` lehet, ami a globális `callable_table`-ben feloldódik (Stage
-0-ban nincs függvénymutató/first-class function); argumentum-szám és
--típus egyezés a szignatúra param-jaival. `FIELD`/`INDEX`: alap típusa
-struct/tömb kell legyen, a mező/index érvényessége ellenőrzött.
-`STRUCT_LIT`/`ARRAY_LIT`: elemenkénti típuspropagáció, kiegészítve a 2.
-fázisban a teljesség-ellenőrzéssel (ld. 7.4/7.5).
-
-### 7.1 Tömb-literál elemszám (2. fázis)
-
-`.array_lit`-ben, amikor `expected_type` egy valódi `AST_TY_ARRAY` (a
-gyakorlati eset — minden tömb-típusú pozíció, decl init vagy struct-mező
-init, mindig explicit méretet deklarál): az elemtípus megállapítása után
-azonnal összeveti a literál tényleges elemszámát (`AST_EX_ARRAY_LIT`
-saját `b` mezője) az elvárt típus deklarált méretével (`AST_TY_ARRAY` `b`
-mezője, még mindig `r12`-ben az ág elejétől). A kontextus nélküli eset
-(`.array_lit_no_context`) nem kap ellenőrzést — ritka, defenzív ág, a
-gyakorlatban sosem így ellenőrződik egy valódi program tömb-literálja.
-
-### 7.2 Struct-literál teljesség (2. fázis)
-
-Mezőnkénti "látott" jelző szükséges, hogy mind a **duplikált** (már
-látott mező újra megadva), mind a **hiányzó** (sosem látott mező) esetet
-elkapja. Nem kell új regiszter: a meglévő scratch-terület
-(`.struct_lit_found`-ban `sub rsp, 32`, a stabil `r14` bázison keresztül
-címezve) egyszerűen `MAX_LIST_ARITY` bájttal nő (`sub rsp, 32 +
-MAX_LIST_ARITY`) — egy bájt minden lehetséges mező-indexre, közvetlenül a
-4 meglévő quad-slot után, `[r14 + 32 + mező_index]`-en címezve. Nullázva
-`[0, field_count)`-ra, amint `r13` (a struct decl) ismert — verem-memória,
-nem `.bss`, tehát (a kódbázis eddigi ÖSSZES többi scratch-területétől
-eltérően, amik mind `.bss`-alapúak, tehát eleve nullázottak) explicit
-nullázás kell.
-
-`.struct_field_scan` hurkának saját indexe (`r15`) pontosan a talált mező
-saját indexe a struct mezőlistájában, amikor `.struct_field_found`-ba
-érünk — közvetlenül újrahasznosítva a "látott" tömb indexeként, nincs
-külön könyvelés. Ott: `[r14+32+r15]` ellenőrzése minden más előtt — ha már
-`1`, `"duplicate field initializer 'X'"` a field_init saját pozícióján
-(`find_offset`, ami az 1. fázis óta kezeli az `AST_FIELD_INIT`-et);
-egyébként `1`-re állítva folytatódik, változatlanul.
-
-A `.struct_lit_loop` végén (`.struct_lit_done`, a visszatérési típus
-szintézise előtt) végigscanneli `[r14+32, r14+32+field_count)`-ot bármely
-még-`0` bejegyzésért — `"missing field initializer 'X'"` az adott index
-saját `AST_FIELD_DECL`-jével (a struct mezőlistájából) névre/pozícióra.
-
-### 7.3 Based-form számjegy-tartomány (`validate_int_literal`, 2. fázis)
-
-Önálló, `check_expr`'s `.int` ágából hívott rutin (a kontextustól
-függetlenül, a típus eldöntése előtt fut). Visszaszeleteli a literál nyers
-szövegét `[parser_src_buf + name_offset, name_len)`-ből (`AST_EX_INT`-en
-csak az 1. fázis óta elérhető) és `'n'`-t keres:
-
-- Nincs `'n'` → `decimal_form`, nincs mit ellenőrizni.
-- Van `'n'` → a `'n'` előtti számjegyek (a lexer által már garantáltan
-  decimálisak) adják a bázist — pontosan `2`, `8`, `10` vagy `16` kell
-  legyen (négy `cmp`, nincs szükség táblázatra ennyi értékhez), egyébként
-  `"based-form literal base must be 2, 8, 10, or 16, found N"`. A `'n'`
-  utáni minden számjegy dekódolva (ugyanaz a `0-9`/`a-f`/`A-F` foldolás,
-  amit a `lexer.asm` `lex_handle_number`-je is használ az érték
-  kiszámításához) és `< bázis` ellenőrizve — az első sértés
-  `"based-form literal has a digit that is not valid in base N"`. Mindkét
-  hibaág a literál saját pozícióján jelent (`name_offset` közvetlenül
-  elérhető, nincs szükség `find_offset`-re).
-
-### 7.5 Egy második, talált és javított hiba (szintén a struct-literál útján)
-
-A fenti 7.2 fejezet fixture-jeinek megírása közben (két azonos hosszúságú
-mezőnév, `struct Point { x; y; }`) egy **másik**, korábban rejtve maradt,
-1. fázisból örökölt hiba is előkerült: `.struct_field_scan` a struct
-mezőlistáját és mezőszámát `rcx`/`rdx`-ben tartotta a scan-hurok egésze
-alatt, majd egy beágyazott `call bytes_equal`-t hívott — ami **saját maga
-is `rcx`-et használ belső scratch-ként**, és `rdx`-et is felülírja (a
-hívás 3. argumentuma). Az első olyan összehasonlításnál, ahol a névhossz
-egyezik, de a tényleges bájtok nem (pontosan ez történik "y"-t keresve,
-ha az első jelölt "x" — mindkettő 1 hosszú), a hurok saját felső korlátja
-korrupálódott, és a keresés idő előtt "nincs ilyen mező"-t jelentett —
-annak ellenére, hogy a mező valójában létezett, csak még nem került sorra.
-**Javítás:** a struct mezőlistáját és mezőszámát minden hurok-iterációban
-frissen, `r13`-ból (a struct decl, végig védett) olvassuk vissza, sosem
-`rcx`/`rdx`-ben gyorsítótárazva a hívás felett.
-
-`find_offset(node) -> offset`: mivel a legtöbb összetett csomópont-fajta
-(`BINARY`, `UNARY`, `INDEX`, `CALL`, ...) nem hordoz saját pozíciót, ez a
-segédrutin egy kijelölt gyerekbe rekurzál, amíg el nem ér egy olyan
-csomópontot, ami tényleg hordoz span-t (`IDENT`/`INT`/`BOOL`/`NULL`/
-`FIELD`/`FIELD_INIT`, és a `STMT_RETURN` a saját `return`-kulcsszó
-pozíciójára esik vissza, ha nincs kifejezése).
-
-### 7.4 Egy talált és javított hiba (1. fázis, a nagyméretű fekete-doboz programon bukott el)
-
-`.struct_field_found` ág — a talált `AST_FIELD_DECL`
-pointert `rcx`-ben tartotta, majd egy beágyazott `check_expr` hívás
-**után** újra beolvasta `[rcx + ...]`-t a típus lekéréséhez. Az `rcx`
-hívó által mentendő regiszter, a `check_expr` belseje felülírja — ugyanaz
-a hibaosztály, mint az `ast_dump.asm` `emit_str`-`rax` esete a parser
-fázisból, csak `rcx`-szel. Javítás: a mezőtípust egy védett regiszterbe
-(`r12`, ami ezen az ágon máshol nincs használatban) mentjük a beágyazott
-hívás **előtt**.
-
-### 7.6 Tömbindex fordítási idejű tartomány-ellenőrzés (3. fázis)
-
-A `.index` ágban, az index-kifejezés `integer`-típus-ellenőrzése után:
-csak akkor fut, ha az index-kifejezés **szó szerint** egy `AST_EX_INT`
-csomópont (bare integer literál) — nincs általános konstans-összevonás
-tetszőleges kifejezésekre (pl. `1+2`), összhangban azzal, hogy a Stage 0
-egyáltalán nem tartalmaz optimalizáló/foldoló menetet. Ha a literál saját
-értéke (`AST_A_OFF`) `>=` a tömbtípus deklarált elemszámával
-(`AST_B_OFF` az `AST_TY_ARRAY` csomóponton), `"array index out of range
-for a declared size of N"` hiba. Egy valódi dinamikus (változó/számított)
-index **sosem** kerül ellenőrzésre — ez szándékosan egy nulla futásidejű
-költségű, csak fordítási idejű diagnosztika marad, nem egy rejtett
-futásidejű bounds-check (a kódgenerátor `INDEX` lvalue-kódgenerálása sem
-ad ki soha futásidejű ellenőrzést, ld. `docs/postulate_stage0_codegen_spec.md`).
+- **`resolve_type`**: recursive validity checking — `POINTER` recurses
+  into its inner type, `ARRAY` into its element type, a built-in `BASE`
+  is always valid, a struct-name `BASE` (tag=0) is looked up in the
+  global struct table, error if not found.
+- **`types_equal`**: structural comparison, with `int`≡`int16` /
+  `uint`≡`uint16` folding (the main spec's "int/uint" row — different
+  `TOK_KW_*` tag, same underlying type); struct-name `BASE`s compared by
+  name span; `ARRAY` additionally requires element-count equality.
+  **`0` ("void") is never equal to anything on either side** — this
+  constraint uniformly closes off the case where the result of a `void`
+  return-type call is used as a value (see chapter 7).
 
 ---
 
-## 8. Utasítás-ellenőrzés, extern-fehérlista, `check_program` (`sema_stmt.asm`)
+## 7. Expression checking (`sema_expr.asm`)
 
-- **`check_decl`**: ha van kezdőérték, `check_expr` a deklarált típussal
-  mint elvárt típussal, majd `types_equal`.
-- **`check_stmt`**: `assign`/`if`/`while`/`return`/`expr_stmt` ágak. Az
-  `assign` a legösszetettebb: minden párra `lvalue`-alak ellenőrzés (2.2),
-  `const`-ellenőrzés (2.3), majd `check_expr`+`types_equal` az RHS-re; az
-  összes pár után egy páronkénti (O(n²), de a párok száma a gyakorlatban
-  2-4) `lvalue_equal` strukturális összehasonlítás a duplikált célpontok
-  ellen — **csak szintaktikai** azonosságot néz (`x := 1, x := 2;` hibázik,
-  `arr[i] := 1, arr[j] := 2;` nem, még ha `i == j` futásidőben — nincs
-  aliasing-elemzés, tudatos hatókör-korlát).
-- **`check_extern_whitelist`**: a fő spec 2. fejezetének 4 fix szignatúrája
-  (`sys_read`/`sys_write`/`sys_mmap`/`sys_exit`) — név `bytes_equal`-lel
-  azonosítva, majd param-onkénti `types_equal` a `mk_base`/`mk_ptr_base`
-  segédekkel szintetizált elvárt típusok ellen.
+`check_expr(node, expected_type) -> resolved type ptr` — one large
+dispatcher, following `dump_expr`'s per-node-kind shape, but computing
+and checking instead of formatting. `expected_type` is only actually
+consumed by literals (`INT`/`BOOL`/`NULL`) and by `array_literal`
+(which learns its element type from it, since it carries no type
+annotation of its own).
+
+For binary/arithmetic expressions: **whichever side is NOT a bare
+literal is checked first**, and its result anchors the other side (if
+both are literals, the outer `expected_type` anchors the first, which
+then anchors the second) — see chapter 2.1. `CALL`: the callee can only
+be a bare `IDENT`, resolved in the global `callable_table` (Stage 0 has
+no function pointers/first-class functions); argument count and types
+are matched against the signature's params. `FIELD`/`INDEX`: the base's
+type must be struct/array, field/index validity is checked.
+`STRUCT_LIT`/`ARRAY_LIT`: per-element type propagation, augmented in
+Phase 2 with completeness checking (see 7.4/7.5).
+
+### 7.1 Array-literal element count (Phase 2)
+
+In `.array_lit`, when `expected_type` is an actual `AST_TY_ARRAY` (the
+practical case — every array-typed position, decl init or struct-field
+init, always declares an explicit size): right after determining the
+element type, it immediately compares the literal's actual element
+count (`AST_EX_ARRAY_LIT`'s own `b` field) against the expected type's
+declared size (`AST_TY_ARRAY`'s `b` field, still in `r12` since the
+start of the branch). The no-context case (`.array_lit_no_context`)
+receives no checking — a rare, defensive branch; in practice a real
+program's array literal is never checked this way.
+
+### 7.2 Struct-literal completeness (Phase 2)
+
+A per-field "seen" flag is needed to catch both the **duplicate** case
+(a field already seen, given again) and the **missing** case (a field
+never seen). No new register is needed: the existing scratch area
+(`sub rsp, 32` in `.struct_lit_found`, addressed via the stable `r14`
+base) simply grows by `MAX_LIST_ARITY` bytes (`sub rsp, 32 +
+MAX_LIST_ARITY`) — one byte per possible field index, directly after
+the 4 existing quad slots, addressed as `[r14 + 32 + field_index]`.
+Zeroed over `[0, field_count)` as soon as `r13` (the struct decl) is
+known — this is stack memory, not `.bss`, so (unlike every other
+scratch area in the codebase so far, all of which are `.bss`-based and
+thus already zeroed) an explicit zeroing step is required.
+
+`.struct_field_scan`'s loop's own index (`r15`) is exactly the found
+field's own index in the struct's field list, by the time
+`.struct_field_found` is reached — directly reused as the index into
+the "seen" array, no separate bookkeeping needed. There: `[r14+32+r15]`
+is checked before anything else — if already `1`, `"duplicate field
+initializer 'X'"` is reported at the field_init's own position
+(`find_offset`, which has handled `AST_FIELD_INIT` since Phase 1);
+otherwise it is set to `1` and processing continues unchanged.
+
+At the end of `.struct_lit_loop` (`.struct_lit_done`, before synthesizing
+the return type) it scans `[r14+32, r14+32+field_count)` for any entry
+still `0` — `"missing field initializer 'X'"`, naming/positioning it via
+that index's own `AST_FIELD_DECL` (from the struct's field list).
+
+### 7.3 Based-form digit range (`validate_int_literal`, Phase 2)
+
+A standalone routine called from `check_expr`'s `.int` branch
+(regardless of context, runs before the type is decided). It slices the
+literal's raw text back out of `[parser_src_buf + name_offset,
+name_len)` (available on `AST_EX_INT` only since Phase 1) and looks for
+`'n'`:
+
+- No `'n'` → `decimal_form`, nothing to check.
+- `'n'` present → the digits before `'n'` (already guaranteed decimal by
+  the lexer) give the base — it must be exactly `2`, `8`, `10`, or `16`
+  (four `cmp`s, no table needed for that few values), otherwise
+  `"based-form literal base must be 2, 8, 10, or 16, found N"`. Every
+  digit after `'n'` is decoded (the same `0-9`/`a-f`/`A-F` folding that
+  `lexer.asm`'s `lex_handle_number` uses to compute the value) and
+  checked `< base` — the first violation reports `"based-form literal
+  has a digit that is not valid in base N"`. Both error branches report
+  at the literal's own position (`name_offset` is directly available, no
+  need for `find_offset`).
+
+### 7.5 A second bug found and fixed (also via the struct-literal path)
+
+While writing the fixtures for chapter 7.2 above (two field names of
+equal length, `struct Point { x; y; }`), a **different**, previously
+hidden bug inherited from Phase 1 also surfaced: `.struct_field_scan`
+kept the struct's field list and field count in `rcx`/`rdx` for the
+entire scan loop, then made a nested `call bytes_equal` — which **itself
+also uses `rcx`** as internal scratch, and also overwrites `rdx` (its
+3rd argument). At the first comparison where the name length matches
+but the actual bytes do not (exactly what happens when searching for
+"y" if the first candidate is "x" — both length 1), the loop's own
+upper bound got corrupted, and the search prematurely reported "no such
+field" — even though the field actually existed, it just hadn't been
+reached yet. **Fix:** the struct's field list and field count are
+re-read fresh from `r13` (the struct decl, preserved throughout) on
+every loop iteration, never cached in `rcx`/`rdx` across the call.
+
+`find_offset(node) -> offset`: since most compound node kinds
+(`BINARY`, `UNARY`, `INDEX`, `CALL`, ...) do not carry a position of
+their own, this helper recurses into a designated child until it
+reaches a node that actually carries a span (`IDENT`/`INT`/`BOOL`/`NULL`/
+`FIELD`/`FIELD_INIT`, and `STMT_RETURN` falls back to its own `return`
+keyword's position if it has no expression).
+
+### 7.4 A bug found and fixed (Phase 1, surfaced by the large black-box program)
+
+The `.struct_field_found` branch kept the found `AST_FIELD_DECL`
+pointer in `rcx`, then, **after** a nested `check_expr` call, re-read
+`[rcx + ...]` to fetch the type. `rcx` is a caller-saved register,
+clobbered by `check_expr`'s internals — the same class of bug as the
+`ast_dump.asm` `emit_str`/`rax` case from the parser phase, just with
+`rcx`. Fix: the field type is saved into a preserved register (`r12`,
+unused elsewhere on this branch) **before** the nested call.
+
+### 7.6 Compile-time array-index range checking (Phase 3)
+
+In the `.index` branch, after the index expression's `integer`-type
+check: this only runs if the index expression is **literally** an
+`AST_EX_INT` node (a bare integer literal) — there is no general
+constant-folding for arbitrary expressions (e.g. `1+2`), consistent
+with the fact that Stage 0 has no optimization/folding pass at all. If
+the literal's own value (`AST_A_OFF`) is `>=` the array type's declared
+element count (`AST_B_OFF` on the `AST_TY_ARRAY` node), it is a
+`"array index out of range for a declared size of N"` error. A genuinely
+dynamic (variable/computed) index is **never** checked — this is
+intentionally a zero-runtime-cost, compile-time-only diagnostic, not a
+hidden runtime bounds check (the code generator's `INDEX` lvalue code
+generation never emits a runtime check either, see
+`docs/postulate_stage0_codegen_spec.md`).
+
+---
+
+## 8. Statement checking, extern whitelist, `check_program` (`sema_stmt.asm`)
+
+- **`check_decl`**: if there is an initial value, `check_expr` with the
+  declared type as the expected type, then `types_equal`.
+- **`check_stmt`**: `assign`/`if`/`while`/`return`/`expr_stmt` branches.
+  `assign` is the most complex: `lvalue`-shape checking for each pair
+  (2.2), `const` checking (2.3), then `check_expr`+`types_equal` for the
+  RHS; after all pairs, a pairwise (O(n²), but in practice the pair
+  count is 2-4) `lvalue_equal` structural comparison guards against
+  duplicate targets — it only checks **syntactic** identity
+  (`x := 1, x := 2;` is an error, `arr[i] := 1, arr[j] := 2;` is not,
+  even if `i == j` at runtime — no aliasing analysis, a deliberate scope
+  limit).
+- **`check_extern_whitelist`**: the main spec's chapter 2 fixed set of 4
+  signatures (`sys_read`/`sys_write`/`sys_mmap`/`sys_exit`) — name
+  identified with `bytes_equal`, then per-parameter `types_equal` against
+  expected types synthesized with the `mk_base`/`mk_ptr_base` helpers.
 - **`check_program`**: `build_global_tables` (1a) → `resolve_all_types`
-  (1b) → minden `AST_FUNCTION` törzse (`build_local_table` +
-  `check_func_block`) + minden `AST_EXTERN_DECL` a fehérlistával szemben
-  (2. menet). A struct-deklarációknak nincs további teendőjük — az 1b
-  menet már ellenőrizte a mezőik típusait.
+  (1b) → every `AST_FUNCTION` body (`build_local_table` +
+  `check_func_block`) + every `AST_EXTERN_DECL` against the whitelist
+  (pass 2). Struct declarations require no further work — pass 1b has
+  already checked their field types.
 
-### 8.1 "Minden végrehajtási út return-nel zárul" (2. fázis)
+### 8.1 "Every execution path ends with a return" (Phase 2)
 
-Az egyetlen tétel ebben a fázisban, ami nem "bővíts egy meglévő ágat" —
-strukturális indukció utasítás-*listákon*, nem egyetlen csomópont saját
-alakjának ellenőrzése.
+The one item in this phase that isn't "extend an existing branch" —
+structural induction over statement *lists*, not checking a single
+node's own shape.
 
-- **`stmts_always_return(stmts_ptr, count) -> 1/0`** — igaz, ha a
-  listában **bármelyik** utasítás mindig visszatér (nem csak az utolsó:
-  ha egy korábbi utasítás mindig visszatér, minden utána lévő elérhetetlen
-  a saját alakjától függetlenül — ez a fázis nem vezet be külön "elérhetetlen
-  kód" figyelmeztetést, csak nem hagyja, hogy a holt kód alakja
-  befolyásolja a döntést). Szó szerint megosztva `AST_BLOCK` (`a`=stmts,
-  `b`=count) és `AST_FUNC_BLOCK` (`c`=stmts, `d`=stmt_count) között — azonos
-  csomópont-pointer-tömb alak, csak más mező-offszet a két hívási helyen.
-- **`stmt_always_returns(stmt) -> 1/0`** — kind szerint diszpatcher:
-  - `AST_STMT_RETURN` → mindig `1`.
-  - `AST_STMT_IF` → csak akkor `1`, ha **van** `else`-ága **és** mindkét ág
-    (`stmts_always_return` rájuk) mindig visszatér. `else` nélkül mindig
-    `0` (az `else` nélküli út definíció szerint átesik).
-  - `AST_STMT_WHILE` → általában `0` (Stage 0-ban nincs `break`, de egy
-    hurok törzse nulla alkalommal is lefuthat, hacsak a feltétel nem
-    feltétlenül igaz — ez az elemzés nem következtet tetszőleges
-    kifejezésekre). **Egy megalapozott speciális eset**: ha a feltétel
-    szó szerint az `AST_EX_BOOL` `true` literál, a hurok csakis
-    `return`-nel léphet ki (vagy örökké fut — mindkettő elfogadható módja
-    annak, hogy "sosem esik át ezen a ponton", ugyanúgy, mint pl. a Rust
-    `loop {}`-ja) — ez az eset `1`, a törzstől függetlenül.
-  - `AST_STMT_ASSIGN` / `AST_STMT_EXPR` → mindig `0`.
-- **Bekötés**: `check_function_body`-ban, a `check_func_block` sikeres
-  lefutása után, ha a függvény deklarált visszatérési típusa nem `void`,
-  `stmts_always_return` a func_block saját utasítás-listáján; ha `0`,
-  `"function 'X' may not return a value on every execution path"` a
-  függvény saját nevének span-ján (a szignatúrájából — ez az egyetlen
-  diagnosztika ebben az egész fázisban, ami egy felső szintű deklarációra
-  horgonyoz, nem kifejezésre/utasításra, tehát nincs szüksége
-  `find_offset`-re, egyenesen `err_append_span` a szignatúra nevén).
+- **`stmts_always_return(stmts_ptr, count) -> 1/0`** — true if **any**
+  statement in the list always returns (not just the last one: if an
+  earlier statement always returns, everything after it is unreachable
+  regardless of its own shape — this phase does not introduce a separate
+  "unreachable code" warning, it just doesn't let dead code's shape
+  influence the decision). Literally shared between `AST_BLOCK` (`a`=stmts,
+  `b`=count) and `AST_FUNC_BLOCK` (`c`=stmts, `d`=stmt_count) — same
+  node-pointer-array shape, just different field offsets at the two call
+  sites.
+- **`stmt_always_returns(stmt) -> 1/0`** — dispatcher by kind:
+  - `AST_STMT_RETURN` → always `1`.
+  - `AST_STMT_IF` → only `1` if **there is** an `else` branch **and**
+    both branches (`stmts_always_return` on each) always return. Without
+    `else`, always `0` (the no-`else` path falls through by definition).
+  - `AST_STMT_WHILE` → generally `0` (Stage 0 has no `break`, but a
+    loop body can also run zero times unless the condition is
+    necessarily true — this analysis does not reason about arbitrary
+    expressions). **One well-founded special case**: if the condition is
+    literally the `AST_EX_BOOL` `true` literal, the loop can only exit
+    via `return` (or run forever — both are acceptable ways of "never
+    falling through this point," the same as e.g. Rust's `loop {}`) —
+    this case is `1`, regardless of the body.
+  - `AST_STMT_ASSIGN` / `AST_STMT_EXPR` → always `0`.
+- **Wiring**: in `check_function_body`, after `check_func_block`
+  succeeds, if the function's declared return type is not `void`,
+  `stmts_always_return` runs on the func_block's own statement list; if
+  `0`, `"function 'X' may not return a value on every execution path"`
+  is reported at the function's own name span (from its signature — the
+  only diagnostic in this entire phase that anchors on a top-level
+  declaration rather than an expression/statement, so it needs no
+  `find_offset`, going straight to `err_append_span` on the signature's
+  name).
 
-### 8.2 Tömb broadcast-init (3. fázis)
+### 8.2 Array broadcast-init (Phase 3)
 
-`check_decl` és `check_stmt`'s `.assign` pár-hurka mindkettő ugyanazt a
-`check_expr(rhs, target_type)` + `types_equal` mintát követi — ha ez
-sikertelen **és** `target_type.kind == AST_TY_ARRAY` **és** `rhs` nem
-szó szerint egy `AST_EX_ARRAY_LIT` (azok saját, változatlan
-elemszám+elemtípus ellenőrzésen mennek át `check_expr`'s `.array_lit`
-ágában), egy új `check_array_broadcast_compatible` segéd fut le
-tartalék-ként: `rhs`-t **újra** leellenőrzi, ezúttal a tömb
-**elemtípusával** mint elvárt típussal (nem a tömbtípussal magával), és
-`types_equal`-lel az elemtípus ellen. Siker esetén ez egy érvényes
-broadcast (`mut arr: int32[3] := 0;`), a meglévő
-`msg_decl_init_type_mismatch`/`msg_assign_type_mismatch` hibaüzenetek
-változatlanok maradnak, csak most már csak a valódi eltérésekre futnak
-le. A `check_expr` második hívása biztonságos, mert a rutin maga
-side-effect-mentes az `expected_type` szempontjából (csak literálok
-fogyasztják el, és sosem hibáznak rá — mindig a hívó `types_equal`-je
-dönt).
+Both `check_decl`'s and `check_stmt`'s `.assign` pair loop follow the
+same `check_expr(rhs, target_type)` + `types_equal` pattern — if that
+fails **and** `target_type.kind == AST_TY_ARRAY` **and** `rhs` is not
+literally an `AST_EX_ARRAY_LIT` (those already go through their own,
+unchanged element-count+element-type check in `check_expr`'s
+`.array_lit` branch), a new `check_array_broadcast_compatible` helper
+runs as a fallback: it re-checks `rhs` **again**, this time with the
+array's **element type** as the expected type (not the array type
+itself), and against `types_equal` for the element type. On success this
+is a valid broadcast (`mut arr: int32[3] := 0;`), and the existing
+`msg_decl_init_type_mismatch`/`msg_assign_type_mismatch` error messages
+remain unchanged, only now they only fire for genuine mismatches. The
+second `check_expr` call is safe because the routine itself has no side
+effects with respect to `expected_type` (only literals consume it, and
+they never error on it — the caller's `types_equal` always decides).
 
 ---
 
-## 9. Tesztkészlet
+## 9. Test suite
 
-Három, egymást kiegészítő verifikáció:
+Three complementary verification layers:
 
 1. **`tests/checker_cases/`** + `scripts/run_checker_tests.sh` — 33
-   helyes/hibás pár (66 fixture: 24 pár/48 fixture az 1. fázisból, 7
-   pár/14 fixture a 2.-ból, 2 pár/4 fixture a 3.-ból), egy-egy a fent
-   felsorolt szabályokhoz, mindegyik hiba **pontosan egy** eltérést
-   tartalmaz a helyes párjához képest. Nincs irányjelző-sor (a
-   `build/checker` mindig a teljes fájlt egy `program`-ként dolgozza fel).
-2. A **12 helyes fekete doboz program** (`tests/blackbox_cases/*_valid.ptl`,
-   a parser fázisból) újrafuttatva `build/checker`-en keresztül — valós,
-   nem minimalizált kód a tervezés igazolására, nem csak célzott
-   mini-fixture-ökön. Az 1. fázisban ez fedte fel a 7.4. fejezet `rcx`
-   hibáját és egy valódi hibát a saját teszt-programban
-   (`sys_exit(common)` `common: int32` argumentummal `int64` paraméter
-   ellen — mivel a nyelvnek nincs explicit típuskonverziós szintaxisa, ez
-   tényleg érvénytelen volt, a fixture lett javítva, nem a checker). A 2.
-   fázisban mind a 12 program változatlanul, hiba nélkül ment át az új
-   teljesség-/vezérlésfolyam-szabályokon is.
-3. A teljes `docker build` — mind a négy csomag (lexer, fehér doboz
-   parser, fekete doboz parser, checker) egyetlen kapun át.
+   valid/invalid pairs (66 fixtures: 24 pairs/48 fixtures from Phase 1,
+   7 pairs/14 fixtures from Phase 2, 2 pairs/4 fixtures from Phase 3),
+   one per rule listed above, each invalid fixture containing **exactly
+   one** deviation from its valid counterpart. No directive line (
+   `build/checker` always processes the whole file as a single
+   `program`).
+2. The **12 valid black-box programs** (`tests/blackbox_cases/*_valid.ptl`,
+   from the parser phase) rerun through `build/checker` — real,
+   non-minimized code to validate the design, not just targeted
+   mini-fixtures. In Phase 1 this uncovered the `rcx` bug from chapter
+   7.4 and a genuine bug in the project's own test program
+   (`sys_exit(common)` called with a `common: int32` argument against an
+   `int64` parameter — since the language has no explicit type-conversion
+   syntax, this really was invalid; the fixture was fixed, not the
+   checker). In Phase 2 all 12 programs passed unchanged, without error,
+   through the new completeness/control-flow rules as well.
+3. The full `docker build` — all four packages (lexer, white-box parser,
+   black-box parser, checker) through a single gate.
 
-Minden `.expected.*` a ténylegesen lefordított bináris valós
-kimenetéből — sosem kézzel kitalálva.
+Every `.expected.*` comes from the actually-compiled binary's real
+output — never hand-guessed.
 
 ---
 
-## 10. Stage 0-n kívül eső tételek
+## 10. Items outside Stage 0's scope
 
-Ez a két tétel a fő spec szerint is **nem** Stage 0 követelmény (nem
-"elhalasztott", hanem kifejezetten kizárt ebből a fordítóból):
+These two items are, per the main spec as well, **not** a Stage 0
+requirement (not "deferred," but explicitly excluded from this
+compiler):
 
-- "Figyelmen kívül hagyott visszatérési érték" figyelmeztetés — a fő
-  spec is csak egy jövőbeli/végleges fordítói funkcióként jegyzi.
-- Előre deklarált (test nélküli) függvények — külön, még meg sem írt
-  nyelvtani bővítés (nem azonos az `extern function`-nel).
+- "Ignored return value" warning — the main spec itself notes it only as
+  a future/final compiler feature.
+- Forward-declared (bodyless) functions — a separate, not-yet-written
+  grammar extension (not the same as `extern function`).
 
-Ezeken túl a szemantikai elemzőn kívüli, saját fázist igénylő munka:
-**kódgenerálás** (LLVM IR vagy natív kód) — ez a következő, érdemben más
-jellegű lépés a bootstrap-láncban.
+Beyond these, the work that lies outside the semantic analyzer and
+requires its own phase: **code generation** (LLVM IR or native code) —
+the next, substantively different step in the bootstrap chain.

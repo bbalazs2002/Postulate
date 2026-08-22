@@ -1,4 +1,4 @@
-// Szintaxis-bemutató a Postulate nyelvhez.
+// Syntax showcase for the Postulate language.
 
 extern function sys_write(fd: int64, buf: *uint8, count: uint64) : int64;
 extern function sys_exit(code: int64) : void;
@@ -39,7 +39,8 @@ function swap_values(x : int32, y : int32) : int32 {
   mut a : int32 := x;
   mut b : int32 := y;
 
-  // Szimultán értékadás: a jobb oldalak az eredeti állapotban értékelődnek ki
+  // Simultaneous assignment: the right-hand sides are evaluated against
+  // the original state
   a := b, b := a;
 
   return a;
@@ -58,28 +59,28 @@ function increment(p : *int32) : void {
 }
 
 function main() : int32 {
-  // Minden deklaráció a blokk elején (func_block ::= decl* stmt*) —
-  // utána kizárólag utasítások következhetnek.
+  // Every declaration goes at the top of the block (func_block ::= decl*
+  // stmt*) -- only statements may follow after that.
   const pair : Pair := Pair { a := 8n17, b := 16n1F };
-  const total : uint := 16n64;            // uint ≡ uint16
+  const total : uint := 16n64;            // uint == uint16
 
   mut n2 : Node := Node { value := 99, next := null };
   mut n1 : Node := Node { value := 1,  next := &n2 };
 
-  // pointer-tömb: 3 darab *Node, alapból mind null-ra broadcast-olva (ld. 4. fejezet)
+  // pointer array: 3 *Node slots, all broadcast to null by default (see chapter 4)
   mut node_list : *Node[3] := null;
 
-  mut arr : int32[10] := 0;               // minden elem 0-ra inicializálva
+  mut arr : int32[10] := 0;               // every element initialized to 0
 
-  // array_literal: pontosan 10 elem, tetszőleges expr (pl. függvényhívás) is lehet
+  // array_literal: exactly 10 elements, any expr (e.g. a function call) is allowed
   mut arr2 : int32[10] := {1, 2, 3, 4, 5, 6, 7, mult(4), 9, 10};
 
-  mut p   : *int32 := &arr[0];            // csak címképzés, arr tartalmától független
-  mut sum : int32;                        // skalár mut: opcionális inicializálás
+  mut p   : *int32 := &arr[0];            // just address-of, independent of arr's contents
+  mut sum : int32;                        // scalar mut: initializer optional
 
-  mut msg : uint8[5] := {72, 101, 108, 108, 111};   // "Hello" nyers bájtjai (nincs string típus)
+  mut msg : uint8[5] := {72, 101, 108, 108, 111};   // raw bytes of "Hello" (no string type)
 
-  // --- innentől csak utasítások ---
+  // --- statements only from here on ---
 
   node_list[0] := &n1;
   node_list[1] := &n2;
@@ -95,9 +96,9 @@ function main() : int32 {
     sum := sum + 1;
   }
 
-  increment(&sum);   // void függvény: mellékhatás pointeren keresztül, nincs visszatérési érték
+  increment(&sum);   // void function: side effect through a pointer, no return value
 
-  sys_write(1, &msg[0], 5);   // extern function: nyers syscall-hívás
+  sys_write(1, &msg[0], 5);   // extern function: raw syscall call
 
   return sum;
 }

@@ -4,7 +4,7 @@
 ; check_expr(node, expected_type) -> resolved type ptr. `expected_type`
 ; (0 = none) is only ever actually consumed by literal nodes (INT/BOOL/
 ; NULL have no fixed type of their own -- no literal suffixes exist in
-; this grammar, ld. spec gap #1) and by array_literal (to learn its
+; this grammar, see spec gap #1) and by array_literal (to learn its
 ; element type from context, since it carries no type annotation of its
 ; own). Every other node kind determines its own type structurally and
 ; ignores `expected_type` -- callers that need an exact match (decl init,
@@ -139,7 +139,7 @@ find_offset:
 .return_stmt_fallback:
     ; STMT_RETURN's a = expr (0 if absent) -- recurse into it if present,
     ; else fall back to the statement's own b = the 'return' keyword's
-    ; source offset (the only stmt kind that carries one, ld.
+    ; source offset (the only stmt kind that carries one, see
     ; stmt_parser.asm's parse_return_stmt).
     mov     rax, [rdi + AST_A_OFF]
     cmp     rax, 0
@@ -175,7 +175,7 @@ find_offset:
 ; ===========================================================================
 ; is_literal_expr: internal. in rdi = expr node ptr. out rax = 1/0 --
 ; true for INT/BOOL/NULL (the only node kinds with no fixed type of their
-; own, ld. gap #1).
+; own, see gap #1).
 ; ===========================================================================
 is_literal_expr:
     mov     rax, [rdi + AST_KIND_OFF]
@@ -396,7 +396,7 @@ check_expr:
 ; No error branch here -- an inappropriate expected_type just means the
 ; default is used instead, and the caller's own types_equal check (decl
 ; init, assignment, return, argument, ...) reports the mismatch with
-; better context than a literal-specific message could.
+; better context than a literal-specific message cousee
 .int:
     mov     rdi, rbx
     call    validate_int_literal
@@ -691,7 +691,7 @@ check_expr:
     ; is checked against the array's declared element count -- a
     ; genuinely dynamic (variable/computed) index is never checked, by
     ; design, matching the "no hidden runtime cost" principle (no
-    ; runtime check is ever emitted for this either, ld. codegen spec).
+    ; runtime check is ever emitted for this either, see codegen spec).
     mov     rax, [rbx + AST_B_OFF]      ; index expr node
     mov     rcx, [rax + AST_KIND_OFF]
     cmp     rcx, AST_EX_INT

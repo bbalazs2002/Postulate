@@ -2,7 +2,7 @@
 temp/**
 
 // build artifacts
-Stage0/build/**
+Hoare/build/**
 
 // node module files
 */node_modules/**
