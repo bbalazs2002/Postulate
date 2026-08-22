@@ -1,0 +1,10 @@
+struct Pair { a: int32; b: int32; }
+
+function takes_pair(p: Pair) : int32 {
+  return p.a;
+}
+
+function main() : int32 {
+  mut p: Pair := Pair { a := 1, b := 2 };
+  return takes_pair(p);
+}

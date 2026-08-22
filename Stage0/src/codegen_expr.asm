@@ -2,12 +2,14 @@
 ; helpers. See docs/postulate_stage0_codegen_spec.md.
 ;
 ; gen_rvalue(node) -> value in rax. gen_lvalue(node) -> address in rbx.
-; Phase 1 scope: scalar types only (int8..int64/uint8..uint64/bool), no
-; struct/array/pointer, calls to whitelisted extern syscalls only (no
-; user-to-user calls yet). Anything outside that scope hits codegen_fail
-; with a clear "not yet supported" diagnostic rather than emitting wrong
-; code -- see docs/postulate_stage0_codegen_spec.md section "Phase 1
-; scope enforcement".
+; Phase 2: struct/array/pointer locals fully supported (INDEX/FIELD/
+; UNARY(*)/UNARY(&) all implemented, composably); calls to both extern
+; syscalls and user functions (incl. recursion) -- but a struct/array
+; value may never cross a function-call boundary (as an argument or a
+; return value), only exist as a local/param/field/element -- that's a
+; separate, not-yet-designed future phase (ld. codegen spec). Anything
+; outside scope hits codegen_fail with a clear diagnostic rather than
+; emitting wrong code.
 
 %include "config.inc"
 %include "tokens.inc"
@@ -18,16 +20,22 @@
 extern parser_src_buf
 extern lookup_local
 extern lookup_callable
+extern lookup_struct
 extern type_size
 extern is_signed_type
+extern is_scalar_loadable_type
+extern field_offset
+extern field_type
 extern local_stack_offset
 extern get_bool_type
 extern get_int_type
 extern bytes_equal
+extern ast_alloc_node
 
 global gen_rvalue
 global gen_lvalue
 global gen_named_local_addr
+global gen_user_call
 global codegen_fail
 global emit_dec
 global emit_nl
@@ -82,6 +90,8 @@ s_close_bracket: db "]"
 s_close_bracket_len equ $ - s_close_bracket
 s_push_rax: db "    push    rax"
 s_push_rax_len equ $ - s_push_rax
+s_push_rbx: db "    push    rbx"
+s_push_rbx_len equ $ - s_push_rbx
 s_pop_rax: db "    pop     rax"
 s_pop_rax_len equ $ - s_pop_rax
 s_pop_rbx: db "    pop     rbx"
@@ -229,8 +239,6 @@ str_sys_mmap:  db "sys_mmap"
 str_sys_exit:  db "sys_exit"
 msg_unknown_extern: db "codegen internal error: extern function not on the recognized syscall whitelist (should have been rejected by the semantic checker)"
 msg_unknown_extern_len equ $ - msg_unknown_extern
-msg_unsupported_call: db "calls between user-defined functions are not supported by this codegen phase yet (single-function programs only)"
-msg_unsupported_call_len equ $ - msg_unsupported_call
 
 s_suf_false: db "_false"
 s_suf_false_len equ $ - s_suf_false
@@ -244,6 +252,27 @@ s_suf_start: db "_start"
 s_suf_start_len equ $ - s_suf_start
 s_empty: db ""
 s_empty_len equ 0
+
+s_imul_rax_: db "    imul    rax, "
+s_imul_rax__len equ $ - s_imul_rax_
+s_add_rbx_rax: db "    add     rbx, rax"
+s_add_rbx_rax_len equ $ - s_add_rbx_rax
+s_add_rbx_: db "    add     rbx, "
+s_add_rbx__len equ $ - s_add_rbx_
+
+msg_composite_as_scalar: db "cannot use a struct/array value directly as a scalar expression -- use its fields/elements, or copy it via a full assignment"
+msg_composite_as_scalar_len equ $ - msg_composite_as_scalar
+msg_composite_call_boundary: db "struct/array values cannot be passed as a call argument or returned from a function in this codegen phase yet"
+msg_composite_call_boundary_len equ $ - msg_composite_call_boundary
+
+s_mov_rdi_rsp: db "    mov     rdi, rsp"
+s_mov_rdi_rsp_len equ $ - s_mov_rdi_rsp
+s_mov_rsi_: db "    mov     rsi, "
+s_mov_rsi__len equ $ - s_mov_rsi_
+s_call_pf_: db "    call    pf_"
+s_call_pf__len equ $ - s_call_pf_
+s_add_rsp_: db "    add     rsp, "
+s_add_rsp__len equ $ - s_add_rsp_
 
 section .text
 
@@ -361,17 +390,24 @@ emit_label_num:
 ; ===========================================================================
 emit_sized_load:
     push    r12
+    push    r13
     mov     r12, rdi                    ; type node
     call    type_size
-    mov     rcx, rax                    ; size
+    mov     r13, rax                    ; size -- NOT rcx: a second call
+                                         ; (is_signed_type) follows before
+                                         ; this is consumed, and rcx isn't
+                                         ; provably safe across any call
+                                         ; here (ld. type_size's own rcx
+                                         ; scratch use, same lesson as
+                                         ; field_offset)
     mov     rdi, r12
     call    is_signed_type
     mov     rdx, rax                    ; signed?
-    cmp     rcx, 1
+    cmp     r13, 1
     je      .b1
-    cmp     rcx, 2
+    cmp     r13, 2
     je      .b2
-    cmp     rcx, 4
+    cmp     r13, 4
     je      .b4
     jmp     .b8
 .b1:
@@ -413,6 +449,7 @@ emit_sized_load:
     mov     rdx, s_rbx_bracket_len
     call    emit_str
     call    emit_nl
+    pop     r13
     pop     r12
     ret
 
@@ -542,10 +579,18 @@ emit_label_ref:
 ; ===========================================================================
 gen_lvalue:
     push    rbx
+    push    r12
+    push    r13
     mov     rbx, rdi
     mov     rax, [rbx + AST_KIND_OFF]
     cmp     rax, AST_EX_IDENT
     je      .ident
+    cmp     rax, AST_EX_INDEX
+    je      .index
+    cmp     rax, AST_EX_FIELD
+    je      .field
+    cmp     rax, AST_EX_UNARY
+    je      .unary_deref
     mov     rsi, msg_unsupported_expr
     mov     rdx, msg_unsupported_expr_len
     call    codegen_fail
@@ -553,6 +598,104 @@ gen_lvalue:
     mov     rdi, [rbx + AST_A_OFF]
     mov     rsi, [rbx + AST_B_OFF]
     call    gen_named_local_addr
+    jmp     .exit
+
+; INDEX: gen_lvalue(base) -> rbx; push rbx; gen_rvalue(index) -> rax;
+; imul rax, elem_size; pop rbx; add rbx, rax. Correct uniformly whether
+; base is a plain array local or a dereferenced pointer-to-array -- both
+; resolve through the same UNARY(*)/IDENT lvalue rules, no special-casing.
+.index:
+    mov     rdi, [rbx + AST_A_OFF]      ; base
+    call    gen_lvalue                  ; -> target rbx = base addr;
+                                         ; rax(ours) = base type (an array)
+    mov     r12, rax                    ; base (array) type
+    mov     rsi, s_push_rbx
+    mov     rdx, s_push_rbx_len
+    call    emit_str
+    call    emit_nl
+    mov     rdi, [rbx + AST_B_OFF]      ; index expr
+    call    gen_rvalue                  ; -> target rax = index value
+    mov     rdi, [r12 + AST_A_OFF]      ; element type
+    call    type_size                   ; pure compile-time computation --
+                                         ; doesn't touch the target's rax
+    mov     r13, rax                    ; elem_size -- rcx is NOT safe
+                                         ; across emit_str (it's emit_str's
+                                         ; own copy-loop counter, always
+                                         ; left at 0)
+    mov     rsi, s_imul_rax_
+    mov     rdx, s_imul_rax__len
+    call    emit_str
+    mov     rax, r13
+    call    emit_dec
+    call    emit_nl
+    mov     rsi, s_pop_rbx
+    mov     rdx, s_pop_rbx_len
+    call    emit_str
+    call    emit_nl
+    mov     rsi, s_add_rbx_rax
+    mov     rdx, s_add_rbx_rax_len
+    call    emit_str
+    call    emit_nl
+    mov     rax, [r12 + AST_A_OFF]      ; result type = element type
+    jmp     .exit
+
+; FIELD: base always resolves to a struct type by construction (semantics
+; already rejects field access through a pointer without an explicit *).
+.field:
+    mov     rdi, [rbx + AST_A_OFF]      ; base
+    call    gen_lvalue                  ; -> target rbx = base addr;
+                                         ; rax(ours) = base type (a
+                                         ; struct-name AST_TY_BASE)
+    mov     rdi, [rax + AST_B_OFF]      ; struct name_offset
+    mov     rsi, [rax + AST_C_OFF]      ; struct name_len
+    call    lookup_struct
+    mov     r12, [rax + STE_DECL_PTR]   ; struct decl
+    mov     rdi, r12
+    mov     rsi, [rbx + AST_B_OFF]      ; field name_offset
+    mov     rdx, [rbx + AST_C_OFF]      ; field name_len
+    call    field_offset
+    mov     r13, rax                    ; offset -- rcx is NOT safe here,
+                                         ; emit_str clobbers it as its own
+                                         ; copy-loop counter (and always
+                                         ; leaves it at 0, which is why
+                                         ; this looked like "every field
+                                         ; is at offset 0" when it used
+                                         ; rcx instead)
+    mov     rsi, s_add_rbx_
+    mov     rdx, s_add_rbx__len
+    call    emit_str
+    mov     rax, r13
+    call    emit_dec
+    call    emit_nl
+    mov     rdi, r12
+    mov     rsi, [rbx + AST_B_OFF]
+    mov     rdx, [rbx + AST_C_OFF]
+    call    field_type                  ; -> rax = field's declared type
+    jmp     .exit
+
+; UNARY(*): the pointer's own VALUE already *is* the target address.
+.unary_deref:
+    mov     rax, [rbx + AST_A_OFF]      ; op
+    cmp     rax, TOK_STAR
+    je      .deref_ok
+    mov     rsi, msg_unsupported_expr
+    mov     rdx, msg_unsupported_expr_len
+    call    codegen_fail
+.deref_ok:
+    mov     rdi, [rbx + AST_B_OFF]      ; operand (the pointer expr)
+    call    gen_rvalue                  ; -> target rax = pointer value;
+                                         ; rax(ours) = pointer type
+    mov     r12, rax
+    mov     rsi, s_mov_rbx_rax
+    mov     rdx, s_mov_rbx_rax_len
+    call    emit_str
+    call    emit_nl
+    mov     rax, [r12 + AST_A_OFF]      ; result type = pointee type
+    jmp     .exit
+
+.exit:
+    pop     r13
+    pop     r12
     pop     rbx
     ret
 
@@ -609,7 +752,11 @@ gen_rvalue:
     cmp     rax, AST_EX_NULL
     je      .null
     cmp     rax, AST_EX_IDENT
-    je      .ident
+    je      .load_via_lvalue
+    cmp     rax, AST_EX_INDEX
+    je      .load_via_lvalue
+    cmp     rax, AST_EX_FIELD
+    je      .load_via_lvalue
     cmp     rax, AST_EX_UNARY
     je      .unary
     cmp     rax, AST_EX_BINARY
@@ -656,10 +803,24 @@ gen_rvalue:
                                          ; program, ld. spec
     jmp     .exit
 
-.ident:
+; IDENT/INDEX/FIELD all reach their value the same way: compute the
+; lvalue (address into target rbx), guard that its type actually fits
+; in a single register (ld. is_scalar_loadable_type -- without this, a
+; struct that happens to be exactly 1/2/4/8 bytes would silently fall
+; through emit_sized_load's width dispatch and get "loaded" as if it
+; were a plain scalar), then load it.
+.load_via_lvalue:
     mov     rdi, rbx
-    call    gen_lvalue                  ; -> rax = type; emits lea rbx,[..]
+    call    gen_lvalue                  ; -> rax = type; emits address calc
     mov     r12, rax
+    mov     rdi, r12
+    call    is_scalar_loadable_type
+    cmp     rax, 0
+    jne     .load_ok
+    mov     rsi, msg_composite_as_scalar
+    mov     rdx, msg_composite_as_scalar_len
+    call    codegen_fail
+.load_ok:
     mov     rdi, r12
     call    emit_sized_load             ; emits "<mov/movsx/movzx> rax, ... [rbx]"
     mov     rax, r12
@@ -671,6 +832,10 @@ gen_rvalue:
     je      .neg
     cmp     rax, TOK_BANG
     je      .lnot
+    cmp     rax, TOK_STAR
+    je      .deref
+    cmp     rax, TOK_AMP
+    je      .addr
     mov     rsi, msg_unsupported_expr
     mov     rdx, msg_unsupported_expr_len
     call    codegen_fail
@@ -694,7 +859,54 @@ gen_rvalue:
     call    get_bool_type
     jmp     .exit
 
+; UNARY(*) rvalue: gen_lvalue (-> rbx), then a guarded sized load, same
+; shape as .load_via_lvalue above (this IS the "load via lvalue" case
+; for UNARY(*), just reached via a different node kind).
+.deref:
+    mov     rdi, rbx                    ; the UNARY(*) node itself
+    call    gen_lvalue                  ; -> rax = pointee type; emits
+                                         ; address calc into target rbx
+    mov     r12, rax
+    mov     rdi, r12
+    call    is_scalar_loadable_type
+    cmp     rax, 0
+    jne     .deref_ok
+    mov     rsi, msg_composite_as_scalar
+    mov     rdx, msg_composite_as_scalar_len
+    call    codegen_fail
+.deref_ok:
+    mov     rdi, r12
+    call    emit_sized_load
+    mov     rax, r12
+    jmp     .exit
+
+; UNARY(&): rvalue only (can't be re-addressed). gen_lvalue(operand) ->
+; rbx; that address *is* the result, transferred into rax. Result type
+; is always a pointer, synthesized fresh exactly like sema_expr.asm's
+; own .unary_addr case does at check time.
+.addr:
+    mov     rdi, [rbx + AST_B_OFF]      ; operand
+    call    gen_lvalue                  ; -> rax(ours) = operand type;
+                                         ; emits address calc into target rbx
+    mov     r12, rax                    ; operand type, saved before the
+                                         ; ast_alloc_node call below needs
+                                         ; rax/rdi for its own purposes
+    mov     rsi, s_mov_rax_rbx
+    mov     rdx, s_mov_rax_rbx_len
+    call    emit_str
+    call    emit_nl
+    mov     rdi, AST_TY_POINTER
+    call    ast_alloc_node
+    mov     [rax + AST_A_OFF], r12
+    jmp     .exit
+
 .binary:
+    ; Every operand gen_rvalue can ever hand back is already guaranteed
+    ; scalar/pointer by construction: .load_via_lvalue/.deref self-guard
+    ; via is_scalar_loadable_type, INT/BOOL/NULL/neg/lnot/addr are always
+    ; scalar/pointer by their own rules, and .call (below) rejects a
+    ; composite-returning callee before ever returning here. So BINARY
+    ; needs no separate guard of its own.
     mov     rax, [rbx + AST_A_OFF]      ; op
     cmp     rax, TOK_ANDAND
     je      .land
@@ -816,9 +1028,10 @@ gen_rvalue:
     mov     r14, rax                    ; callable_table entry
     cmp     qword [r14 + CTE_IS_EXTERN], 0
     jne     .call_extern
-    mov     rsi, msg_unsupported_call
-    mov     rdx, msg_unsupported_call_len
-    call    codegen_fail
+    mov     rdi, rbx                    ; AST_EX_CALL node
+    mov     rsi, r14                    ; callable_table entry
+    call    gen_user_call
+    jmp     .exit
 .call_extern:
     mov     rdi, rbx                    ; AST_EX_CALL node
     mov     rsi, r14                    ; callable_table entry
@@ -1263,6 +1476,113 @@ gen_extern_call:
     mov     rdx, s_syscall_len
     call    emit_str
     call    emit_nl
+    mov     rax, [r12 + CTE_RET_TYPE]   ; 0 = void
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+; ===========================================================================
+; gen_user_call: internal. in rdi = AST_EX_CALL node, rsi = its resolved
+; callable_table entry (is_extern = 0). out: rax = declared return type
+; (0 = void). Implements the custom calling convention Phase 1's spec
+; already fully decided: args evaluated right to left and pushed (one
+; padding push first if N is odd, so arg1 still lands exactly at [rsp]
+; after all N real args -- ld. "Calling convention"); mov rdi, rsp; mov
+; rsi, N; call pf_<name>; add rsp, <N*8 padded to 16>. Every argument
+; gen_rvalue hands back is already guaranteed scalar/pointer (ld.
+; gen_rvalue's own self-guarding, noted at .binary above) -- no separate
+; per-argument guard needed here, only the callee's own return type.
+; ===========================================================================
+gen_user_call:
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    mov     rbx, rdi                    ; AST_EX_CALL node
+    mov     r12, rsi                    ; callable_table entry
+
+    mov     rax, [r12 + CTE_RET_TYPE]   ; 0 = void
+    cmp     rax, 0
+    je      .ret_ok
+    mov     rdi, rax
+    call    is_scalar_loadable_type
+    cmp     rax, 0
+    jne     .ret_ok
+    mov     rsi, msg_composite_call_boundary
+    mov     rdx, msg_composite_call_boundary_len
+    call    codegen_fail
+.ret_ok:
+    mov     r13, [rbx + AST_B_OFF]      ; args ptr
+    mov     r14, [rbx + AST_C_OFF]      ; arg_count
+
+    mov     rax, r14
+    and     rax, 1
+    cmp     rax, 0
+    je      .no_pad
+    mov     rsi, s_push_rax             ; dummy padding, pushed FIRST so
+    mov     rdx, s_push_rax_len         ; it ends up farthest from rsp --
+    call    emit_str                    ; arg1 (pushed last) still lands
+    call    emit_nl                     ; exactly at [rsp]
+.no_pad:
+    mov     r15, r14                    ; loop index, counts arg_count..1
+.push_loop:
+    cmp     r15, 0
+    je      .push_done
+    dec     r15
+    mov     rdi, [r13 + r15*8]
+    push    r15
+    call    gen_rvalue                  ; self-guarded; emits value into
+                                         ; the target program's rax
+    pop     r15
+    mov     rsi, s_push_rax
+    mov     rdx, s_push_rax_len
+    call    emit_str
+    call    emit_nl
+    jmp     .push_loop
+.push_done:
+    mov     rsi, s_mov_rdi_rsp
+    mov     rdx, s_mov_rdi_rsp_len
+    call    emit_str
+    call    emit_nl
+    mov     rsi, s_mov_rsi_
+    mov     rdx, s_mov_rsi__len
+    call    emit_str
+    mov     rax, r14
+    call    emit_dec
+    call    emit_nl
+
+    mov     rsi, s_call_pf_
+    mov     rdx, s_call_pf__len
+    call    emit_str
+    mov     rax, [rbx + AST_A_OFF]      ; callee IDENT node
+    mov     rsi, [parser_src_buf]
+    add     rsi, [rax + AST_A_OFF]
+    mov     rdx, [rax + AST_B_OFF]
+    call    emit_str
+    call    emit_nl
+
+    mov     rax, r14
+    imul    rax, rax, 8
+    add     rax, 15
+    and     rax, ~15                    ; N*8 padded up to a multiple of
+                                         ; 16 -- correctly (N+1)*8 when N
+                                         ; is odd, matching the padding
+                                         ; push above
+    mov     r13, rax                    ; padded cleanup size -- rcx is
+                                         ; NOT safe across emit_str (its
+                                         ; own copy-loop counter, always
+                                         ; left at 0)
+    mov     rsi, s_add_rsp_
+    mov     rdx, s_add_rsp__len
+    call    emit_str
+    mov     rax, r13
+    call    emit_dec
+    call    emit_nl
+
     mov     rax, [r12 + CTE_RET_TYPE]   ; 0 = void
     pop     r15
     pop     r14

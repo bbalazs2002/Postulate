@@ -1,0 +1,6 @@
+function main() : int32 {
+  mut x: int32 := 5;
+  mut p: *int32 := &x;
+  *p := *p + 100;
+  return x;
+}

@@ -1,0 +1,8 @@
+struct Pair { a: int32; b: int32; }
+
+function main() : int32 {
+  mut p1: Pair := Pair { a := 5, b := 6 };
+  mut p2: Pair := Pair { a := 0, b := 0 };
+  p2 := p1;
+  return p2.a * 10 + p2.b;
+}

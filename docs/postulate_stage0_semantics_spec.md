@@ -1,10 +1,13 @@
 # Postulate Stage 0 — Szemantikai elemző technikai specifikáció
 
 > Ez a dokumentum a Stage 0 bootstrap fordító **szemantikai elemzőjének**
-> technikai specifikációja — két menetben: **1. fázis** (névfeloldás +
-> alap típusellenőrzés) és **2. fázis** (tömb-/struct-literál teljesség,
+> technikai specifikációja — három menetben: **1. fázis** (névfeloldás +
+> alap típusellenőrzés), **2. fázis** (tömb-/struct-literál teljesség,
 > based-form számjegy-tartomány, "minden végrehajtási út return-nel
-> zárul" vezérlésfolyam-elemzés). A 2. fázissal a fő spec teljes
+> zárul" vezérlésfolyam-elemzés) és **3. fázis** (tömb broadcast-init,
+> fordítási idejű tömbindex-tartomány — mindkettő a kódgenerátor Phase 2
+> tervezése közben talált, a fő specben már implicit módon jelen lévő, de
+> a checkerben eddig hiányzó szabály). A 3. fázissal a fő spec teljes
 > szemantikai szabálylistája lefedésre kerül, a benne magában is
 > kifejezetten Stage 0-n túlinak jelölt két tétel kivételével (ld. 10.
 > fejezet). Előfeltétele a
@@ -51,6 +54,12 @@ fegyelmét folytatva, ez két menetben valósult meg.
 - Based-form számjegy-tartomány: a bázis `{2, 8, 10, 16}` egyike, minden
   számjegy `< bázis`.
 - "Minden végrehajtási út return-nel zárul" nem-`void` függvényekben.
+
+**3. fázisban megvalósítva** (ld. 7.6/8.2 fejezet a részletekért):
+- Tömb broadcast-init: egy skalár kezdőérték/érték szórása minden elemre,
+  ha a típusa a tömb elemtípusával egyezik.
+- Tömbindex fordítási idejű tartomány-ellenőrzése bare integer-literál
+  indexre.
 
 **Tudatosan Stage 0-n túlra hagyva** (a fő spec is így jelöli, nem
 elhalasztott, hanem kizárt tétel ebből a fordítóból, ld. 10. fejezet):
@@ -340,6 +349,21 @@ fázisból, csak `rcx`-szel. Javítás: a mezőtípust egy védett regiszterbe
 (`r12`, ami ezen az ágon máshol nincs használatban) mentjük a beágyazott
 hívás **előtt**.
 
+### 7.6 Tömbindex fordítási idejű tartomány-ellenőrzés (3. fázis)
+
+A `.index` ágban, az index-kifejezés `integer`-típus-ellenőrzése után:
+csak akkor fut, ha az index-kifejezés **szó szerint** egy `AST_EX_INT`
+csomópont (bare integer literál) — nincs általános konstans-összevonás
+tetszőleges kifejezésekre (pl. `1+2`), összhangban azzal, hogy a Stage 0
+egyáltalán nem tartalmaz optimalizáló/foldoló menetet. Ha a literál saját
+értéke (`AST_A_OFF`) `>=` a tömbtípus deklarált elemszámával
+(`AST_B_OFF` az `AST_TY_ARRAY` csomóponton), `"array index out of range
+for a declared size of N"` hiba. Egy valódi dinamikus (változó/számított)
+index **sosem** kerül ellenőrzésre — ez szándékosan egy nulla futásidejű
+költségű, csak fordítási idejű diagnosztika marad, nem egy rejtett
+futásidejű bounds-check (a kódgenerátor `INDEX` lvalue-kódgenerálása sem
+ad ki soha futásidejű ellenőrzést, ld. `docs/postulate_stage0_codegen_spec.md`).
+
 ---
 
 ## 8. Utasítás-ellenőrzés, extern-fehérlista, `check_program` (`sema_stmt.asm`)
@@ -401,18 +425,37 @@ alakjának ellenőrzése.
   horgonyoz, nem kifejezésre/utasításra, tehát nincs szüksége
   `find_offset`-re, egyenesen `err_append_span` a szignatúra nevén).
 
+### 8.2 Tömb broadcast-init (3. fázis)
+
+`check_decl` és `check_stmt`'s `.assign` pár-hurka mindkettő ugyanazt a
+`check_expr(rhs, target_type)` + `types_equal` mintát követi — ha ez
+sikertelen **és** `target_type.kind == AST_TY_ARRAY` **és** `rhs` nem
+szó szerint egy `AST_EX_ARRAY_LIT` (azok saját, változatlan
+elemszám+elemtípus ellenőrzésen mennek át `check_expr`'s `.array_lit`
+ágában), egy új `check_array_broadcast_compatible` segéd fut le
+tartalék-ként: `rhs`-t **újra** leellenőrzi, ezúttal a tömb
+**elemtípusával** mint elvárt típussal (nem a tömbtípussal magával), és
+`types_equal`-lel az elemtípus ellen. Siker esetén ez egy érvényes
+broadcast (`mut arr: int32[3] := 0;`), a meglévő
+`msg_decl_init_type_mismatch`/`msg_assign_type_mismatch` hibaüzenetek
+változatlanok maradnak, csak most már csak a valódi eltérésekre futnak
+le. A `check_expr` második hívása biztonságos, mert a rutin maga
+side-effect-mentes az `expected_type` szempontjából (csak literálok
+fogyasztják el, és sosem hibáznak rá — mindig a hívó `types_equal`-je
+dönt).
+
 ---
 
 ## 9. Tesztkészlet
 
 Három, egymást kiegészítő verifikáció:
 
-1. **`tests/checker_cases/`** + `scripts/run_checker_tests.sh` — 31
-   helyes/hibás pár (62 fixture: 24 pár/48 fixture az 1. fázisból, 7
-   pár/14 fixture a 2.-ból), egy-egy a fent felsorolt szabályokhoz,
-   mindegyik hiba **pontosan egy** eltérést tartalmaz a helyes párjához
-   képest. Nincs irányjelző-sor (a `build/checker` mindig a teljes fájlt
-   egy `program`-ként dolgozza fel).
+1. **`tests/checker_cases/`** + `scripts/run_checker_tests.sh` — 33
+   helyes/hibás pár (66 fixture: 24 pár/48 fixture az 1. fázisból, 7
+   pár/14 fixture a 2.-ból, 2 pár/4 fixture a 3.-ból), egy-egy a fent
+   felsorolt szabályokhoz, mindegyik hiba **pontosan egy** eltérést
+   tartalmaz a helyes párjához képest. Nincs irányjelző-sor (a
+   `build/checker` mindig a teljes fájlt egy `program`-ként dolgozza fel).
 2. A **12 helyes fekete doboz program** (`tests/blackbox_cases/*_valid.ptl`,
    a parser fázisból) újrafuttatva `build/checker`-en keresztül — valós,
    nem minimalizált kód a tervezés igazolására, nem csak célzott

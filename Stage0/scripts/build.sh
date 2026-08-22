@@ -46,6 +46,7 @@ nasm -f elf64 -I src/ -o build/codegen_types.o src/codegen_types.asm
 nasm -f elf64 -I src/ -o build/codegen_expr.o src/codegen_expr.asm
 nasm -f elf64 -I src/ -o build/codegen_stmt.o src/codegen_stmt.asm
 nasm -f elf64 -I src/ -o build/codegen_program.o src/codegen_program.asm
+nasm -f elf64 -I src/ -o build/codegen_composite.o src/codegen_composite.asm
 
 ld -static -no-pie -e _start -o build/codegen \
     build/codegen_main.o build/lexer.o build/runtime.o build/ast.o \
@@ -53,4 +54,4 @@ ld -static -no-pie -e _start -o build/codegen \
     build/stmt_parser.o build/top_parser.o \
     build/symtab.o build/sema_types.o build/sema_expr.o build/sema_stmt.o \
     build/codegen_types.o build/codegen_expr.o build/codegen_stmt.o \
-    build/codegen_program.o
+    build/codegen_program.o build/codegen_composite.o

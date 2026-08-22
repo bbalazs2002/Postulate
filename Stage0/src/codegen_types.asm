@@ -16,17 +16,15 @@
 extern parser_src_buf
 extern lookup_struct
 extern bytes_equal
-extern codegen_fail
 
 global type_size
 global is_signed_type
 global struct_size
 global field_offset
-global check_supported_scalar_type
+global field_type
+global is_scalar_loadable_type
 
 section .data
-msg_unsupported_type: db "declaration/parameter type not supported by this codegen phase yet (struct/array/pointer types are deferred -- scalar types only)"
-msg_unsupported_type_len equ $ - msg_unsupported_type
 ; indexed by (TOK_KW_INT8 .. TOK_KW_UINT64) - TOK_KW_INT8, ld. tokens.inc's
 ; contiguous 22..31 range: int8,int16,int,int32,int64,uint8,uint16,uint,
 ; uint32,uint64.
@@ -150,8 +148,7 @@ field_offset:
     mov     r12, rsi                    ; query name_offset
     mov     r13, rdx                    ; query name_len
     mov     r14, [rbx + AST_C_OFF]      ; fields ptr
-    mov     r9, [rbx + AST_D_OFF]       ; field_count (bytes_equal never
-                                         ; touches r8-r15, safe across it)
+    mov     r9, [rbx + AST_D_OFF]       ; field_count
     xor     r15, r15                    ; running offset
     xor     rcx, rcx                    ; index
 .loop:
@@ -162,6 +159,10 @@ field_offset:
     jne     .next
     push    rax
     push    rcx
+    push    r9                          ; field_count -- no callee is
+                                         ; trusted to leave any register
+                                         ; untouched across a call in this
+                                         ; codebase, not even r8-r15
     mov     rdi, [parser_src_buf]
     add     rdi, [rax + AST_A_OFF]
     mov     rsi, [parser_src_buf]
@@ -172,15 +173,25 @@ field_offset:
                                          ; pops below, which restore rax to
                                          ; the field_decl ptr, not the
                                          ; comparison result
+    pop     r9
     pop     rcx
     pop     rax
     cmp     r8, 0
     jne     .found
 .next:
     push    rax
+    push    rcx                         ; type_size's builtin-size lookup
+                                         ; uses rcx as its own scratch
+                                         ; (lea rcx, [int_type_sizes]) --
+                                         ; must protect our loop index
+                                         ; across the call
+    push    r9                          ; field_count -- same "never trust
+                                         ; a register across a call" rule
     mov     rdi, [rax + AST_C_OFF]
     call    type_size
     add     r15, rax
+    pop     r9
+    pop     rcx
     pop     rax
     inc     rcx
     jmp     .loop
@@ -204,25 +215,89 @@ field_offset:
     ret
 
 ; ===========================================================================
-; check_supported_scalar_type: in rdi = AST_TY_* node ptr. Reports
-; "codegen error: ..." and never returns if this type is outside Phase 1's
-; scalar-only scope (a struct-name reference, AST_TY_POINTER, or
-; AST_TY_ARRAY); returns normally for any builtin int8..int64/uint8..
-; uint64/bool base type. Gates both gen_decl (codegen_stmt.asm) and every
-; param/local in the function prologue (codegen_program.asm) -- the one
-; place Phase 1's "scalar types only" scope restriction is enforced.
+; field_type: in rdi = AST_STRUCT_DECL ptr, rsi = field name_offset,
+; rdx = field name_len. out: rax = that field's declared type node ptr.
+; Same linear-scan shape as field_offset (duplicated, not shared, per
+; this codebase's small-helper convention) but returns the field's own
+; declared type instead of its accumulated packed offset -- needed by
+; gen_lvalue's FIELD case (codegen_expr.asm) for the result type,
+; separately from field_offset's address-arithmetic use there.
 ; ===========================================================================
-check_supported_scalar_type:
-    mov     rax, [rdi + AST_KIND_OFF]
-    cmp     rax, AST_TY_BASE
-    jne     .unsupported
-    mov     rax, [rdi + AST_A_OFF]      ; builtin tag, 0 = struct-name ref
-    cmp     rax, 0
-    je      .unsupported
-    cmp     rax, TOK_KW_BOOL
-    jg      .unsupported
+field_type:
+    push    rbx
+    push    r12
+    push    r13
+    mov     rbx, rdi                    ; struct decl
+    mov     r12, rsi                    ; query name_offset
+    mov     r13, rdx                    ; query name_len
+    mov     r9, [rbx + AST_D_OFF]       ; field_count
+    mov     r8, [rbx + AST_C_OFF]       ; fields ptr
+    xor     rcx, rcx
+.loop:
+    cmp     rcx, r9
+    jae     .not_found
+    mov     rax, [r8 + rcx*8]
+    cmp     qword [rax + AST_B_OFF], r13
+    jne     .next
+    push    rax
+    push    rcx
+    push    r9                          ; field_count
+    push    r8                          ; fields ptr -- no callee is
+                                         ; trusted to leave any register
+                                         ; untouched across a call here,
+                                         ; not even r8-r15
+    mov     rdi, [parser_src_buf]
+    add     rdi, [rax + AST_A_OFF]
+    mov     rsi, [parser_src_buf]
+    add     rsi, r12
+    mov     rdx, r13
+    call    bytes_equal
+    mov     r10, rax
+    pop     r8
+    pop     r9
+    pop     rcx
+    pop     rax
+    cmp     r10, 0
+    jne     .found
+.next:
+    inc     rcx
+    jmp     .loop
+.found:
+    mov     rax, [rax + AST_C_OFF]      ; field's declared type
+    pop     r13
+    pop     r12
+    pop     rbx
     ret
-.unsupported:
-    mov     rsi, msg_unsupported_type
-    mov     rdx, msg_unsupported_type_len
-    jmp     codegen_fail
+.not_found:
+    xor     rax, rax
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+; ===========================================================================
+; is_scalar_loadable_type: in rdi = AST_TY_* node ptr. out: rax = 1/0 --
+; true iff this type legitimately fits in a single 8-byte register (a
+; builtin base type, or a pointer). False for a struct-name reference or
+; AST_TY_ARRAY. Phase 2 onward: decls/params may be ANY type (composite
+; included, ld. codegen_composite.asm) -- this narrower guard is used
+; only at the specific points a value would otherwise be funneled
+; through rax as if it were scalar (gen_rvalue's IDENT/INDEX/FIELD/
+; UNARY(*) load path, BINARY operands, user-function CALL arguments and
+; composite-returning RETURN expressions), not at decl/param declaration
+; time itself.
+; ===========================================================================
+is_scalar_loadable_type:
+    mov     rax, [rdi + AST_KIND_OFF]
+    cmp     rax, AST_TY_POINTER
+    je      .yes
+    cmp     rax, AST_TY_BASE
+    jne     .no
+    cmp     qword [rdi + AST_A_OFF], 0  ; 0 = struct-name reference
+    je      .no
+.yes:
+    mov     rax, 1
+    ret
+.no:
+    xor     rax, rax
+    ret

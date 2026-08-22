@@ -198,15 +198,57 @@ check_const_reassignment:
     ret
 
 ; ===========================================================================
+; check_array_broadcast_compatible: in rdi = rhs expr node, rsi = target
+; type (already known AST_TY_ARRAY). out: rax = 1/0 -- true iff rhs is
+; NOT literally an AST_EX_ARRAY_LIT (those already have their own exact
+; count/element-type checking in check_expr's .array_lit case, never
+; treated as broadcast) and its own type, checked against the array's
+; ELEMENT type specifically, matches. Used as a fallback wherever a
+; direct types_equal(actual, array_type) comparison already failed --
+; ld. check_decl / check_stmt's .assign pair loop.
+; ===========================================================================
+check_array_broadcast_compatible:
+    push    rbx
+    push    r12
+    mov     rbx, rdi                    ; rhs node
+    mov     r12, rsi                    ; target array type
+    mov     rax, [rbx + AST_KIND_OFF]
+    cmp     rax, AST_EX_ARRAY_LIT
+    je      .no
+    mov     rax, [r12 + AST_A_OFF]      ; element type
+    mov     rdi, rbx
+    mov     rsi, rax
+    call    check_expr                  ; re-check against the element
+                                         ; type specifically -- 'actual'
+                                         ; from an earlier call against the
+                                         ; array type itself isn't reusable
+                                         ; here, e.g. a bare int literal
+                                         ; defaults differently per context
+    mov     rdi, rax
+    mov     rsi, [r12 + AST_A_OFF]      ; element type, re-derived
+    call    types_equal
+    jmp     .done
+.no:
+    xor     rax, rax
+.done:
+    pop     r12
+    pop     rbx
+    ret
+
+; ===========================================================================
 ; check_decl: in rdi = AST_DECL_MUT/CONST ptr. If an init is present,
-; checks it against the declared type.
+; checks it against the declared type -- an array-typed decl whose init
+; isn't an ARRAY_LIT falls back to a broadcast-compatibility check
+; before being reported as a mismatch (ld. check_array_broadcast_compatible).
 ; ===========================================================================
 check_decl:
     push    rbx
+    push    r12
     mov     rbx, rdi
     mov     rax, [rbx + AST_D_OFF]      ; init, 0 if absent
     cmp     rax, 0
     je      .no_init
+    mov     r12, rax                    ; init node, protected across calls
     mov     rdi, rax
     mov     rsi, [rbx + AST_C_OFF]
     call    check_expr
@@ -215,6 +257,16 @@ check_decl:
     call    types_equal
     cmp     rax, 0
     jne     .no_init
+    mov     rax, [rbx + AST_C_OFF]      ; declared type
+    mov     rcx, [rax + AST_KIND_OFF]
+    cmp     rcx, AST_TY_ARRAY
+    jne     .report_mismatch
+    mov     rdi, r12
+    mov     rsi, rax
+    call    check_array_broadcast_compatible
+    cmp     rax, 0
+    jne     .no_init
+.report_mismatch:
     call    sema_report_begin
     mov     rsi, msg_decl_init_type_mismatch
     mov     rdx, msg_decl_init_type_mismatch_len
@@ -224,6 +276,7 @@ check_decl:
     mov     rdi, rax
     jmp     sema_report_finish
 .no_init:
+    pop     r12
     pop     rbx
     ret
 
@@ -474,6 +527,16 @@ check_stmt:
     call    types_equal
     cmp     rax, 0
     jne     .assign_pair_ok
+    mov     rcx, [r12 + AST_KIND_OFF]
+    cmp     rcx, AST_TY_ARRAY
+    jne     .assign_report_mismatch
+    mov     rax, [r13 + r15*8]
+    mov     rdi, [rax + AST_B_OFF]      ; rhs node
+    mov     rsi, r12                    ; target array type
+    call    check_array_broadcast_compatible
+    cmp     rax, 0
+    jne     .assign_pair_ok
+.assign_report_mismatch:
     call    sema_report_begin
     mov     rsi, msg_assign_type_mismatch
     mov     rdx, msg_assign_type_mismatch_len

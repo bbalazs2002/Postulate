@@ -1,0 +1,9 @@
+struct Pair { a: int32; b: int32; }
+
+function make_pair() : Pair {
+  return Pair { a := 1, b := 2 };
+}
+
+function main() : int32 {
+  return 0;
+}

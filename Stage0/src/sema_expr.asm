@@ -91,6 +91,8 @@ msg_bad_based_form_base:                                                       d
 msg_bad_based_form_base_len                                                    equ $ - msg_bad_based_form_base
 msg_bad_based_form_digit:                                                         db "based-form literal has a digit that is not valid in base "
 msg_bad_based_form_digit_len                                                      equ $ - msg_bad_based_form_digit
+msg_index_out_of_range:                                                              db "array index out of range for a declared size of "
+msg_index_out_of_range_len                                                           equ $ - msg_index_out_of_range
 
 section .text
 
@@ -685,6 +687,29 @@ check_expr:
     mov     rdi, rax
     jmp     sema_report_finish
 .index_ok:
+    ; compile-time-only bounds check: only a bare integer literal index
+    ; is checked against the array's declared element count -- a
+    ; genuinely dynamic (variable/computed) index is never checked, by
+    ; design, matching the "no hidden runtime cost" principle (no
+    ; runtime check is ever emitted for this either, ld. codegen spec).
+    mov     rax, [rbx + AST_B_OFF]      ; index expr node
+    mov     rcx, [rax + AST_KIND_OFF]
+    cmp     rcx, AST_EX_INT
+    jne     .index_range_ok
+    mov     r15, [rax + AST_A_OFF]      ; literal's own value
+    cmp     r15, [r13 + AST_B_OFF]      ; array's declared element count
+    jl      .index_range_ok
+    call    sema_report_begin
+    mov     rsi, msg_index_out_of_range
+    mov     rdx, msg_index_out_of_range_len
+    call    err_append_str
+    mov     rax, [r13 + AST_B_OFF]
+    call    err_append_dec
+    mov     rdi, [rbx + AST_B_OFF]
+    call    find_offset
+    mov     rdi, rax
+    jmp     sema_report_finish
+.index_range_ok:
     mov     rax, r14
     jmp     .exit
 

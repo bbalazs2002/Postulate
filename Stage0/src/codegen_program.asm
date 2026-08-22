@@ -2,11 +2,18 @@
 ; prologue/epilogue, and top-level (AST_PROGRAM/_start) emission.
 ; See docs/postulate_stage0_codegen_spec.md.
 ;
-; Phase 1 scope enforcement lives here: exactly one AST_FUNCTION, named
-; "main", scalar-typed params/locals only; any AST_STRUCT_DECL or a
-; second AST_FUNCTION hits codegen_fail. AST_EXTERN_DECL contributes
-; nothing at this level -- it only ever affects AST_EX_CALL codegen
-; (codegen_expr.asm's gen_extern_call).
+; Phase 2 scope enforcement lives here: any number of AST_FUNCTION decls,
+; each getting its own pf_<name> label, exactly one of which must be
+; named "main" (the _start entry point, which calls pf_main with no
+; arguments -- so main itself must take zero params). A function's
+; return type, and every one of its PARAMS specifically (params cross
+; the function-call boundary, unlike plain locals/decls, which may be
+; any type -- ld. gen_function/gen_decl respectively), must be
+; scalar-loadable -- passing/returning a struct/array *by value* through
+; a call is a separate, not-yet-designed future phase. AST_STRUCT_DECL
+; contributes nothing at this level (purely a layout fact, consumed via
+; type_size/field_offset elsewhere). AST_EXTERN_DECL likewise -- it only
+; ever affects AST_EX_CALL codegen (codegen_expr.asm's gen_extern_call).
 
 %include "config.inc"
 %include "tokens.inc"
@@ -21,7 +28,7 @@ extern local_table
 extern local_count
 extern type_size
 extern is_signed_type
-extern check_supported_scalar_type
+extern is_scalar_loadable_type
 extern gen_func_block
 extern codegen_fail
 extern emit_str
@@ -39,17 +46,19 @@ local_offsets: resq MAX_LIST_ARITY
 section .data
 str_main: db "main"
 
-msg_struct_unsupported: db "struct declarations are not supported by this codegen phase yet"
-msg_struct_unsupported_len equ $ - msg_struct_unsupported
-msg_multi_function: db "programs with more than one function are not supported by this codegen phase yet (single-function programs only)"
-msg_multi_function_len equ $ - msg_multi_function
-msg_not_main: db "this codegen phase only supports a single function named 'main'"
-msg_not_main_len equ $ - msg_not_main
-msg_no_main: db "no 'main' function found -- this codegen phase requires exactly one, named 'main'"
+msg_no_main: db "no 'main' function found -- exactly one function must be named 'main'"
 msg_no_main_len equ $ - msg_no_main
+msg_main_has_params: db "the entry point 'main' must have no parameters"
+msg_main_has_params_len equ $ - msg_main_has_params
+msg_composite_return_unsupported: db "struct/array return types are not supported by this codegen phase yet"
+msg_composite_return_unsupported_len equ $ - msg_composite_return_unsupported
+msg_composite_param_unsupported: db "struct/array parameter types are not supported by this codegen phase yet (a value may not cross a function-call boundary)"
+msg_composite_param_unsupported_len equ $ - msg_composite_param_unsupported
 
-s_pf_main: db "pf_main:", 10
-s_pf_main_len equ $ - s_pf_main
+s_pf_prefix: db "pf_"
+s_pf_prefix_len equ $ - s_pf_prefix
+s_colon_nl: db ":", 10
+s_colon_nl_len equ $ - s_colon_nl
 s_push_rbp: db "    push    rbp", 10
 s_push_rbp_len equ $ - s_push_rbp
 s_mov_rbp_rsp: db "    mov     rbp, rsp", 10
@@ -288,9 +297,11 @@ emit_param_copy:
     ret
 
 ; ===========================================================================
-; gen_function: in rdi = AST_FUNCTION ptr (already validated to be named
-; "main"). Rebuilds this function's local table + stack offsets, then
-; emits its label, prologue (incl. per-param copy), body, and epilogue.
+; gen_function: in rdi = AST_FUNCTION ptr. Rebuilds this function's local
+; table + stack offsets, then emits its pf_<name> label, prologue (incl.
+; per-param copy), body, and epilogue. Rejects (codegen_fail) a
+; composite return type outright -- a struct/array value may never cross
+; a function-call boundary this phase (ld. file header).
 ; ===========================================================================
 gen_function:
     push    rbx
@@ -301,14 +312,34 @@ gen_function:
     mov     rbx, rdi                     ; AST_FUNCTION node
     mov     r12, [rbx + AST_A_OFF]       ; signature ptr
 
+    mov     rax, [rbx + AST_B_OFF]       ; return type, 0 = void
+    cmp     rax, 0
+    je      .ret_ok
+    mov     rdi, rax
+    call    is_scalar_loadable_type
+    cmp     rax, 0
+    jne     .ret_ok
+    mov     rsi, msg_composite_return_unsupported
+    mov     rdx, msg_composite_return_unsupported_len
+    call    codegen_fail
+.ret_ok:
+
     mov     rdi, r12
     mov     rsi, [rbx + AST_C_OFF]       ; body (func_block)
     call    build_local_table
     call    compute_local_offsets
     mov     r13, rax                     ; locals_size
 
-    mov     rsi, s_pf_main
-    mov     rdx, s_pf_main_len
+    mov     rsi, s_pf_prefix
+    mov     rdx, s_pf_prefix_len
+    call    emit_str
+    mov     rax, [r12 + AST_A_OFF]       ; name_offset
+    mov     rsi, [parser_src_buf]
+    add     rsi, rax
+    mov     rdx, [r12 + AST_B_OFF]       ; name_len
+    call    emit_str
+    mov     rsi, s_colon_nl
+    mov     rdx, s_colon_nl_len
     call    emit_str
     mov     rsi, s_push_rbp
     mov     rdx, s_push_rbp_len
@@ -337,8 +368,16 @@ gen_function:
     jae     .params_done
     mov     rax, [r14 + r15*8]           ; AST_PARAM ptr
     mov     rdi, [rax + AST_C_OFF]       ; declared type
-    call    check_supported_scalar_type
-
+    call    is_scalar_loadable_type      ; params cross the call boundary
+                                          ; (unlike plain decls, ld. file
+                                          ; header) -- must stay scalar/
+                                          ; pointer this phase
+    cmp     rax, 0
+    jne     .param_type_ok
+    mov     rsi, msg_composite_param_unsupported
+    mov     rdx, msg_composite_param_unsupported_len
+    call    codegen_fail
+.param_type_ok:
     mov     rax, r15
     imul    rax, rax, LOCAL_ENTRY_SIZE
     lea     rax, [local_table + rax]     ; this param's local_table entry
@@ -380,10 +419,15 @@ gen_function:
     ret
 
 ; ===========================================================================
-; gen_program: in rdi = AST_PROGRAM ptr. Validates Phase 1 scope (exactly
-; one function, named "main"; no struct decls), emits the _start entry
-; point wired to call pf_main and sys_exit its result, then generates
-; main itself.
+; gen_program: in rdi = AST_PROGRAM ptr. Finds the (exactly one) function
+; named "main" (0-param, ld. file header), emits the _start entry point
+; wired to call pf_main and sys_exit its result, then generates EVERY
+; AST_FUNCTION decl (not just main) -- struct decls and extern decls
+; contribute nothing at this level, silently skipped. Functions are
+; generated in declaration order, but that's just a traversal choice:
+; label references across functions resolve at NASM assembly time
+; regardless of emission order, so mutual recursion needs no special
+; handling here.
 ; ===========================================================================
 gen_program:
     push    rbx
@@ -400,39 +444,22 @@ gen_program:
     cmp     rcx, r13
     jae     .scan_done
     mov     rax, [r12 + rcx*8]
-    mov     r15, [rax + AST_KIND_OFF]
-    cmp     r15, AST_STRUCT_DECL
-    jne     .not_struct
-    mov     rsi, msg_struct_unsupported
-    mov     rdx, msg_struct_unsupported_len
-    call    codegen_fail
-.not_struct:
-    cmp     r15, AST_FUNCTION
+    cmp     qword [rax + AST_KIND_OFF], AST_FUNCTION
     jne     .scan_next
-    cmp     r14, 0
-    je      .scan_first_function
-    mov     rsi, msg_multi_function
-    mov     rdx, msg_multi_function_len
-    call    codegen_fail
-.scan_first_function:
-    mov     r14, rax
-    mov     rax, [r14 + AST_A_OFF]       ; signature ptr
+    mov     rax, [rax + AST_A_OFF]       ; signature ptr
+    mov     rdx, [rax + AST_B_OFF]       ; name_len
+    cmp     rdx, 4
+    jne     .scan_next
+    push    rcx
     mov     rdi, [parser_src_buf]
     add     rdi, [rax + AST_A_OFF]       ; name text
-    mov     rsi, [rax + AST_B_OFF]       ; name_len
-    cmp     rsi, 4
-    jne     .not_main_name
-    push    rdi
     mov     rsi, str_main
     mov     rdx, 4
     call    bytes_equal
-    pop     rdi
+    pop     rcx
     cmp     rax, 1
-    je      .scan_next
-.not_main_name:
-    mov     rsi, msg_not_main
-    mov     rdx, msg_not_main_len
-    call    codegen_fail
+    jne     .scan_next
+    mov     r14, [r12 + rcx*8]           ; found main
 .scan_next:
     inc     rcx
     jmp     .scan_loop
@@ -443,6 +470,13 @@ gen_program:
     mov     rdx, msg_no_main_len
     call    codegen_fail
 .have_main:
+    mov     rax, [r14 + AST_A_OFF]       ; main's signature ptr
+    cmp     qword [rax + AST_D_OFF], 0   ; param_count
+    je      .main_params_ok
+    mov     rsi, msg_main_has_params
+    mov     rdx, msg_main_has_params_len
+    call    codegen_fail
+.main_params_ok:
     mov     rsi, s_header
     mov     rdx, s_header_len
     call    emit_str
@@ -462,9 +496,21 @@ gen_program:
     mov     rdx, s_exit_tail_len
     call    emit_str
 
-    mov     rdi, r14
+    xor     rcx, rcx
+.gen_loop:
+    cmp     rcx, r13
+    jae     .gen_done
+    mov     rax, [r12 + rcx*8]
+    cmp     qword [rax + AST_KIND_OFF], AST_FUNCTION
+    jne     .gen_next
+    push    rcx
+    mov     rdi, rax
     call    gen_function
-
+    pop     rcx
+.gen_next:
+    inc     rcx
+    jmp     .gen_loop
+.gen_done:
     pop     r15
     pop     r14
     pop     r13
