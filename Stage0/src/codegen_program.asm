@@ -1,0 +1,473 @@
+; Postulate Stage 0 -- code generator: per-function stack layout, function
+; prologue/epilogue, and top-level (AST_PROGRAM/_start) emission.
+; See docs/postulate_stage0_codegen_spec.md.
+;
+; Phase 1 scope enforcement lives here: exactly one AST_FUNCTION, named
+; "main", scalar-typed params/locals only; any AST_STRUCT_DECL or a
+; second AST_FUNCTION hits codegen_fail. AST_EXTERN_DECL contributes
+; nothing at this level -- it only ever affects AST_EX_CALL codegen
+; (codegen_expr.asm's gen_extern_call).
+
+%include "config.inc"
+%include "tokens.inc"
+%include "ast.inc"
+%include "symtab.inc"
+%include "runtime.inc"
+
+extern parser_src_buf
+extern bytes_equal
+extern build_local_table
+extern local_table
+extern local_count
+extern type_size
+extern is_signed_type
+extern check_supported_scalar_type
+extern gen_func_block
+extern codegen_fail
+extern emit_str
+extern emit_dec
+extern emit_nl
+
+global local_stack_offset
+global compute_local_offsets
+global gen_function
+global gen_program
+
+section .bss
+local_offsets: resq MAX_LIST_ARITY
+
+section .data
+str_main: db "main"
+
+msg_struct_unsupported: db "struct declarations are not supported by this codegen phase yet"
+msg_struct_unsupported_len equ $ - msg_struct_unsupported
+msg_multi_function: db "programs with more than one function are not supported by this codegen phase yet (single-function programs only)"
+msg_multi_function_len equ $ - msg_multi_function
+msg_not_main: db "this codegen phase only supports a single function named 'main'"
+msg_not_main_len equ $ - msg_not_main
+msg_no_main: db "no 'main' function found -- this codegen phase requires exactly one, named 'main'"
+msg_no_main_len equ $ - msg_no_main
+
+s_pf_main: db "pf_main:", 10
+s_pf_main_len equ $ - s_pf_main
+s_push_rbp: db "    push    rbp", 10
+s_push_rbp_len equ $ - s_push_rbp
+s_mov_rbp_rsp: db "    mov     rbp, rsp", 10
+s_mov_rbp_rsp_len equ $ - s_mov_rbp_rsp
+s_sub_rsp_: db "    sub     rsp, "
+s_sub_rsp__len equ $ - s_sub_rsp_
+s_epilogue_label: db ".epilogue:", 10
+s_epilogue_label_len equ $ - s_epilogue_label
+s_mov_rsp_rbp: db "    mov     rsp, rbp", 10
+s_mov_rsp_rbp_len equ $ - s_mov_rsp_rbp
+s_pop_rbp: db "    pop     rbp", 10
+s_pop_rbp_len equ $ - s_pop_rbp
+s_ret: db "    ret", 10
+s_ret_len equ $ - s_ret
+s_nl: db 10
+
+s_header: db "BITS 64", 10, "section .text", 10, "global _start", 10, 10, "_start:", 10, "    call    pf_main", 10
+s_header_len equ $ - s_header
+s_mov_rdi_rax: db "    mov     rdi, rax", 10
+s_mov_rdi_rax_len equ $ - s_mov_rdi_rax
+s_mov_rdi_0: db "    mov     rdi, 0", 10
+s_mov_rdi_0_len equ $ - s_mov_rdi_0
+s_exit_tail: db "    mov     rax, 60", 10, "    syscall", 10, 10
+s_exit_tail_len equ $ - s_exit_tail
+
+s_movsx_rax_byte_from: db "    movsx   rax, byte [rdi + "
+s_movsx_rax_byte_from_len equ $ - s_movsx_rax_byte_from
+s_movzx_rax_byte_from: db "    movzx   rax, byte [rdi + "
+s_movzx_rax_byte_from_len equ $ - s_movzx_rax_byte_from
+s_movsx_rax_word_from: db "    movsx   rax, word [rdi + "
+s_movsx_rax_word_from_len equ $ - s_movsx_rax_word_from
+s_movzx_rax_word_from: db "    movzx   rax, word [rdi + "
+s_movzx_rax_word_from_len equ $ - s_movzx_rax_word_from
+s_movsxd_rax_dword_from: db "    movsxd  rax, dword [rdi + "
+s_movsxd_rax_dword_from_len equ $ - s_movsxd_rax_dword_from
+s_mov_eax_dword_from: db "    mov     eax, dword [rdi + "
+s_mov_eax_dword_from_len equ $ - s_mov_eax_dword_from
+s_mov_rax_qword_from: db "    mov     rax, qword [rdi + "
+s_mov_rax_qword_from_len equ $ - s_mov_rax_qword_from
+s_close_bracket_nl: db "]", 10
+s_close_bracket_nl_len equ $ - s_close_bracket_nl
+
+s_mov_byte_rbp_minus: db "    mov     byte [rbp - "
+s_mov_byte_rbp_minus_len equ $ - s_mov_byte_rbp_minus
+s_mov_word_rbp_minus: db "    mov     word [rbp - "
+s_mov_word_rbp_minus_len equ $ - s_mov_word_rbp_minus
+s_mov_dword_rbp_minus: db "    mov     dword [rbp - "
+s_mov_dword_rbp_minus_len equ $ - s_mov_dword_rbp_minus
+s_mov_qword_rbp_minus: db "    mov     qword [rbp - "
+s_mov_qword_rbp_minus_len equ $ - s_mov_qword_rbp_minus
+s_comma_al_nl: db "], al", 10
+s_comma_al_nl_len equ $ - s_comma_al_nl
+s_comma_ax_nl: db "], ax", 10
+s_comma_ax_nl_len equ $ - s_comma_ax_nl
+s_comma_eax_nl: db "], eax", 10
+s_comma_eax_nl_len equ $ - s_comma_eax_nl
+s_comma_rax_nl: db "], rax", 10
+s_comma_rax_nl_len equ $ - s_comma_rax_nl
+
+section .text
+
+; ===========================================================================
+; local_stack_offset: in rdi = local_table entry ptr. out: rax = its
+; stack offset (positive byte count below rbp -- the local's address is
+; [rbp - offset]). Index derived from the entry's own position in
+; local_table (identical indexing to local_offsets, populated by
+; compute_local_offsets right after each build_local_table call).
+; ===========================================================================
+local_stack_offset:
+    mov     rax, rdi
+    sub     rax, local_table
+    xor     rdx, rdx
+    mov     rcx, LOCAL_ENTRY_SIZE
+    div     rcx                          ; rax = index
+    mov     rax, [local_offsets + rax*8]
+    ret
+
+; ===========================================================================
+; compute_local_offsets: populates local_offsets[0 .. local_count) from
+; the just-built local_table -- each local gets a tightly packed slot
+; sized per its own declared type, accumulated from rbp downward (locals
+; only, no alignment concern beyond the final round-up below -- scalar
+; sizes are all powers of two <= 8, so a running byte-sum never misaligns
+; any individual load/store). out: rax = total locals_size, rounded up to
+; a multiple of 16 (ld. "Stack frame layout"'s alignment invariant).
+; ===========================================================================
+compute_local_offsets:
+    push    rbx
+    push    r12
+    mov     rbx, [local_count]
+    xor     r12, r12                     ; running total
+    xor     rcx, rcx
+.loop:
+    cmp     rcx, rbx
+    jae     .round
+    push    rcx
+    mov     rax, rcx
+    imul    rax, rax, LOCAL_ENTRY_SIZE
+    lea     rax, [local_table + rax]
+    mov     rdi, [rax + LTE_TYPE_PTR]
+    call    type_size
+    add     r12, rax
+    mov     rax, r12
+    pop     rcx
+    mov     [local_offsets + rcx*8], rax
+    inc     rcx
+    jmp     .loop
+.round:
+    mov     rax, r12
+    add     rax, 15
+    and     rax, ~15
+    pop     r12
+    pop     rbx
+    ret
+
+; ===========================================================================
+; emit_param_copy: internal. in rdi = param's declared type, rsi = its
+; byte offset in the incoming arg block ((i-1)*8 relabeled 0-based: i*8
+; for the i-th param, 0-based), rdx = its own local stack offset. Emits a
+; sized load from "[rdi + <arg offset>]" into rax, then a sized store into
+; "[rbp - <local offset>]" -- the prologue's per-param copy step (ld.
+; "Stack frame layout").
+; ===========================================================================
+emit_param_copy:
+    push    rbx
+    push    r12
+    push    r13
+    mov     r12, rsi                     ; arg byte offset
+    mov     r13, rdx                     ; local stack offset
+    push    rdi                          ; protect type ptr across both
+                                          ; queries (never trust a
+                                          ; caller-saved reg across a call)
+    call    type_size
+    mov     rbx, rax                     ; size
+    pop     rdi
+    push    rdi
+    call    is_signed_type
+    mov     rdx, rax                     ; signed?
+    pop     rdi
+    cmp     rbx, 1
+    je      .b1
+    cmp     rbx, 2
+    je      .b2
+    cmp     rbx, 4
+    je      .b4
+    jmp     .b8
+.b1:
+    cmp     rdx, 0
+    je      .b1u
+    mov     rsi, s_movsx_rax_byte_from
+    mov     rdx, s_movsx_rax_byte_from_len
+    jmp     .load_emit
+.b1u:
+    mov     rsi, s_movzx_rax_byte_from
+    mov     rdx, s_movzx_rax_byte_from_len
+    jmp     .load_emit
+.b2:
+    cmp     rdx, 0
+    je      .b2u
+    mov     rsi, s_movsx_rax_word_from
+    mov     rdx, s_movsx_rax_word_from_len
+    jmp     .load_emit
+.b2u:
+    mov     rsi, s_movzx_rax_word_from
+    mov     rdx, s_movzx_rax_word_from_len
+    jmp     .load_emit
+.b4:
+    cmp     rdx, 0
+    je      .b4u
+    mov     rsi, s_movsxd_rax_dword_from
+    mov     rdx, s_movsxd_rax_dword_from_len
+    jmp     .load_emit
+.b4u:
+    mov     rsi, s_mov_eax_dword_from
+    mov     rdx, s_mov_eax_dword_from_len
+    jmp     .load_emit
+.b8:
+    mov     rsi, s_mov_rax_qword_from
+    mov     rdx, s_mov_rax_qword_from_len
+.load_emit:
+    call    emit_str
+    mov     rax, r12
+    call    emit_dec
+    mov     rsi, s_close_bracket_nl
+    mov     rdx, s_close_bracket_nl_len
+    call    emit_str
+
+    cmp     rbx, 1
+    je      .s1
+    cmp     rbx, 2
+    je      .s2
+    cmp     rbx, 4
+    je      .s4
+    mov     rsi, s_mov_qword_rbp_minus
+    mov     rdx, s_mov_qword_rbp_minus_len
+    call    emit_str
+    mov     rax, r13
+    call    emit_dec
+    mov     rsi, s_comma_rax_nl
+    mov     rdx, s_comma_rax_nl_len
+    call    emit_str
+    jmp     .done
+.s1:
+    mov     rsi, s_mov_byte_rbp_minus
+    mov     rdx, s_mov_byte_rbp_minus_len
+    call    emit_str
+    mov     rax, r13
+    call    emit_dec
+    mov     rsi, s_comma_al_nl
+    mov     rdx, s_comma_al_nl_len
+    call    emit_str
+    jmp     .done
+.s2:
+    mov     rsi, s_mov_word_rbp_minus
+    mov     rdx, s_mov_word_rbp_minus_len
+    call    emit_str
+    mov     rax, r13
+    call    emit_dec
+    mov     rsi, s_comma_ax_nl
+    mov     rdx, s_comma_ax_nl_len
+    call    emit_str
+    jmp     .done
+.s4:
+    mov     rsi, s_mov_dword_rbp_minus
+    mov     rdx, s_mov_dword_rbp_minus_len
+    call    emit_str
+    mov     rax, r13
+    call    emit_dec
+    mov     rsi, s_comma_eax_nl
+    mov     rdx, s_comma_eax_nl_len
+    call    emit_str
+.done:
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+; ===========================================================================
+; gen_function: in rdi = AST_FUNCTION ptr (already validated to be named
+; "main"). Rebuilds this function's local table + stack offsets, then
+; emits its label, prologue (incl. per-param copy), body, and epilogue.
+; ===========================================================================
+gen_function:
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    mov     rbx, rdi                     ; AST_FUNCTION node
+    mov     r12, [rbx + AST_A_OFF]       ; signature ptr
+
+    mov     rdi, r12
+    mov     rsi, [rbx + AST_C_OFF]       ; body (func_block)
+    call    build_local_table
+    call    compute_local_offsets
+    mov     r13, rax                     ; locals_size
+
+    mov     rsi, s_pf_main
+    mov     rdx, s_pf_main_len
+    call    emit_str
+    mov     rsi, s_push_rbp
+    mov     rdx, s_push_rbp_len
+    call    emit_str
+    mov     rsi, s_mov_rbp_rsp
+    mov     rdx, s_mov_rbp_rsp_len
+    call    emit_str
+    cmp     r13, 0
+    je      .no_locals
+    mov     rsi, s_sub_rsp_
+    mov     rdx, s_sub_rsp__len
+    call    emit_str
+    mov     rax, r13
+    call    emit_dec
+    call    emit_nl
+.no_locals:
+
+    ; per-param copy: local_table[0 .. param_count) are exactly the
+    ; params, in order (build_local_table adds params before decls).
+    mov     r14, [r12 + AST_C_OFF]       ; params ptr
+    mov     r13, [r12 + AST_D_OFF]       ; param_count (locals_size no
+                                          ; longer needed)
+    xor     r15, r15                     ; index
+.param_loop:
+    cmp     r15, r13
+    jae     .params_done
+    mov     rax, [r14 + r15*8]           ; AST_PARAM ptr
+    mov     rdi, [rax + AST_C_OFF]       ; declared type
+    call    check_supported_scalar_type
+
+    mov     rax, r15
+    imul    rax, rax, LOCAL_ENTRY_SIZE
+    lea     rax, [local_table + rax]     ; this param's local_table entry
+    mov     rdi, rax
+    call    local_stack_offset           ; -> rax = local stack offset
+    mov     rcx, rax                     ; stash (rcx unused elsewhere here)
+
+    mov     rax, [r14 + r15*8]
+    mov     rdi, [rax + AST_C_OFF]       ; declared type
+    mov     rsi, r15
+    imul    rsi, rsi, 8                  ; arg byte offset = index*8
+    mov     rdx, rcx                     ; local stack offset
+    call    emit_param_copy
+
+    inc     r15
+    jmp     .param_loop
+.params_done:
+    mov     rdi, [rbx + AST_C_OFF]       ; body
+    call    gen_func_block
+
+    mov     rsi, s_epilogue_label
+    mov     rdx, s_epilogue_label_len
+    call    emit_str
+    mov     rsi, s_mov_rsp_rbp
+    mov     rdx, s_mov_rsp_rbp_len
+    call    emit_str
+    mov     rsi, s_pop_rbp
+    mov     rdx, s_pop_rbp_len
+    call    emit_str
+    mov     rsi, s_ret
+    mov     rdx, s_ret_len
+    call    emit_str
+
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+; ===========================================================================
+; gen_program: in rdi = AST_PROGRAM ptr. Validates Phase 1 scope (exactly
+; one function, named "main"; no struct decls), emits the _start entry
+; point wired to call pf_main and sys_exit its result, then generates
+; main itself.
+; ===========================================================================
+gen_program:
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    mov     rbx, rdi
+    mov     r12, [rbx + AST_A_OFF]       ; decls ptr
+    mov     r13, [rbx + AST_B_OFF]       ; decl_count
+    xor     r14, r14                     ; main function node, 0 = not found
+    xor     rcx, rcx
+.scan_loop:
+    cmp     rcx, r13
+    jae     .scan_done
+    mov     rax, [r12 + rcx*8]
+    mov     r15, [rax + AST_KIND_OFF]
+    cmp     r15, AST_STRUCT_DECL
+    jne     .not_struct
+    mov     rsi, msg_struct_unsupported
+    mov     rdx, msg_struct_unsupported_len
+    call    codegen_fail
+.not_struct:
+    cmp     r15, AST_FUNCTION
+    jne     .scan_next
+    cmp     r14, 0
+    je      .scan_first_function
+    mov     rsi, msg_multi_function
+    mov     rdx, msg_multi_function_len
+    call    codegen_fail
+.scan_first_function:
+    mov     r14, rax
+    mov     rax, [r14 + AST_A_OFF]       ; signature ptr
+    mov     rdi, [parser_src_buf]
+    add     rdi, [rax + AST_A_OFF]       ; name text
+    mov     rsi, [rax + AST_B_OFF]       ; name_len
+    cmp     rsi, 4
+    jne     .not_main_name
+    push    rdi
+    mov     rsi, str_main
+    mov     rdx, 4
+    call    bytes_equal
+    pop     rdi
+    cmp     rax, 1
+    je      .scan_next
+.not_main_name:
+    mov     rsi, msg_not_main
+    mov     rdx, msg_not_main_len
+    call    codegen_fail
+.scan_next:
+    inc     rcx
+    jmp     .scan_loop
+.scan_done:
+    cmp     r14, 0
+    jne     .have_main
+    mov     rsi, msg_no_main
+    mov     rdx, msg_no_main_len
+    call    codegen_fail
+.have_main:
+    mov     rsi, s_header
+    mov     rdx, s_header_len
+    call    emit_str
+    mov     rax, [r14 + AST_B_OFF]       ; main's return type, 0 = void
+    cmp     rax, 0
+    jne     .nonvoid_main
+    mov     rsi, s_mov_rdi_0
+    mov     rdx, s_mov_rdi_0_len
+    call    emit_str
+    jmp     .exit_tail
+.nonvoid_main:
+    mov     rsi, s_mov_rdi_rax
+    mov     rdx, s_mov_rdi_rax_len
+    call    emit_str
+.exit_tail:
+    mov     rsi, s_exit_tail
+    mov     rdx, s_exit_tail_len
+    call    emit_str
+
+    mov     rdi, r14
+    call    gen_function
+
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret

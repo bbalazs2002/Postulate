@@ -33,6 +33,8 @@ global sema_report_finish
 global err_append_span
 global quote_char
 global bytes_equal
+global local_table
+global local_count
 
 section .bss
 struct_table:    resb MAX_LIST_ARITY * STRUCT_ENTRY_SIZE

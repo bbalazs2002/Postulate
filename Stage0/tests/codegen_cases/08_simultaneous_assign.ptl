@@ -1,0 +1,6 @@
+function main() : int32 {
+  mut a: int32 := 1;
+  mut b: int32 := 2;
+  a := b, b := a;
+  return a * 10 + b;
+}

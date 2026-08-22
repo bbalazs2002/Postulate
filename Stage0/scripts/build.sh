@@ -38,3 +38,19 @@ ld -static -no-pie -e _start -o build/checker \
     build/parser_tokens.o build/type_parser.o build/expr_parser.o \
     build/stmt_parser.o build/top_parser.o \
     build/symtab.o build/sema_types.o build/sema_expr.o build/sema_stmt.o
+
+# --- code generator binary (NASM text codegen, Phase 1 -- see
+# docs/postulate_stage0_codegen_spec.md) ---
+nasm -f elf64 -I src/ -o build/codegen_main.o src/codegen_main.asm
+nasm -f elf64 -I src/ -o build/codegen_types.o src/codegen_types.asm
+nasm -f elf64 -I src/ -o build/codegen_expr.o src/codegen_expr.asm
+nasm -f elf64 -I src/ -o build/codegen_stmt.o src/codegen_stmt.asm
+nasm -f elf64 -I src/ -o build/codegen_program.o src/codegen_program.asm
+
+ld -static -no-pie -e _start -o build/codegen \
+    build/codegen_main.o build/lexer.o build/runtime.o build/ast.o \
+    build/parser_tokens.o build/type_parser.o build/expr_parser.o \
+    build/stmt_parser.o build/top_parser.o \
+    build/symtab.o build/sema_types.o build/sema_expr.o build/sema_stmt.o \
+    build/codegen_types.o build/codegen_expr.o build/codegen_stmt.o \
+    build/codegen_program.o

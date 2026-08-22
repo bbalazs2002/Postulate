@@ -1,0 +1,6 @@
+function main() : int32 {
+  mut a: int32 := 6;
+  mut b: int32 := 3;
+  mut c: int32 := (a & b) + (a | b) + (a ^ b) + (-a) + (a << 1) + (a >> 1);
+  return c;
+}
