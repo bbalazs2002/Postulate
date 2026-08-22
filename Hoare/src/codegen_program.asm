@@ -46,6 +46,7 @@ extern emit_str
 extern emit_dec
 extern emit_nl
 extern emit_rep_movsb_copy
+extern stack_check_enabled
 
 global local_stack_offset
 global compute_local_offsets
@@ -97,6 +98,28 @@ s_mov_rdi_0: db "    mov     rdi, 0", 10
 s_mov_rdi_0_len equ $ - s_mov_rdi_0
 s_exit_tail: db "    mov     rax, 60", 10, "    syscall", 10, 10
 s_exit_tail_len equ $ - s_exit_tail
+
+; --- Debug-only stack-check instrumentation (see codegen_main.asm's
+; header comment) -- only ever emitted when stack_check_enabled is 1.
+; s_header_checked replaces s_header wholesale (it embeds its own
+; "call pf_main"); everything after the header (main's return-value
+; handling, s_exit_tail) is shared, unconditional, unchanged.
+s_header_checked: db "BITS 64", 10, "section .bss", 10, "__pf_entry_rsp: resq 1", 10, "section .data", 10, "__pf_msg_imbalance: db ", 39, "runtime error: stack pointer imbalance detected at program exit", 39, ", 10", 10, "__pf_msg_imbalance_len equ $ - __pf_msg_imbalance", 10, "__pf_msg_canary: db ", 39, "runtime error: stack canary corrupted -- out-of-bounds local write", 39, ", 10", 10, "__pf_msg_canary_len equ $ - __pf_msg_canary", 10, "section .text", 10, "global _start", 10, 10, "__pf_stack_check_fail:", 10, "    mov     rax, 1", 10, "    mov     rdi, 2", 10, "    mov     rsi, r8", 10, "    mov     rdx, r9", 10, "    syscall", 10, "    mov     rax, 60", 10, "    mov     rdi, r10", 10, "    syscall", 10, 10, "_start:", 10, "    mov     [__pf_entry_rsp], rsp", 10, "    call    pf_main", 10, "    mov     rcx, rsp", 10, "    cmp     rcx, [__pf_entry_rsp]", 10, "    je      .balance_ok", 10, "    mov     r8, __pf_msg_imbalance", 10, "    mov     r9, __pf_msg_imbalance_len", 10, "    mov     r10, 113", 10, "    jmp     __pf_stack_check_fail", 10, ".balance_ok:", 10
+s_header_checked_len equ $ - s_header_checked
+
+; Planted right after a function's "sub rsp, N" (only when N already
+; includes the canary's own 8 bytes -- see compute_local_offsets); rax is
+; safe to clobber here (the incoming args-block pointer lives in rdi, not
+; touched until emit_param_copy's loop runs later).
+s_canary_write: db "    mov     rax, 0x5CA1AB1E5CA1AB1E", 10, "    mov     qword [rbp - 8], rax", 10
+s_canary_write_len equ $ - s_canary_write
+
+; Replaces the plain .epilogue/mov rsp,rbp/pop rbp/ret block wholesale
+; when stack_check_enabled -- protects rax (may hold this function's
+; scalar return value) around the check via push/pop, matching this
+; file's register-safety convention.
+s_epilogue_checked: db ".epilogue:", 10, "    push    rax", 10, "    push    rcx", 10, "    mov     rax, [rbp - 8]", 10, "    mov     rcx, 0x5CA1AB1E5CA1AB1E", 10, "    cmp     rax, rcx", 10, "    jne     .canary_bad", 10, "    pop     rcx", 10, "    pop     rax", 10, "    mov     rsp, rbp", 10, "    pop     rbp", 10, "    ret", 10, ".canary_bad:", 10, "    pop     rcx", 10, "    pop     rax", 10, "    mov     r8, __pf_msg_canary", 10, "    mov     r9, __pf_msg_canary_len", 10, "    mov     r10, 112", 10, "    jmp     __pf_stack_check_fail", 10
+s_epilogue_checked_len equ $ - s_epilogue_checked
 
 s_movsx_rax_byte_from: db "    movsx   rax, byte [rdi + "
 s_movsx_rax_byte_from_len equ $ - s_movsx_rax_byte_from
@@ -169,10 +192,21 @@ local_stack_offset:
 ; sizes are all powers of two <= 8, so a running byte-sum never misaligns
 ; any individual load/store). out: rax = total locals_size, rounded up to
 ; a multiple of 16 (see "Stack frame layout"'s alignment invariant).
+;
+; When stack_check_enabled, the running total starts at 8 instead of 0,
+; reserving [rbp - 8] as a stack-canary slot (see gen_function) that sits
+; immediately below rbp/the saved return address -- every user local's
+; offset shifts down by 8 uniformly, transparent to every consumer of
+; local_offsets[]/local_stack_offset (param copies, lvalue lookups, decl
+; inits) since they never assume any particular starting value.
 ; ===========================================================================
 compute_local_offsets:
     mov     rbx, [local_count]
     xor     r12, r12                     ; running total
+    cmp     byte [stack_check_enabled], 0
+    je      .no_canary_reserve
+    mov     r12, 8
+.no_canary_reserve:
     xor     rcx, rcx
 .loop:
     cmp     rcx, rbx
@@ -608,6 +642,23 @@ gen_function:
     pop     rbx
 .no_locals:
 
+    cmp     byte [stack_check_enabled], 0
+    je      .no_canary_write
+    mov     rsi, s_canary_write
+    mov     rdx, s_canary_write_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r8
+    push    r9
+    call    emit_str
+    pop     r9
+    pop     r8
+    pop     r13
+    pop     r12
+    pop     rbx
+.no_canary_write:
+
     cmp     r9, 0
     je      .no_out_ptr_save
     mov     rsi, s_mov_qword_rbp_minus
@@ -721,6 +772,8 @@ gen_function:
     mov     rdi, [rbx + AST_C_OFF]       ; body -- rbx's last use
     call    gen_func_block
 
+    cmp     byte [stack_check_enabled], 0
+    jne     .checked_epilogue
     mov     rsi, s_epilogue_label
     mov     rdx, s_epilogue_label_len
     call    emit_str
@@ -733,6 +786,12 @@ gen_function:
     mov     rsi, s_ret
     mov     rdx, s_ret_len
     call    emit_str
+    jmp     .epilogue_emitted
+.checked_epilogue:
+    mov     rsi, s_epilogue_checked
+    mov     rdx, s_epilogue_checked_len
+    call    emit_str
+.epilogue_emitted:
 
     ret
 
@@ -799,8 +858,15 @@ gen_program:
     mov     rdx, msg_main_has_params_len
     call    codegen_fail
 .main_params_ok:
+    cmp     byte [stack_check_enabled], 0
+    je      .use_plain_header
+    mov     rsi, s_header_checked
+    mov     rdx, s_header_checked_len
+    jmp     .header_chosen
+.use_plain_header:
     mov     rsi, s_header
     mov     rdx, s_header_len
+.header_chosen:
     push    r12
     push    r13
     push    r14

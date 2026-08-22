@@ -260,6 +260,13 @@ already exported), and adds a **parallel array**
 (`codegen_program.asm`'s `local_offsets`), indexed the same way as
 `local_table` — not a `symtab.inc` modification.
 
+**Debug-only instrumentation** (`POSTULATE_STACK_CHECK=1`, see Chapter
+11): when set, every local's offset shifts down by 8 bytes to make room
+for a stack canary at `[rbp - 8]` — `compute_local_offsets`'s running
+total starts at 8 instead of 0, so this is transparent to every consumer
+of `local_offsets`/`local_stack_offset` (param copies, lvalue lookups,
+decl inits). With the env var unset, offsets are exactly as shown above.
+
 ---
 
 ## 5. Type Sizes and Struct Layout (`codegen_types.asm`)
@@ -750,6 +757,16 @@ The existing table (see `Hoare/README.md`) gets one new row added:
 |---|---|
 | `4` | Code generator error (`build/codegen` only). The program is **semantically valid**, but the requested construct falls outside this phase's scope (struct/array/pointer, user function call, multi-function program, etc.) — diagnostic to stderr, with the `codegen error:` prefix. Not to be confused with code 3 (semantic error): 4 never means invalid Postulate source, only something outside the compiler's current scope. |
 
+Two more codes belong to a **compiled Postulate program**, not to
+`build/codegen` itself — see Chapter 11. They only appear when the
+program was compiled with `POSTULATE_STACK_CHECK=1` and the self-check
+fired at runtime:
+
+| Code | Meaning |
+|---|---|
+| `112` | Stack canary corrupted (out-of-bounds local write) — debug-only, `POSTULATE_STACK_CHECK=1` builds only. |
+| `113` | Stack pointer imbalance at program exit — debug-only, `POSTULATE_STACK_CHECK=1` builds only. |
+
 ---
 
 ## 10. Known Items Deliberately Not Implemented in This Phase
@@ -800,17 +817,160 @@ remain open:
   29_composite_call_as_literal_field_deferred.ptl` exercises exactly
   this rejected case.)
 - **Composite-typed `BINARY` operators** (`==`, `<`, etc. on
-  struct/array operands) — this is an already-**existing** permissive
-  gap stemming from the checker's `types_equal` (`sema_expr.asm`'s
-  `.binary_compare` does not restrict the operand category), which
-  this phase did not create and is not obligated to close either — on
-  the code generator's side, this is already cleanly closed today:
-  `gen_rvalue` never returns a composite type (see 6.5's induction
-  argument), so a composite `BINARY` operand fails the
-  `is_scalar_loadable_type` guard before anything can go wrong.
+  struct/array operands) — now rejected at the semantic-checking stage
+  itself (`sema_expr.asm`'s `.binary_compare` rejects `AST_TY_ARRAY`/
+  struct-name operands via `resolve_struct_type`, exit code 3, `semantic
+  error: cannot compare struct/array values`), so `gen_rvalue`'s own
+  `is_scalar_loadable_type` guard (see 6.5's induction argument) is now
+  unreachable defense-in-depth rather than the primary enforcement.
 - A composite (struct/array element-typed) array broadcast source (see
   6.6) — a rare case, deliberately rejected with `codegen_fail`, not
   part of the call-boundary question, unchanged since Phase 2.
 
 These await a separate, not-yet-planned future phase; at that point
 this document will be extended, not replaced.
+
+---
+
+## 11. Debug-Only Stack-Corruption Self-Check (`POSTULATE_STACK_CHECK`)
+
+Test-harness instrumentation, not a language feature: `build/codegen`
+consults its own process environment for `POSTULATE_STACK_CHECK=1`
+(`codegen_main.asm`'s `_start`, before anything else runs — walks the
+kernel-provided `envp[]` directly, no libc), setting the module-level
+flag `stack_check_enabled` (`global`, consulted via `extern` from
+`codegen_program.asm`). With the variable unset — every normal
+invocation, and everything a real `hoare`-compiled program goes
+through — `gen_program`/`gen_function`/`compute_local_offsets` emit
+**exactly** what they did before this existed; no hidden cost for
+production output, matching this project's no-hidden-runtime-cost
+principle (see the top-level project overview). Set, two extra checks
+get emitted:
+
+### 11.1 Stack-pointer balance check
+
+`gen_program` picks `s_header_checked` instead of the plain `s_header`
+for the whole "before the first `pf_<name>:` label" block — same
+`call pf_main` as before, wrapped with a balance check:
+
+```nasm
+BITS 64
+section .bss
+__pf_entry_rsp: resq 1
+section .data
+__pf_msg_imbalance: db 'runtime error: stack pointer imbalance detected at program exit', 10
+__pf_msg_imbalance_len equ $ - __pf_msg_imbalance
+__pf_msg_canary: db 'runtime error: stack canary corrupted -- out-of-bounds local write', 10
+__pf_msg_canary_len equ $ - __pf_msg_canary
+section .text
+global _start
+
+__pf_stack_check_fail:          ; in: r8=msg ptr, r9=msg len, r10=exit code
+    mov     rax, 1               ; sys_write
+    mov     rdi, 2                ; stderr
+    mov     rsi, r8
+    mov     rdx, r9
+    syscall
+    mov     rax, 60               ; sys_exit
+    mov     rdi, r10
+    syscall
+
+_start:
+    mov     [__pf_entry_rsp], rsp
+    call    pf_main
+    mov     rcx, rsp
+    cmp     rcx, [__pf_entry_rsp]
+    je      .balance_ok
+    mov     r8, __pf_msg_imbalance
+    mov     r9, __pf_msg_imbalance_len
+    mov     r10, 113
+    jmp     __pf_stack_check_fail
+.balance_ok:
+    ; ...unchanged: mov rdi, rax/0 + s_exit_tail, exactly as without the flag
+```
+
+`r8`/`r9`/`r10` carry the shared handler's parameters specifically
+because they survive a raw `syscall` instruction untouched (unlike
+`rcx`/`r11`, and unlike `rdi`/`rsi`/`rdx`/`rax`, which `sys_write`/
+`sys_exit` themselves need) — one handler, reused by every call site
+below, rather than duplicating the write+exit sequence per function.
+
+**Coverage note**: because every function's own epilogue always does
+`mov rsp, rbp` (see 11.2 and Chapter 4) before returning, a `push`/`pop`
+or `sub`/`add rsp` mismatch *inside* one function's body can never by
+itself propagate an imbalance out to its caller — that function's own
+epilogue silently resets `rsp` from `rbp` regardless. This check mainly
+catches a broken prologue/epilogue in the fixed skeleton itself, or an
+imbalance injected directly around a `call` site (mirrored by
+`tests/stack_check_cases/02_rsp_imbalance.asm`'s hand-written negative
+fixture, since no real Postulate program can express this). The
+per-function canary (11.2) is the check that actually fires for the
+higher-likelihood bug class — an out-of-bounds local write.
+
+### 11.2 Per-function stack canary
+
+`compute_local_offsets` reserves 8 extra bytes when the flag is set (see
+Chapter 4's addition) — `sub rsp, N` in the prologue always includes
+that reservation, and right after it, `gen_function` emits:
+
+```nasm
+    mov     rax, 0x5CA1AB1E5CA1AB1E
+    mov     qword [rbp - 8], rax
+```
+
+(`rax` is safe to clobber here — the incoming args-block pointer lives
+in `rdi`, untouched until `emit_param_copy`'s loop runs later.) The
+epilogue (`s_epilogue_checked`, replacing the plain `.epilogue`/
+`mov rsp,rbp`/`pop rbp`/`ret` block wholesale) checks it back, wrapping
+`rax` in a `push`/`pop` since a scalar-returning function's real return
+value sits there and must survive the check untouched:
+
+```nasm
+.epilogue:
+    push    rax
+    push    rcx
+    mov     rax, [rbp - 8]
+    mov     rcx, 0x5CA1AB1E5CA1AB1E
+    cmp     rax, rcx
+    jne     .canary_bad
+    pop     rcx
+    pop     rax
+    mov     rsp, rbp
+    pop     rbp
+    ret
+.canary_bad:
+    pop     rcx
+    pop     rax
+    mov     r8, __pf_msg_canary
+    mov     r9, __pf_msg_canary_len
+    mov     r10, 112
+    jmp     __pf_stack_check_fail
+```
+
+The canary sits at `[rbp - 8]` — immediately below the saved `rbp`/
+return address, and (per Chapter 4's array-indexing direction: an
+array's element 0 sits at the *low*-address end of its slot, with
+increasing index moving toward *higher* addresses, i.e. toward `rbp`)
+directly in the path of an out-of-bounds write that walks past the end
+of an array/struct local, before it could reach the saved frame pointer
+or return address. `.epilogue`/`.canary_bad` are local labels (NASM
+scopes them to the nearest preceding global label, `pf_<name>:`), so no
+manual per-function uniquing is needed despite every function sharing
+the same label text.
+
+### 11.3 Testing
+
+`tests/stack_check_cases/*.asm` — hand-written NASM (not `.ptl`; the
+language has no way to deliberately corrupt the stack), each matching
+the instrumented shape exactly with **one** injected bug isolating one
+check: `01_clean_ok.asm` (no bug, must exit 0 — a false-positive check),
+`02_rsp_imbalance.asm` (an extra `push` before `call pf_main`, simulating
+a leaked caller-side reservation — must exit 113), `03_canary_corrupted
+.asm` (an out-of-bounds-style overwrite of `[rbp - 8]` inside `pf_main`'s
+own body — must exit 112). `scripts/run_stack_check_tests.sh` additionally
+recompiles every `tests/codegen_cases/*.ptl` fixture that normally
+succeeds (skipping the `.expected.codegen_exit` ones — the flag cannot
+change a compile-time rejection) with the flag on, executes the result,
+and asserts the *same* expected exit code/stdout as the unflagged suite
+already checks — the actual regression net, proving the current compiler
+leaves no stack corruption behind across the whole real fixture set.

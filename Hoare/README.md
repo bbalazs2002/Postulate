@@ -34,7 +34,7 @@ docker build -t postulate-hoare Hoare
 ```
 
 This is the single, complete pass/fail gate: it assembles all four
-binaries (`scripts/build.sh`) and runs five fixture suites as build
+binaries (`scripts/build.sh`) and runs six fixture suites as build
 steps — a failing test fails the build:
 
 - `scripts/run_tests.sh` — lexer fixtures (`tests/cases/`).
@@ -56,6 +56,41 @@ steps — a failing test fails the build:
   (`nasm`), linked (`ld`), **executed**, and its real exit code (and
   stdout, where checked) compared against the fixture's expected values —
   see the codegen spec section 8.
+- `scripts/run_stack_check_tests.sh` — debug-only stack-corruption
+  instrumentation (`POSTULATE_STACK_CHECK=1`, see "Stack-corruption
+  self-check" below): a handful of hand-written NASM sanity fixtures
+  (`tests/stack_check_cases/`) proving the detector itself fires, plus
+  the entire `tests/codegen_cases/` suite recompiled with the flag on and
+  re-executed, proving none of the real, working test programs leave any
+  stack corruption behind.
+
+## Stack-corruption self-check
+
+Setting `POSTULATE_STACK_CHECK=1` in `build/codegen`'s environment makes
+it emit two extra pieces of debug-only instrumentation into the compiled
+program, on top of the normal output:
+
+- **Stack-pointer balance check**: `_start` records its entry `rsp`,
+  calls `pf_main`, and compares `rsp` again once it returns. A mismatch
+  means something in the call tree left the stack unbalanced (a leaked
+  `push`/`pop` or `sub`/`add rsp` pair) — exits **113** with a diagnostic
+  on stderr instead of running the normal exit path.
+- **Per-function stack canary**: every function plants a fixed magic
+  value at `[rbp - 8]` (immediately below the saved `rbp`/return address)
+  in its prologue and verifies it's unchanged in its epilogue — every
+  local's own stack offset shifts down by 8 bytes to make room, see
+  `compute_local_offsets`. A mismatch means a local array/struct write
+  went out of bounds (Stage 0 has no bounds checking for a dynamic/
+  computed index — see the language reference's implementation-status
+  notes) and overwrote the canary on its way toward the saved frame —
+  exits **112** with a diagnostic on stderr.
+
+With the environment variable unset — every normal invocation of
+`build/codegen`, including everything a real `hoare`-compiled program
+goes through — neither check is emitted; output is byte-for-byte
+identical to before this existed. This is debug/test-only instrumentation
+for the compiler's own regression suite, not a language feature: Postulate
+source has no way to opt into it, and it adds no cost to a normal build.
 
 ## Run
 
@@ -78,6 +113,16 @@ directive line.)
 | `2` | I/O-class / resource failure — input exceeds a fixed buffer (source buffer or AST arena), a `read`/`write` syscall failed, or a variable-arity list (call args / struct fields / array elements / statements / declarations / symbol table entries) exceeded its fixed cap. |
 | `3` | Semantic error (`build/checker`/`build/codegen`). Diagnostic on stderr, prefixed `semantic error:`, same `at line L, col C (byte offset O)` position format as parse errors. |
 | `4` | Code-generator error (`build/codegen` only). The program is semantically valid, but uses a construct outside this phase's implemented scope. Diagnostic on stderr, prefixed `codegen error:` — see the codegen spec section 9/10. |
+
+The two codes below belong to a *compiled Postulate program*, not to
+`build/codegen` itself — they only appear when that program was compiled
+with `POSTULATE_STACK_CHECK=1` (see "Stack-corruption self-check" above)
+and the self-check actually fired at runtime:
+
+| Code | Meaning |
+|---|---|
+| `112` | Stack canary corrupted — an out-of-bounds local write. Diagnostic on stderr. |
+| `113` | Stack pointer imbalance detected at program exit. Diagnostic on stderr. |
 
 ## Lexer token dump format
 
@@ -137,4 +182,5 @@ tests/parser_cases/          fixtures for build/parser (directive line + *.ptl +
 tests/blackbox_cases/         whole-program fixtures for build/parser (all use the PROGRAM directive)
 tests/checker_cases/           fixtures for build/checker (no directive; *.ptl + *.expected.*)
 tests/codegen_cases/            fixtures for build/codegen (no directive; *.ptl + *.expected.*, actually run)
+tests/stack_check_cases/         hand-written NASM sanity fixtures for the POSTULATE_STACK_CHECK=1 self-check
 ```
