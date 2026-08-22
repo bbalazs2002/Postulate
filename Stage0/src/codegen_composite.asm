@@ -13,6 +13,14 @@
 ; address into rbx; it walks the SAME structure in REVERSE order,
 ; offset accumulating as compile-time arithmetic, popping and storing
 ; each leaf via the retained rbx + a computed offset.
+;
+; Register-safety convention (applies to every routine in this file):
+; no callee, including the trivial ones (emit_str/emit_dec/emit_nl), is
+; ever trusted to leave any register untouched across a call. Whenever a
+; value must survive a call, the function that needs it pushes it
+; immediately before that one call and pops it immediately after -- never
+; spanning more than one call per push/pop pair, so every call site is a
+; self-contained, independently-checkable block.
 
 %include "config.inc"
 %include "tokens.inc"
@@ -125,17 +133,24 @@ find_field_init:
     push    rax
     push    r9
     push    rcx
-    push    r8                          ; field_inits ptr -- no callee is
-                                         ; trusted to leave any register
-                                         ; untouched across a call here,
-                                         ; not even r8-r15
+    push    r8
+    push    r12
+    push    r13                         ; every one of our own live
+                                         ; locals, protected by us across
+                                         ; this one call -- next iteration
+                                         ; needs all of them back
     mov     rdi, [parser_src_buf]
     add     rdi, [rax + AST_A_OFF]
     mov     rsi, [parser_src_buf]
     add     rsi, r12
     mov     rdx, r13
     call    bytes_equal
-    mov     r10, rax                    ; match result -- protect across pops
+    mov     r10, rax                    ; match result -- protect across
+                                         ; the pops below, which restore
+                                         ; rax to the field_init ptr, not
+                                         ; the comparison result
+    pop     r13
+    pop     r12
     pop     r8
     pop     rcx
     pop     r9
@@ -168,9 +183,13 @@ find_field_init:
 emit_sized_store_rbx_plus:
     push    r12
     push    r13
-    mov     r12, rdi                    ; type
+    mov     r12, rdi                    ; type -- only needed to build the
+                                         ; type_size call below, never read
+                                         ; again after it
     mov     r13, rsi                    ; offset
+    push    r13
     call    type_size
+    pop     r13
     cmp     rax, 1
     je      .b1
     cmp     rax, 2
@@ -179,7 +198,9 @@ emit_sized_store_rbx_plus:
     je      .b4
     mov     rsi, s_mov_qword_rbx_plus
     mov     rdx, s_mov_qword_rbx_plus_len
+    push    r13
     call    emit_str
+    pop     r13
     mov     rax, r13
     call    emit_dec
     mov     rsi, s_close_comma_rax
@@ -189,7 +210,9 @@ emit_sized_store_rbx_plus:
 .b1:
     mov     rsi, s_mov_byte_rbx_plus
     mov     rdx, s_mov_byte_rbx_plus_len
+    push    r13
     call    emit_str
+    pop     r13
     mov     rax, r13
     call    emit_dec
     mov     rsi, s_close_comma_al
@@ -199,7 +222,9 @@ emit_sized_store_rbx_plus:
 .b2:
     mov     rsi, s_mov_word_rbx_plus
     mov     rdx, s_mov_word_rbx_plus_len
+    push    r13
     call    emit_str
+    pop     r13
     mov     rax, r13
     call    emit_dec
     mov     rsi, s_close_comma_ax
@@ -209,7 +234,9 @@ emit_sized_store_rbx_plus:
 .b4:
     mov     rsi, s_mov_dword_rbx_plus
     mov     rdx, s_mov_dword_rbx_plus_len
+    push    r13
     call    emit_str
+    pop     r13
     mov     rax, r13
     call    emit_dec
     mov     rsi, s_close_comma_eax
@@ -233,8 +260,10 @@ emit_rep_movsb_copy:
     mov     r12, rdi
     mov     rsi, s_mov_rcx_
     mov     rdx, s_mov_rcx__len
+    push    r12
     call    emit_str
-    mov     rax, r12
+    pop     r12
+    mov     rax, r12                    ; r12's last use
     call    emit_dec
     call    emit_nl
     mov     rsi, s_cld
@@ -280,15 +309,31 @@ gen_init_push:
     cmp     rdx, AST_EX_ARRAY_LIT
     je      .arr_recurse
     mov     rdi, rax
+    push    r13
+    push    r14                         ; next iteration needs both back
     call    gen_rvalue
+    pop     r14
+    pop     r13
     mov     rsi, s_push_rax
     mov     rdx, s_push_rax_len
+    push    r13
+    push    r14
     call    emit_str
+    pop     r14
+    pop     r13
+    push    r13
+    push    r14
     call    emit_nl
+    pop     r14
+    pop     r13
     jmp     .arr_next
 .arr_recurse:
     mov     rdi, rax
+    push    r13
+    push    r14
     call    gen_init_push
+    pop     r14
+    pop     r13
 .arr_next:
     pop     rcx
     inc     rcx
@@ -296,7 +341,9 @@ gen_init_push:
 .struct:
     mov     rdi, [rbx + AST_A_OFF]      ; name_offset
     mov     rsi, [rbx + AST_B_OFF]      ; name_len
+    push    rbx                         ; needed by the loop below
     call    lookup_struct
+    pop     rbx
     mov     r12, [rax + STE_DECL_PTR]   ; struct decl
     mov     r13, [r12 + AST_D_OFF]      ; field_count
     xor     rcx, rcx
@@ -309,7 +356,13 @@ gen_init_push:
     mov     rdi, rbx                    ; struct_lit node
     mov     rsi, [rax + AST_A_OFF]      ; field decl name_offset
     mov     rdx, [rax + AST_B_OFF]      ; field decl name_len
+    push    rbx
+    push    r12
+    push    r13                         ; next iteration needs all three
     call    find_field_init
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     rax, [rax + AST_C_OFF]      ; field_init's value node
     mov     rdx, [rax + AST_KIND_OFF]
     cmp     rdx, AST_EX_STRUCT_LIT
@@ -317,15 +370,39 @@ gen_init_push:
     cmp     rdx, AST_EX_ARRAY_LIT
     je      .struct_recurse
     mov     rdi, rax
+    push    rbx
+    push    r12
+    push    r13
     call    gen_rvalue
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     rsi, s_push_rax
     mov     rdx, s_push_rax_len
+    push    rbx
+    push    r12
+    push    r13
     call    emit_str
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
     call    emit_nl
+    pop     r13
+    pop     r12
+    pop     rbx
     jmp     .struct_next
 .struct_recurse:
     mov     rdi, rax
+    push    rbx
+    push    r12
+    push    r13
     call    gen_init_push
+    pop     r13
+    pop     r12
+    pop     rbx
 .struct_next:
     pop     rcx
     inc     rcx
@@ -367,10 +444,17 @@ gen_init_pop_store:
     mov     rax, [rbx + AST_KIND_OFF]
     cmp     rax, AST_EX_STRUCT_LIT
     je      .struct
-    ; AST_EX_ARRAY_LIT: r12 = array type -> element type/size
+    ; AST_EX_ARRAY_LIT: r12 = array type -> element type/size. r12 is not
+    ; needed again after this point in the array branch.
     mov     r14, [r12 + AST_A_OFF]      ; element type
     mov     rdi, r14
+    push    rbx
+    push    r13
+    push    r14
     call    type_size
+    pop     r14
+    pop     r13
+    pop     rbx
     mov     r15, rax                    ; element size
     mov     rax, [rbx + AST_B_OFF]      ; elem_count
     dec     rax                         ; start index = count - 1 (reverse)
@@ -391,17 +475,53 @@ gen_init_pop_store:
     je      .arr_recurse
     mov     rsi, s_pop_rax
     mov     rdx, s_pop_rax_len
+    push    rbx
+    push    r13
+    push    r14
+    push    r15
+    push    r8
     call    emit_str
+    pop     r8
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     rbx
+    push    rbx
+    push    r13
+    push    r14
+    push    r15
+    push    r8
     call    emit_nl
+    pop     r8
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     rbx
     mov     rdi, r14                    ; element type
     mov     rsi, r8                     ; this element's offset
+    push    rbx
+    push    r13
+    push    r14
+    push    r15
     call    emit_sized_store_rbx_plus
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     rbx
     jmp     .arr_next
 .arr_recurse:
     mov     rdi, rcx                    ; nested literal node
     mov     rsi, r14                    ; element type (its own expected type)
     mov     rdx, r8                     ; combined offset
+    push    rbx
+    push    r13
+    push    r14
+    push    r15
     call    gen_init_pop_store
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     rbx
 .arr_next:
     pop     rax
     dec     rax
@@ -409,7 +529,12 @@ gen_init_pop_store:
 .struct:
     mov     rdi, [rbx + AST_A_OFF]
     mov     rsi, [rbx + AST_B_OFF]
+    push    rbx
+    push    r13                         ; r12 is not needed again after
+                                         ; this point in the struct branch
     call    lookup_struct
+    pop     r13
+    pop     rbx
     mov     r14, [rax + STE_DECL_PTR]   ; struct decl
     mov     rax, [r14 + AST_D_OFF]      ; field_count
     dec     rax                         ; start index = count - 1 (reverse)
@@ -419,11 +544,21 @@ gen_init_pop_store:
     push    rax
     mov     rcx, [r14 + AST_C_OFF]      ; fields ptr
     mov     rcx, [rcx + rax*8]          ; this AST_FIELD_DECL
-    push    rcx
+    push    rcx                         ; field decl ptr, saved across
+                                         ; find_field_init the same way the
+                                         ; original design already did --
+                                         ; unrelated to our own protection
+                                         ; below, just nested inside it
     mov     rdi, rbx                    ; struct_lit node
     mov     rsi, [rcx + AST_A_OFF]      ; field name_offset
     mov     rdx, [rcx + AST_B_OFF]      ; field name_len
+    push    rbx
+    push    r13
+    push    r14
     call    find_field_init
+    pop     r14
+    pop     r13
+    pop     rbx
     mov     r8, [rax + AST_C_OFF]       ; field_init's value node
     pop     rcx                         ; field decl ptr back
     push    rcx
@@ -431,7 +566,13 @@ gen_init_pop_store:
     mov     rdi, r14                    ; struct decl
     mov     rsi, [rcx + AST_A_OFF]
     mov     rdx, [rcx + AST_B_OFF]
+    push    rbx
+    push    r13
+    push    r14
     call    field_offset                ; -> rax = this field's local offset
+    pop     r14
+    pop     r13
+    pop     rbx
     add     rax, r13                    ; combine with accumulated offset
     mov     r9, rax                     ; combined offset
     pop     r8                          ; value node
@@ -442,26 +583,54 @@ gen_init_pop_store:
     cmp     rdx, AST_EX_ARRAY_LIT
     je      .struct_recurse
     mov     r10, [rcx + AST_C_OFF]      ; field's declared type -- read
-                                         ; BEFORE the emit_str call below,
-                                         ; which uses rcx as its own
-                                         ; internal copy-loop counter and
-                                         ; would otherwise clobber it
-                                         ; (same bug class as the
-                                         ; checker's .struct_field_scan
-                                         ; rcx/rdx-across-call lesson)
+                                         ; while rcx is still valid, before
+                                         ; anything below has a chance to
+                                         ; disturb it
     mov     rsi, s_pop_rax
     mov     rdx, s_pop_rax_len
+    push    rbx
+    push    r13
+    push    r14
+    push    r9
+    push    r10
     call    emit_str
+    pop     r10
+    pop     r9
+    pop     r14
+    pop     r13
+    pop     rbx
+    push    rbx
+    push    r13
+    push    r14
+    push    r9
+    push    r10
     call    emit_nl
+    pop     r10
+    pop     r9
+    pop     r14
+    pop     r13
+    pop     rbx
     mov     rdi, r10
     mov     rsi, r9
+    push    rbx
+    push    r13
+    push    r14
     call    emit_sized_store_rbx_plus
+    pop     r14
+    pop     r13
+    pop     rbx
     jmp     .struct_next
 .struct_recurse:
     mov     rdi, r8                     ; nested literal node
     mov     rsi, [rcx + AST_C_OFF]      ; field's declared type
     mov     rdx, r9
+    push    rbx
+    push    r13
+    push    r14
     call    gen_init_pop_store
+    pop     r14
+    pop     r13
+    pop     rbx
 .struct_next:
     pop     rax
     dec     rax
@@ -489,41 +658,98 @@ gen_composite_broadcast:
     push    r13
     mov     rbx, rdi                    ; element type (ours)
     mov     r12, rsi                    ; element count (ours)
+
+    push    rbx
+    push    r12
     call    next_label_suffix
+    pop     r12
+    pop     rbx
     mov     r13, rax                    ; unique suffix
 
     mov     rsi, s_mov_r12_rax
     mov     rdx, s_mov_r12_rax_len
+    push    rbx
+    push    r12
+    push    r13
     call    emit_str
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
     call    emit_nl
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     rsi, s_mov_rcx_
     mov     rdx, s_mov_rcx__len
+    push    rbx
+    push    r12
+    push    r13
     call    emit_str
-    mov     rax, r12
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rax, r12                    ; r12's last use
+    push    rbx
+    push    r13
     call    emit_dec
+    pop     r13
+    pop     rbx
+    push    rbx
+    push    r13
     call    emit_nl
+    pop     r13
+    pop     rbx
 
     mov     rax, r13
     mov     rsi, s_suf_start
     mov     rdx, s_suf_start_len
+    push    rbx
+    push    r13
     call    emit_label_def
+    pop     r13
+    pop     rbx
 
     mov     rsi, s_cmp_rcx_0
     mov     rdx, s_cmp_rcx_0_len
+    push    rbx
+    push    r13
     call    emit_str
+    pop     r13
+    pop     rbx
+    push    rbx
+    push    r13
     call    emit_nl
+    pop     r13
+    pop     rbx
     mov     rsi, s_je_dotL
     mov     rdx, s_je_dotL_len
+    push    rbx
+    push    r13
     call    emit_str
+    pop     r13
+    pop     rbx
     mov     rax, r13
     mov     rsi, s_suf_end
     mov     rdx, s_suf_end_len
+    push    rbx
+    push    r13
     call    emit_label_ref
+    pop     r13
+    pop     rbx
+    push    rbx
+    push    r13
     call    emit_nl
+    pop     r13
+    pop     rbx
 
-    mov     rdi, rbx                    ; element type
+    mov     rdi, rbx                    ; element type -- rbx's last use
+    push    r13
     call    type_size
-    mov     r8, rax                     ; element size, protect
+    pop     r13
+    mov     r8, rax                     ; element size
     cmp     r8, 1
     je      .s1
     cmp     r8, 2
@@ -545,31 +771,57 @@ gen_composite_broadcast:
     mov     rsi, s_mov_dword_rbx_r12d
     mov     rdx, s_mov_dword_rbx_r12d_len
 .store_emit:
+    push    r13
+    push    r8
     call    emit_str
+    pop     r8
+    pop     r13
+    push    r13
+    push    r8
     call    emit_nl
+    pop     r8
+    pop     r13
 
     mov     rsi, s_add_rbx_
     mov     rdx, s_add_rbx__len
+    push    r13
+    push    r8
     call    emit_str
-    mov     rax, r8
+    pop     r8
+    pop     r13
+    mov     rax, r8                     ; r8's last use
+    push    r13
     call    emit_dec
+    pop     r13
+    push    r13
     call    emit_nl
+    pop     r13
 
     mov     rsi, s_dec_rcx
     mov     rdx, s_dec_rcx_len
+    push    r13
     call    emit_str
+    pop     r13
+    push    r13
     call    emit_nl
+    pop     r13
 
     mov     rsi, s_jmp_dotL
     mov     rdx, s_jmp_dotL_len
+    push    r13
     call    emit_str
+    pop     r13
     mov     rax, r13
     mov     rsi, s_suf_start
     mov     rdx, s_suf_start_len
+    push    r13
     call    emit_label_ref
+    pop     r13
+    push    r13
     call    emit_nl
+    pop     r13
 
-    mov     rax, r13
+    mov     rax, r13                    ; r13's final use
     mov     rsi, s_suf_end
     mov     rdx, s_suf_end_len
     call    emit_label_def

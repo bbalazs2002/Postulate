@@ -1,5 +1,17 @@
 ; Postulate Stage 0 -- code generator: statement codegen.
 ; See docs/postulate_stage0_codegen_spec.md.
+;
+; Register-safety convention (applies to every routine in this file): no
+; callee, including the trivial ones (emit_str/emit_nl), is ever trusted
+; to leave any register untouched across a call. Whenever a value must
+; survive a call, the function that needs it pushes it immediately
+; before that one call and pops it immediately after -- never spanning
+; more than one call per push/pop pair. Note also that "rbx"/etc named
+; in comments describing emitted text (e.g. "target rbx = address")
+; refer to the EMITTED PROGRAM's runtime register, not this compiler's
+; own rbx hardware register used for bookkeeping -- the two are entirely
+; unrelated (emitting the text "push rbx" is just string manipulation,
+; it never touches our own rbx).
 
 %include "config.inc"
 %include "tokens.inc"
@@ -107,13 +119,21 @@ gen_decl:
     mov     r13, rax                    ; init node
 
     mov     rdi, r12
+    push    rbx
+    push    r12
+    push    r13
     call    is_scalar_loadable_type
+    pop     r13
+    pop     r12
+    pop     rbx
     cmp     rax, 0
     je      .composite
 
     ; --- scalar/pointer path ---
     mov     rdi, r13
+    push    rbx
     call    gen_rvalue                  ; -> target rax = value
+    pop     rbx
     mov     rdi, [rbx + AST_A_OFF]      ; name_offset
     mov     rsi, [rbx + AST_B_OFF]      ; name_len
     call    gen_named_local_addr        ; -> target rbx = address; rax(ours) = type
@@ -143,8 +163,12 @@ gen_decl:
 
 .maybe_copy:
     mov     rdi, r13
+    push    rbx
+    push    r12
     call    gen_lvalue                  ; -> target rbx = src addr;
                                          ; rax(ours) = resolved type
+    pop     r12
+    pop     rbx
     push    rax                         ; resolved type -- protect it
                                          ; ourselves across types_equal via
                                          ; an explicit push/pop; we are the
@@ -153,31 +177,59 @@ gen_decl:
                                          ; callee-saved-register convention
     mov     rdi, rax
     mov     rsi, r12
+    push    rbx
+    push    r12
     call    types_equal
+    pop     r12
+    pop     rbx
     pop     rcx                         ; resolved type back
     cmp     rax, 0
     je      .broadcast_composite_check
 
-    ; --- COPY case: rbx already = src address ---
+    ; --- COPY case ---
     mov     rsi, s_push_rbx
     mov     rdx, s_push_rbx_len
+    push    rbx
+    push    r12
     call    emit_str
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
     call    emit_nl
+    pop     r12
+    pop     rbx
     mov     rdi, [rbx + AST_A_OFF]
     mov     rsi, [rbx + AST_B_OFF]
-    call    gen_named_local_addr        ; -> target rbx = dest addr
+    push    r12
+    call    gen_named_local_addr        ; -> target rbx = dest addr; our
+                                         ; own rbx (decl node) is not
+                                         ; needed again after this call
+    pop     r12
     mov     rsi, s_mov_rdi_rbx
     mov     rdx, s_mov_rdi_rbx_len
+    push    r12
     call    emit_str
+    pop     r12
+    push    r12
     call    emit_nl
+    pop     r12
     mov     rsi, s_pop_rbx
     mov     rdx, s_pop_rbx_len
+    push    r12
     call    emit_str
+    pop     r12
+    push    r12
     call    emit_nl
+    pop     r12
     mov     rsi, s_mov_rsi_rbx
     mov     rdx, s_mov_rsi_rbx_len
+    push    r12
     call    emit_str
+    pop     r12
+    push    r12
     call    emit_nl
+    pop     r12
     mov     rdi, r12
     call    type_size
     mov     rdi, rax
@@ -185,6 +237,8 @@ gen_decl:
     jmp     .done
 
 .broadcast_composite_check:
+    push    rbx
+    push    r12
     push    rcx                         ; resolved type -- protect across
                                          ; is_scalar_loadable_type, same
                                          ; rule: we own the obligation to
@@ -192,22 +246,36 @@ gen_decl:
     mov     rdi, rcx
     call    is_scalar_loadable_type
     pop     rcx
+    pop     r12
+    pop     rbx
     cmp     rax, 0
     je      .broadcast_unsupported
+    push    rbx
+    push    r12
     mov     rdi, rcx
     call    emit_sized_load             ; -> target rax = value
+    pop     r12
+    pop     rbx
     jmp     .broadcast_common
 
 .broadcast_scalar:
     mov     rdi, r13
+    push    rbx
+    push    r12
     call    gen_rvalue                  ; -> target rax = value
+    pop     r12
+    pop     rbx
     jmp     .broadcast_common
 
 .broadcast_common:
     mov     rdi, [rbx + AST_A_OFF]
     mov     rsi, [rbx + AST_B_OFF]
+    push    r12
     call    gen_named_local_addr        ; -> target rbx = array base addr
-                                         ; (never touches target rax)
+                                         ; (never touches target rax); our
+                                         ; own rbx (decl node) is not
+                                         ; needed again after this call
+    pop     r12
     mov     rdi, [r12 + AST_A_OFF]      ; array's element type
     mov     rsi, [r12 + AST_B_OFF]      ; array's element count
     call    gen_composite_broadcast
@@ -220,10 +288,22 @@ gen_decl:
 
 .literal:
     mov     rdi, r13
+    push    rbx
+    push    r12
+    push    r13
     call    gen_init_push
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     rdi, [rbx + AST_A_OFF]
     mov     rsi, [rbx + AST_B_OFF]
-    call    gen_named_local_addr        ; -> target rbx = addr
+    push    r12
+    push    r13
+    call    gen_named_local_addr        ; -> target rbx = addr; our own
+                                         ; rbx (decl node) is not needed
+                                         ; again after this call
+    pop     r13
+    pop     r12
     mov     rdi, r13                    ; literal node
     mov     rsi, r12                    ; expected type (declared type)
     xor     rdx, rdx                    ; accumulated offset = 0
@@ -267,53 +347,115 @@ gen_stmt:
     jmp     .exit
 
 .if_stmt:
+    push    rbx
     call    next_label_suffix
+    pop     rbx
     mov     r12, rax                    ; unique suffix
     mov     rdi, [rbx + AST_A_OFF]      ; cond
+    push    rbx
+    push    r12
     call    gen_rvalue
+    pop     r12
+    pop     rbx
     mov     rsi, s_cmp_rax_0
     mov     rdx, s_cmp_rax_0_len
+    push    rbx
+    push    r12
     call    emit_str
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
     call    emit_nl
+    pop     r12
+    pop     rbx
     mov     rax, [rbx + AST_C_OFF]      ; else_block, 0 if absent
     cmp     rax, 0
     je      .if_no_else
     mov     rsi, s_je_dotL
     mov     rdx, s_je_dotL_len
+    push    rbx
+    push    r12
     call    emit_str
+    pop     r12
+    pop     rbx
     mov     rax, r12
     mov     rsi, s_suf_else
     mov     rdx, s_suf_else_len
+    push    rbx
+    push    r12
     call    emit_label_ref
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
     call    emit_nl
+    pop     r12
+    pop     rbx
     mov     rdi, [rbx + AST_B_OFF]      ; then_block
+    push    rbx
+    push    r12
     call    gen_block
+    pop     r12
+    pop     rbx
     mov     rsi, s_jmp_dotL
     mov     rdx, s_jmp_dotL_len
+    push    rbx
+    push    r12
     call    emit_str
+    pop     r12
+    pop     rbx
     mov     rax, r12
     mov     rsi, s_suf_end
     mov     rdx, s_suf_end_len
+    push    rbx
+    push    r12
     call    emit_label_ref
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
     call    emit_nl
+    pop     r12
+    pop     rbx
     mov     rax, r12
     mov     rsi, s_suf_else
     mov     rdx, s_suf_else_len
+    push    rbx
+    push    r12
     call    emit_label_def
+    pop     r12
+    pop     rbx
     mov     rdi, [rbx + AST_C_OFF]      ; else_block
+    push    r12
     call    gen_block
+    pop     r12
     jmp     .if_end
 .if_no_else:
     mov     rsi, s_je_dotL
     mov     rdx, s_je_dotL_len
+    push    rbx
+    push    r12
     call    emit_str
+    pop     r12
+    pop     rbx
     mov     rax, r12
     mov     rsi, s_suf_end
     mov     rdx, s_suf_end_len
+    push    rbx
+    push    r12
     call    emit_label_ref
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
     call    emit_nl
+    pop     r12
+    pop     rbx
     mov     rdi, [rbx + AST_B_OFF]      ; then_block
+    push    r12
     call    gen_block
+    pop     r12
 .if_end:
     mov     rax, r12
     mov     rsi, s_suf_end
@@ -322,36 +464,74 @@ gen_stmt:
     jmp     .exit
 
 .while_stmt:
+    push    rbx
     call    next_label_suffix
+    pop     rbx
     mov     r12, rax
     mov     rax, r12
     mov     rsi, s_suf_start
     mov     rdx, s_suf_start_len
+    push    rbx
+    push    r12
     call    emit_label_def
+    pop     r12
+    pop     rbx
     mov     rdi, [rbx + AST_A_OFF]      ; cond
+    push    rbx
+    push    r12
     call    gen_rvalue
+    pop     r12
+    pop     rbx
     mov     rsi, s_cmp_rax_0
     mov     rdx, s_cmp_rax_0_len
+    push    rbx
+    push    r12
     call    emit_str
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
     call    emit_nl
+    pop     r12
+    pop     rbx
     mov     rsi, s_je_dotL
     mov     rdx, s_je_dotL_len
+    push    rbx
+    push    r12
     call    emit_str
+    pop     r12
+    pop     rbx
     mov     rax, r12
     mov     rsi, s_suf_end
     mov     rdx, s_suf_end_len
+    push    rbx
+    push    r12
     call    emit_label_ref
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
     call    emit_nl
+    pop     r12
+    pop     rbx
     mov     rdi, [rbx + AST_B_OFF]      ; body
+    push    r12
     call    gen_block
+    pop     r12
     mov     rsi, s_jmp_dotL
     mov     rdx, s_jmp_dotL_len
+    push    r12
     call    emit_str
+    pop     r12
     mov     rax, r12
     mov     rsi, s_suf_start
     mov     rdx, s_suf_start_len
+    push    r12
     call    emit_label_ref
+    pop     r12
+    push    r12
     call    emit_nl
+    pop     r12
     mov     rax, r12
     mov     rsi, s_suf_end
     mov     rdx, s_suf_end_len
@@ -363,7 +543,9 @@ gen_stmt:
     cmp     rax, 0
     je      .return_jmp
     mov     rdi, rax
-    call    gen_rvalue                  ; -> target rax = return value
+    call    gen_rvalue                  ; -> target rax = return value --
+                                         ; nothing of ours is needed again
+                                         ; after this, so no protection
 .return_jmp:
     mov     rsi, s_jmp_epilogue
     mov     rdx, s_jmp_epilogue_len
@@ -383,10 +565,10 @@ gen_stmt:
 ; program's stack. rbx is repurposed as that scratch array's base
 ; pointer once the pairs ptr/count are safely off it into r12/r13 (same
 ; "stable base in rbx" idiom sema_expr.asm's struct_lit scratch region
-; uses) -- safe to keep alive across every nested gen_lvalue/gen_rvalue/
-; etc. call this whole routine makes, since all of them explicitly
-; preserve rbx/r12/r13/r14 for their caller; r15 is likewise free and
-; used here as an extra pair-local temporary (lhs type).
+; uses); r15 is likewise free and used here as an extra pair-local
+; temporary (lhs type). Every one of rbx/r12/r13/r14/r15, whenever still
+; needed later, is explicitly protected around each individual nested
+; call below -- never assumed to simply survive it.
 ;
 ; Push-pattern per shape, pass 1 (address-vs-value/leaves ordering
 ; matters -- ld. codegen spec for why): SCALAR/BROADCAST = address then
@@ -399,7 +581,8 @@ gen_stmt:
     mov     r13, [rbx + AST_B_OFF]      ; pair_count
     sub     rsp, MAX_LIST_ARITY * 16    ; scratch: 2 qwords per pair --
                                          ; shape tag, lhs type
-    mov     rbx, rsp
+    mov     rbx, rsp                    ; rbx repurposed -- the original
+                                         ; stmt node is never read again
     xor     r14, r14
 .assign_pass1:
     cmp     r14, r13
@@ -415,17 +598,53 @@ gen_stmt:
 
 .p1_literal:
     mov     rdi, rcx                    ; rhs literal node
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
     call    gen_init_push               ; leaves pushed, forward order
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     rax, [r12 + r14*8]          ; pair ptr, re-derive
     mov     rdi, [rax + AST_A_OFF]      ; lhs
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
     call    gen_lvalue                  ; -> rax(ours) = lhs type; emits
                                          ; the address computation, AFTER
                                          ; the leaves (deliberately)
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     r15, rax                    ; lhs type
     mov     rsi, s_push_rbx
     mov     rdx, s_push_rbx_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_str
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_nl                     ; address pushed LAST
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     r9, r14
     shl     r9, 4
     add     r9, rbx                     ; r9 = this pair's scratch slot
@@ -437,25 +656,93 @@ gen_stmt:
 .p1_not_literal:
     mov     rax, [r12 + r14*8]
     mov     rdi, [rax + AST_A_OFF]      ; lhs
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
     call    gen_lvalue                  ; -> rax(ours) = lhs type; emits
                                          ; address computation
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     r15, rax                    ; lhs type
     mov     rsi, s_push_rbx
     mov     rdx, s_push_rbx_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_str
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_nl                     ; address pushed FIRST
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     rdi, r15
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    is_scalar_loadable_type
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     cmp     rax, 0
     je      .p1_composite
     ; --- SCALAR ---
     mov     rax, [r12 + r14*8]
     mov     rdi, [rax + AST_B_OFF]      ; rhs
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    gen_rvalue                  ; -> target rax = value
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     rsi, s_push_rax
     mov     rdx, s_push_rax_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_str
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_nl
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     r9, r14
     shl     r9, 4
     add     r9, rbx
@@ -483,21 +770,62 @@ gen_stmt:
 .p1_maybe_copy:
     mov     rax, [r12 + r14*8]
     mov     rdi, [rax + AST_B_OFF]      ; rhs
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    gen_lvalue                  ; -> rax(ours) = rhs type; emits
                                          ; src address computation
-    push    rax                         ; protect rhs type across types_equal
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rax                         ; protect rhs type across
+                                         ; types_equal ourselves
     mov     rdi, rax
     mov     rsi, r15                    ; lhs type
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    types_equal
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     pop     rcx                         ; rhs type back
     cmp     rax, 0
     je      .p1_broadcast_composite_check
     ; --- COPY ---
     mov     rsi, s_push_rbx
     mov     rdx, s_push_rbx_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_str
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_nl                     ; src addr pushed (on top of the
                                          ; dest addr already pushed above)
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     r9, r14
     shl     r9, 4
     add     r9, rbx
@@ -506,6 +834,11 @@ gen_stmt:
     jmp     .p1_next
 
 .p1_broadcast_composite_check:
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     push    rcx                         ; rhs type -- protect across
                                          ; is_scalar_loadable_type below;
                                          ; rcx is never trustworthy across
@@ -514,21 +847,66 @@ gen_stmt:
     mov     rdi, rcx
     call    is_scalar_loadable_type
     pop     rcx
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     cmp     rax, 0
     je      .p1_broadcast_unsupported
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     mov     rdi, rcx
     call    emit_sized_load             ; loads from (target) src addr
                                          ; into target rax
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     jmp     .p1_broadcast_push
 .p1_broadcast_scalar:
     mov     rax, [r12 + r14*8]
     mov     rdi, [rax + AST_B_OFF]
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    gen_rvalue                  ; -> target rax = value
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
 .p1_broadcast_push:
     mov     rsi, s_push_rax
     mov     rdx, s_push_rax_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_str
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_nl
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     r9, r14
     shl     r9, 4
     add     r9, rbx
@@ -564,56 +942,236 @@ gen_stmt:
     ; shape == 3 (BROADCAST)
     mov     rsi, s_pop_rax
     mov     rdx, s_pop_rax_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_str
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_nl                     ; target rax = value
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     rsi, s_pop_rbx
     mov     rdx, s_pop_rbx_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_str
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_nl                     ; target rbx = address
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     rdi, [r15 + AST_A_OFF]      ; element type
     mov     rsi, [r15 + AST_B_OFF]      ; element count
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
     call    gen_composite_broadcast
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     jmp     .assign_pass2
 
 .p2_scalar:
     mov     rsi, s_pop_rax
     mov     rdx, s_pop_rax_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_str
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_nl                     ; target rax = value
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     rsi, s_pop_rbx
     mov     rdx, s_pop_rbx_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_str
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_nl                     ; target rbx = address
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     rdi, r15
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
     call    emit_sized_store
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     jmp     .assign_pass2
 
 .p2_literal:
     mov     rsi, s_pop_rbx
     mov     rdx, s_pop_rbx_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_str
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_nl                     ; target rbx = address (pushed
                                          ; last in pass 1 for this shape)
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     rax, [r12 + r14*8]          ; pair ptr, re-derive
     mov     rdi, [rax + AST_B_OFF]      ; rhs literal node
     mov     rsi, r15                    ; expected type = lhs type
     xor     rdx, rdx                    ; accumulated offset = 0
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
     call    gen_init_pop_store
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     jmp     .assign_pass2
 
 .p2_copy:
     mov     rsi, s_pop_rsi
     mov     rdx, s_pop_rsi_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_str
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_nl                     ; target rsi = src (pushed last)
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     rsi, s_pop_rdi
     mov     rdx, s_pop_rdi_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_str
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_nl                     ; target rdi = dest
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     rdi, r15
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
     call    type_size
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     rdi, rax
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
     call    emit_rep_movsb_copy
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     jmp     .assign_pass2
 
 .assign_done:
@@ -637,14 +1195,19 @@ gen_block:
     push    r14
     mov     rbx, rdi
     mov     r13, [rbx + AST_A_OFF]      ; stmts ptr
-    mov     r14, [rbx + AST_B_OFF]      ; stmt_count
+    mov     r14, [rbx + AST_B_OFF]      ; stmt_count -- rbx itself is not
+                                         ; read again after this point
     xor     rcx, rcx
 .loop:
     cmp     rcx, r14
     jae     .done
     push    rcx
     mov     rdi, [r13 + rcx*8]
+    push    r13
+    push    r14
     call    gen_stmt
+    pop     r14
+    pop     r13
     pop     rcx
     inc     rcx
     jmp     .loop
@@ -672,20 +1235,31 @@ gen_func_block:
     jae     .decls_done
     push    rcx
     mov     rdi, [r13 + rcx*8]
+    push    rbx
+    push    r13
+    push    r14
     call    gen_decl
+    pop     r14
+    pop     r13
+    pop     rbx
     pop     rcx
     inc     rcx
     jmp     .decl_loop
 .decls_done:
     mov     r13, [rbx + AST_C_OFF]      ; stmts ptr
-    mov     r14, [rbx + AST_D_OFF]      ; stmt_count
+    mov     r14, [rbx + AST_D_OFF]      ; stmt_count -- rbx itself is not
+                                         ; read again after this point
     xor     rcx, rcx
 .stmt_loop:
     cmp     rcx, r14
     jae     .done
     push    rcx
     mov     rdi, [r13 + rcx*8]
+    push    r13
+    push    r14
     call    gen_stmt
+    pop     r14
+    pop     r13
     pop     rcx
     inc     rcx
     jmp     .stmt_loop

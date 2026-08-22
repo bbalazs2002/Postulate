@@ -14,6 +14,13 @@
 ; contributes nothing at this level (purely a layout fact, consumed via
 ; type_size/field_offset elsewhere). AST_EXTERN_DECL likewise -- it only
 ; ever affects AST_EX_CALL codegen (codegen_expr.asm's gen_extern_call).
+;
+; Register-safety convention (applies to every routine in this file): no
+; callee, including the trivial ones (emit_str/emit_dec/emit_nl), is
+; ever trusted to leave any register untouched across a call. Whenever a
+; value must survive a call, the function that needs it pushes it
+; immediately before that one call and pops it immediately after -- never
+; spanning more than one call per push/pop pair.
 
 %include "config.inc"
 %include "tokens.inc"
@@ -159,7 +166,11 @@ compute_local_offsets:
     imul    rax, rax, LOCAL_ENTRY_SIZE
     lea     rax, [local_table + rax]
     mov     rdi, [rax + LTE_TYPE_PTR]
+    push    rbx
+    push    r12
     call    type_size
+    pop     r12
+    pop     rbx
     add     r12, rax
     mov     rax, r12
     pop     rcx
@@ -188,16 +199,24 @@ emit_param_copy:
     push    r13
     mov     r12, rsi                     ; arg byte offset
     mov     r13, rdx                     ; local stack offset
-    push    rdi                          ; protect type ptr across both
-                                          ; queries (never trust a
-                                          ; caller-saved reg across a call)
-    call    type_size
-    mov     rbx, rax                     ; size
-    pop     rdi
     push    rdi
-    call    is_signed_type
-    mov     rdx, rax                     ; signed?
+    push    r12
+    push    r13
+    call    type_size
+    pop     r13
+    pop     r12
     pop     rdi
+    mov     rbx, rax                     ; size
+    push    rbx
+    push    rdi
+    push    r12
+    push    r13
+    call    is_signed_type
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rbx
+    mov     rdx, rax                     ; signed?
     cmp     rbx, 1
     je      .b1
     cmp     rbx, 2
@@ -239,12 +258,26 @@ emit_param_copy:
     mov     rsi, s_mov_rax_qword_from
     mov     rdx, s_mov_rax_qword_from_len
 .load_emit:
+    push    rbx
+    push    r12
+    push    r13
     call    emit_str
-    mov     rax, r12
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rax, r12                     ; r12's last use
+    push    rbx
+    push    r13
     call    emit_dec
+    pop     r13
+    pop     rbx
     mov     rsi, s_close_bracket_nl
     mov     rdx, s_close_bracket_nl_len
+    push    rbx
+    push    r13
     call    emit_str
+    pop     r13
+    pop     rbx
 
     cmp     rbx, 1
     je      .s1
@@ -254,8 +287,10 @@ emit_param_copy:
     je      .s4
     mov     rsi, s_mov_qword_rbp_minus
     mov     rdx, s_mov_qword_rbp_minus_len
+    push    r13
     call    emit_str
-    mov     rax, r13
+    pop     r13
+    mov     rax, r13                     ; r13's last use
     call    emit_dec
     mov     rsi, s_comma_rax_nl
     mov     rdx, s_comma_rax_nl_len
@@ -264,7 +299,9 @@ emit_param_copy:
 .s1:
     mov     rsi, s_mov_byte_rbp_minus
     mov     rdx, s_mov_byte_rbp_minus_len
+    push    r13
     call    emit_str
+    pop     r13
     mov     rax, r13
     call    emit_dec
     mov     rsi, s_comma_al_nl
@@ -274,7 +311,9 @@ emit_param_copy:
 .s2:
     mov     rsi, s_mov_word_rbp_minus
     mov     rdx, s_mov_word_rbp_minus_len
+    push    r13
     call    emit_str
+    pop     r13
     mov     rax, r13
     call    emit_dec
     mov     rsi, s_comma_ax_nl
@@ -284,7 +323,9 @@ emit_param_copy:
 .s4:
     mov     rsi, s_mov_dword_rbp_minus
     mov     rdx, s_mov_dword_rbp_minus_len
+    push    r13
     call    emit_str
+    pop     r13
     mov     rax, r13
     call    emit_dec
     mov     rsi, s_comma_eax_nl
@@ -316,7 +357,11 @@ gen_function:
     cmp     rax, 0
     je      .ret_ok
     mov     rdi, rax
+    push    rbx
+    push    r12
     call    is_scalar_loadable_type
+    pop     r12
+    pop     rbx
     cmp     rax, 0
     jne     .ret_ok
     mov     rsi, msg_composite_return_unsupported
@@ -326,39 +371,93 @@ gen_function:
 
     mov     rdi, r12
     mov     rsi, [rbx + AST_C_OFF]       ; body (func_block)
+    push    rbx
+    push    r12
     call    build_local_table
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
     call    compute_local_offsets
+    pop     r12
+    pop     rbx
     mov     r13, rax                     ; locals_size
 
     mov     rsi, s_pf_prefix
     mov     rdx, s_pf_prefix_len
+    push    rbx
+    push    r12
+    push    r13
     call    emit_str
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     rax, [r12 + AST_A_OFF]       ; name_offset
     mov     rsi, [parser_src_buf]
     add     rsi, rax
     mov     rdx, [r12 + AST_B_OFF]       ; name_len
+    push    rbx
+    push    r12
+    push    r13
     call    emit_str
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     rsi, s_colon_nl
     mov     rdx, s_colon_nl_len
+    push    rbx
+    push    r12
+    push    r13
     call    emit_str
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     rsi, s_push_rbp
     mov     rdx, s_push_rbp_len
+    push    rbx
+    push    r12
+    push    r13
     call    emit_str
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     rsi, s_mov_rbp_rsp
     mov     rdx, s_mov_rbp_rsp_len
+    push    rbx
+    push    r12
+    push    r13
     call    emit_str
+    pop     r13
+    pop     r12
+    pop     rbx
     cmp     r13, 0
     je      .no_locals
     mov     rsi, s_sub_rsp_
     mov     rdx, s_sub_rsp__len
+    push    rbx
+    push    r12
+    push    r13
     call    emit_str
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     rax, r13
+    push    rbx
+    push    r12
     call    emit_dec
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
     call    emit_nl
+    pop     r12
+    pop     rbx
 .no_locals:
 
     ; per-param copy: local_table[0 .. param_count) are exactly the
-    ; params, in order (build_local_table adds params before decls).
+    ; params, in order (build_local_table adds params before decls). r12
+    ; (signature ptr) is not read again anywhere after this point, so it
+    ; needs no further protection.
     mov     r14, [r12 + AST_C_OFF]       ; params ptr
     mov     r13, [r12 + AST_D_OFF]       ; param_count (locals_size no
                                           ; longer needed)
@@ -368,10 +467,18 @@ gen_function:
     jae     .params_done
     mov     rax, [r14 + r15*8]           ; AST_PARAM ptr
     mov     rdi, [rax + AST_C_OFF]       ; declared type
+    push    rbx
+    push    r13
+    push    r14
+    push    r15
     call    is_scalar_loadable_type      ; params cross the call boundary
                                           ; (unlike plain decls, ld. file
                                           ; header) -- must stay scalar/
                                           ; pointer this phase
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     rbx
     cmp     rax, 0
     jne     .param_type_ok
     mov     rsi, msg_composite_param_unsupported
@@ -382,20 +489,38 @@ gen_function:
     imul    rax, rax, LOCAL_ENTRY_SIZE
     lea     rax, [local_table + rax]     ; this param's local_table entry
     mov     rdi, rax
+    push    rbx
+    push    r13
+    push    r14
+    push    r15
     call    local_stack_offset           ; -> rax = local stack offset
-    mov     rcx, rax                     ; stash (rcx unused elsewhere here)
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     rbx
+    mov     rcx, rax                     ; stash -- not held across any
+                                          ; further call before its use
+                                          ; just below
 
     mov     rax, [r14 + r15*8]
     mov     rdi, [rax + AST_C_OFF]       ; declared type
     mov     rsi, r15
     imul    rsi, rsi, 8                  ; arg byte offset = index*8
     mov     rdx, rcx                     ; local stack offset
+    push    rbx
+    push    r13
+    push    r14
+    push    r15
     call    emit_param_copy
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     rbx
 
     inc     r15
     jmp     .param_loop
 .params_done:
-    mov     rdi, [rbx + AST_C_OFF]       ; body
+    mov     rdi, [rbx + AST_C_OFF]       ; body -- rbx's last use
     call    gen_func_block
 
     mov     rsi, s_epilogue_label
@@ -437,7 +562,10 @@ gen_program:
     push    r15
     mov     rbx, rdi
     mov     r12, [rbx + AST_A_OFF]       ; decls ptr
-    mov     r13, [rbx + AST_B_OFF]       ; decl_count
+    mov     r13, [rbx + AST_B_OFF]       ; decl_count -- rbx itself is
+                                          ; never read again after this
+                                          ; point, so it needs no further
+                                          ; protection in this function
     xor     r14, r14                     ; main function node, 0 = not found
     xor     rcx, rcx
 .scan_loop:
@@ -455,11 +583,17 @@ gen_program:
     add     rdi, [rax + AST_A_OFF]       ; name text
     mov     rsi, str_main
     mov     rdx, 4
+    push    r12
+    push    r13
     call    bytes_equal
+    pop     r13
+    pop     r12
     pop     rcx
     cmp     rax, 1
     jne     .scan_next
-    mov     r14, [r12 + rcx*8]           ; found main
+    mov     r14, [r12 + rcx*8]           ; found main -- write-only across
+                                          ; the call above, so r14 itself
+                                          ; never needed protecting there
 .scan_next:
     inc     rcx
     jmp     .scan_loop
@@ -479,22 +613,40 @@ gen_program:
 .main_params_ok:
     mov     rsi, s_header
     mov     rdx, s_header_len
+    push    r12
+    push    r13
+    push    r14
     call    emit_str
+    pop     r14
+    pop     r13
+    pop     r12
     mov     rax, [r14 + AST_B_OFF]       ; main's return type, 0 = void
     cmp     rax, 0
     jne     .nonvoid_main
     mov     rsi, s_mov_rdi_0
     mov     rdx, s_mov_rdi_0_len
+    push    r12
+    push    r13
     call    emit_str
+    pop     r13
+    pop     r12
     jmp     .exit_tail
 .nonvoid_main:
     mov     rsi, s_mov_rdi_rax
     mov     rdx, s_mov_rdi_rax_len
+    push    r12
+    push    r13
     call    emit_str
+    pop     r13
+    pop     r12
 .exit_tail:
     mov     rsi, s_exit_tail
     mov     rdx, s_exit_tail_len
+    push    r12
+    push    r13
     call    emit_str
+    pop     r13
+    pop     r12
 
     xor     rcx, rcx
 .gen_loop:
@@ -505,7 +657,11 @@ gen_program:
     jne     .gen_next
     push    rcx
     mov     rdi, rax
+    push    r12
+    push    r13
     call    gen_function
+    pop     r13
+    pop     r12
     pop     rcx
 .gen_next:
     inc     rcx

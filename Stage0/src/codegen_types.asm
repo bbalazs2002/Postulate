@@ -71,7 +71,13 @@ type_size:
     jmp     .done
 .array:
     mov     rdi, [rbx + AST_A_OFF]      ; element type
+    push    rbx                         ; protect the array node across the
+                                         ; recursive call ourselves -- we
+                                         ; own the obligation to keep it
+                                         ; alive, not the callee (even when
+                                         ; the callee is ourselves)
     call    type_size
+    pop     rbx
     mov     rcx, [rbx + AST_B_OFF]      ; element count
     imul    rax, rcx
 .done:
@@ -116,11 +122,20 @@ struct_size:
 .loop:
     cmp     rcx, r13
     jae     .done
-    push    rcx
     mov     rax, [r12 + rcx*8]          ; AST_FIELD_DECL ptr
     mov     rdi, [rax + AST_C_OFF]      ; field type
+    push    rcx
+    push    r12
+    push    r13
+    push    r14                         ; every one of our own live locals,
+                                         ; protected across the call by us
+                                         ; -- next iteration needs r12/r13
+                                         ; back, and r14 is our accumulator
     call    type_size
+    pop     r14
     add     r14, rax
+    pop     r13
+    pop     r12
     pop     rcx
     inc     rcx
     jmp     .loop
@@ -144,7 +159,9 @@ field_offset:
     push    r13
     push    r14
     push    r15
-    mov     rbx, rdi                    ; struct decl
+    mov     rbx, rdi                    ; struct decl (only read once,
+                                         ; below -- never needs protecting
+                                         ; across a call)
     mov     r12, rsi                    ; query name_offset
     mov     r13, rdx                    ; query name_len
     mov     r14, [rbx + AST_C_OFF]      ; fields ptr
@@ -159,10 +176,15 @@ field_offset:
     jne     .next
     push    rax
     push    rcx
-    push    r9                          ; field_count -- no callee is
-                                         ; trusted to leave any register
-                                         ; untouched across a call in this
-                                         ; codebase, not even r8-r15
+    push    r9
+    push    r12
+    push    r13
+    push    r14
+    push    r15                         ; every one of our own live locals,
+                                         ; protected across the call by us
+                                         ; -- we never trust bytes_equal (or
+                                         ; anything it calls) to leave any
+                                         ; register alone on our behalf
     mov     rdi, [parser_src_buf]
     add     rdi, [rax + AST_A_OFF]
     mov     rsi, [parser_src_buf]
@@ -173,6 +195,10 @@ field_offset:
                                          ; pops below, which restore rax to
                                          ; the field_decl ptr, not the
                                          ; comparison result
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
     pop     r9
     pop     rcx
     pop     rax
@@ -180,16 +206,19 @@ field_offset:
     jne     .found
 .next:
     push    rax
-    push    rcx                         ; type_size's builtin-size lookup
-                                         ; uses rcx as its own scratch
-                                         ; (lea rcx, [int_type_sizes]) --
-                                         ; must protect our loop index
-                                         ; across the call
-    push    r9                          ; field_count -- same "never trust
-                                         ; a register across a call" rule
+    push    rcx
+    push    r9
+    push    r12
+    push    r13
+    push    r14
+    push    r15                         ; same rule for the type_size call
     mov     rdi, [rax + AST_C_OFF]
     call    type_size
+    pop     r15
     add     r15, rax
+    pop     r14
+    pop     r13
+    pop     r12
     pop     r9
     pop     rcx
     pop     rax
@@ -241,11 +270,14 @@ field_type:
     jne     .next
     push    rax
     push    rcx
-    push    r9                          ; field_count
-    push    r8                          ; fields ptr -- no callee is
-                                         ; trusted to leave any register
-                                         ; untouched across a call here,
-                                         ; not even r8-r15
+    push    r9
+    push    r8
+    push    r12
+    push    r13                         ; every one of our own live locals,
+                                         ; protected across the call by us
+                                         ; -- next iteration needs all of
+                                         ; them back, and we never trust
+                                         ; bytes_equal to leave them alone
     mov     rdi, [parser_src_buf]
     add     rdi, [rax + AST_A_OFF]
     mov     rsi, [parser_src_buf]
@@ -253,6 +285,8 @@ field_type:
     mov     rdx, r13
     call    bytes_equal
     mov     r10, rax
+    pop     r13
+    pop     r12
     pop     r8
     pop     r9
     pop     rcx

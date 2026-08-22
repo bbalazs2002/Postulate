@@ -10,6 +10,18 @@
 ; separate, not-yet-designed future phase (ld. codegen spec). Anything
 ; outside scope hits codegen_fail with a clear diagnostic rather than
 ; emitting wrong code.
+;
+; Register-safety convention (applies to every routine in this file): no
+; callee, including the trivial ones (emit_str/emit_dec/emit_nl), is
+; ever trusted to leave any register untouched across a call. Whenever a
+; value must survive a call, the function that needs it pushes it
+; immediately before that one call and pops it immediately after -- never
+; spanning more than one call per push/pop pair. "rbx"/etc named in
+; comments describing emitted text (e.g. "target rbx = address") refer
+; to the EMITTED PROGRAM's runtime register, not this compiler's own rbx
+; hardware register used for bookkeeping -- the two are entirely
+; unrelated (emitting the text "push rbx" is just string manipulation,
+; it never touches our own rbx).
 
 %include "config.inc"
 %include "tokens.inc"
@@ -292,7 +304,11 @@ codegen_fail:
     mov     qword [err_cursor], 0
     mov     rsi, msg_codegen_prefix
     mov     rdx, msg_codegen_prefix_len
+    push    rbx
+    push    r12
     call    err_append_str
+    pop     r12
+    pop     rbx
     mov     rsi, rbx
     mov     rdx, r12
     call    err_append_str
@@ -341,7 +357,8 @@ emit_dec:
     mov     rsi, r12
     lea     rdx, [rbx + 32]
     sub     rdx, r12
-    call    emit_str
+    call    emit_str                    ; nothing of ours is needed after
+                                         ; this, so no protection required
     add     rsp, 32
     pop     r13
     pop     r12
@@ -375,7 +392,9 @@ emit_label_num:
     mov     rbx, rax
     mov     rsi, s_dotL
     mov     rdx, s_dotL_len
+    push    rbx
     call    emit_str
+    pop     rbx
     mov     rax, rbx
     call    emit_dec
     pop     rbx
@@ -392,14 +411,10 @@ emit_sized_load:
     push    r12
     push    r13
     mov     r12, rdi                    ; type node
+    push    r12
     call    type_size
-    mov     r13, rax                    ; size -- NOT rcx: a second call
-                                         ; (is_signed_type) follows before
-                                         ; this is consumed, and rcx isn't
-                                         ; provably safe across any call
-                                         ; here (ld. type_size's own rcx
-                                         ; scratch use, same lesson as
-                                         ; field_offset)
+    pop     r12
+    mov     r13, rax                    ; size
     mov     rdi, r12
     call    is_signed_type
     mov     rdx, rax                    ; signed?
@@ -534,9 +549,15 @@ emit_label_def:
     push    rdx
     mov     rsi, s_dotL
     mov     rdx, s_dotL_len
+    push    rbx
+    push    r12
     call    emit_str
+    pop     r12
+    pop     rbx
     mov     rax, rbx
+    push    r12
     call    emit_dec
+    pop     r12
     pop     rdx
     mov     rsi, r12
     call    emit_str
@@ -555,9 +576,15 @@ emit_label_ref:
     push    rdx
     mov     rsi, s_dotL
     mov     rdx, s_dotL_len
+    push    rbx
+    push    r12
     call    emit_str
+    pop     r12
+    pop     rbx
     mov     rax, rbx
+    push    r12
     call    emit_dec
+    pop     r12
     pop     rdx
     mov     rsi, r12
     call    emit_str
@@ -597,7 +624,7 @@ gen_lvalue:
 .ident:
     mov     rdi, [rbx + AST_A_OFF]
     mov     rsi, [rbx + AST_B_OFF]
-    call    gen_named_local_addr
+    call    gen_named_local_addr        ; nothing of ours needed after
     jmp     .exit
 
 ; INDEX: gen_lvalue(base) -> rbx; push rbx; gen_rvalue(index) -> rax;
@@ -606,36 +633,63 @@ gen_lvalue:
 ; resolve through the same UNARY(*)/IDENT lvalue rules, no special-casing.
 .index:
     mov     rdi, [rbx + AST_A_OFF]      ; base
+    push    rbx
     call    gen_lvalue                  ; -> target rbx = base addr;
                                          ; rax(ours) = base type (an array)
+    pop     rbx
     mov     r12, rax                    ; base (array) type
     mov     rsi, s_push_rbx
     mov     rdx, s_push_rbx_len
+    push    rbx
+    push    r12
     call    emit_str
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
     call    emit_nl
+    pop     r12
+    pop     rbx
     mov     rdi, [rbx + AST_B_OFF]      ; index expr
+    push    r12
     call    gen_rvalue                  ; -> target rax = index value
+    pop     r12
     mov     rdi, [r12 + AST_A_OFF]      ; element type
+    push    r12
     call    type_size                   ; pure compile-time computation --
                                          ; doesn't touch the target's rax
-    mov     r13, rax                    ; elem_size -- rcx is NOT safe
-                                         ; across emit_str (it's emit_str's
-                                         ; own copy-loop counter, always
-                                         ; left at 0)
+    pop     r12
+    mov     r13, rax                    ; elem_size
     mov     rsi, s_imul_rax_
     mov     rdx, s_imul_rax__len
+    push    r12
+    push    r13
     call    emit_str
+    pop     r13
+    pop     r12
     mov     rax, r13
+    push    r12
     call    emit_dec
+    pop     r12
+    push    r12
     call    emit_nl
+    pop     r12
     mov     rsi, s_pop_rbx
     mov     rdx, s_pop_rbx_len
+    push    r12
     call    emit_str
+    pop     r12
+    push    r12
     call    emit_nl
+    pop     r12
     mov     rsi, s_add_rbx_rax
     mov     rdx, s_add_rbx_rax_len
+    push    r12
     call    emit_str
+    pop     r12
+    push    r12
     call    emit_nl
+    pop     r12
     mov     rax, [r12 + AST_A_OFF]      ; result type = element type
     jmp     .exit
 
@@ -643,30 +697,46 @@ gen_lvalue:
 ; already rejects field access through a pointer without an explicit *).
 .field:
     mov     rdi, [rbx + AST_A_OFF]      ; base
+    push    rbx
     call    gen_lvalue                  ; -> target rbx = base addr;
                                          ; rax(ours) = base type (a
                                          ; struct-name AST_TY_BASE)
+    pop     rbx
     mov     rdi, [rax + AST_B_OFF]      ; struct name_offset
     mov     rsi, [rax + AST_C_OFF]      ; struct name_len
+    push    rbx
     call    lookup_struct
+    pop     rbx
     mov     r12, [rax + STE_DECL_PTR]   ; struct decl
     mov     rdi, r12
     mov     rsi, [rbx + AST_B_OFF]      ; field name_offset
     mov     rdx, [rbx + AST_C_OFF]      ; field name_len
+    push    rbx
+    push    r12
     call    field_offset
-    mov     r13, rax                    ; offset -- rcx is NOT safe here,
-                                         ; emit_str clobbers it as its own
-                                         ; copy-loop counter (and always
-                                         ; leaves it at 0, which is why
-                                         ; this looked like "every field
-                                         ; is at offset 0" when it used
-                                         ; rcx instead)
+    pop     r12
+    pop     rbx
+    mov     r13, rax                    ; offset
     mov     rsi, s_add_rbx_
     mov     rdx, s_add_rbx__len
+    push    rbx
+    push    r12
+    push    r13
     call    emit_str
+    pop     r13
+    pop     r12
+    pop     rbx
     mov     rax, r13
+    push    rbx
+    push    r12
     call    emit_dec
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
     call    emit_nl
+    pop     r12
+    pop     rbx
     mov     rdi, r12
     mov     rsi, [rbx + AST_B_OFF]
     mov     rdx, [rbx + AST_C_OFF]
@@ -688,8 +758,12 @@ gen_lvalue:
     mov     r12, rax
     mov     rsi, s_mov_rbx_rax
     mov     rdx, s_mov_rbx_rax_len
+    push    r12
     call    emit_str
+    pop     r12
+    push    r12
     call    emit_nl
+    pop     r12
     mov     rax, [r12 + AST_A_OFF]      ; result type = pointee type
     jmp     .exit
 
@@ -714,17 +788,29 @@ gen_named_local_addr:
     call    lookup_local
     mov     r12, rax                    ; local_table entry ptr
     mov     rdi, r12
+    push    r12
     call    local_stack_offset
-    mov     r13, rax                    ; offset, protected across emit_str
+    pop     r12
+    mov     r13, rax                    ; offset
     mov     rsi, s_lea_rbx_rbp_minus
     mov     rdx, s_lea_rbx_rbp_minus_len
+    push    r12
+    push    r13
     call    emit_str
+    pop     r13
+    pop     r12
     mov     rax, r13
+    push    r12
     call    emit_dec
+    pop     r12
     mov     rsi, s_close_bracket
     mov     rdx, s_close_bracket_len
+    push    r12
     call    emit_str
+    pop     r12
+    push    r12
     call    emit_nl
+    pop     r12
     mov     rax, [r12 + LTE_TYPE_PTR]
     pop     r13
     pop     r12
@@ -770,7 +856,9 @@ gen_rvalue:
 .int:
     mov     rsi, s_mov_rax_
     mov     rdx, s_mov_rax__len
+    push    rbx
     call    emit_str
+    pop     rbx
     mov     rax, [rbx + AST_A_OFF]
     call    emit_dec
     call    emit_nl
@@ -814,7 +902,9 @@ gen_rvalue:
     call    gen_lvalue                  ; -> rax = type; emits address calc
     mov     r12, rax
     mov     rdi, r12
+    push    r12
     call    is_scalar_loadable_type
+    pop     r12
     cmp     rax, 0
     jne     .load_ok
     mov     rsi, msg_composite_as_scalar
@@ -822,7 +912,9 @@ gen_rvalue:
     call    codegen_fail
 .load_ok:
     mov     rdi, r12
+    push    r12
     call    emit_sized_load             ; emits "<mov/movsx/movzx> rax, ... [rbx]"
+    pop     r12
     mov     rax, r12
     jmp     .exit
 
@@ -845,8 +937,12 @@ gen_rvalue:
     mov     r12, rax
     mov     rsi, s_neg_rax
     mov     rdx, s_neg_rax_len
+    push    r12
     call    emit_str
+    pop     r12
+    push    r12
     call    emit_nl
+    pop     r12
     mov     rax, r12
     jmp     .exit
 .lnot:
@@ -868,7 +964,9 @@ gen_rvalue:
                                          ; address calc into target rbx
     mov     r12, rax
     mov     rdi, r12
+    push    r12
     call    is_scalar_loadable_type
+    pop     r12
     cmp     rax, 0
     jne     .deref_ok
     mov     rsi, msg_composite_as_scalar
@@ -876,7 +974,9 @@ gen_rvalue:
     call    codegen_fail
 .deref_ok:
     mov     rdi, r12
+    push    r12
     call    emit_sized_load
+    pop     r12
     mov     rax, r12
     jmp     .exit
 
@@ -888,15 +988,19 @@ gen_rvalue:
     mov     rdi, [rbx + AST_B_OFF]      ; operand
     call    gen_lvalue                  ; -> rax(ours) = operand type;
                                          ; emits address calc into target rbx
-    mov     r12, rax                    ; operand type, saved before the
-                                         ; ast_alloc_node call below needs
-                                         ; rax/rdi for its own purposes
+    mov     r12, rax                    ; operand type
     mov     rsi, s_mov_rax_rbx
     mov     rdx, s_mov_rax_rbx_len
+    push    r12
     call    emit_str
+    pop     r12
+    push    r12
     call    emit_nl
+    pop     r12
     mov     rdi, AST_TY_POINTER
+    push    r12
     call    ast_alloc_node
+    pop     r12
     mov     [rax + AST_A_OFF], r12
     jmp     .exit
 
@@ -913,62 +1017,132 @@ gen_rvalue:
     cmp     rax, TOK_OROR
     je      .lor
     mov     rdi, [rbx + AST_B_OFF]      ; left
+    push    rbx
     call    gen_rvalue
+    pop     rbx
     mov     r12, rax                    ; operand type (both sides equal)
     mov     rsi, s_push_rax
     mov     rdx, s_push_rax_len
+    push    rbx
+    push    r12
     call    emit_str
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
     call    emit_nl
+    pop     r12
+    pop     rbx
     mov     rdi, [rbx + AST_C_OFF]      ; right
+    push    rbx
+    push    r12
     call    gen_rvalue
+    pop     r12
+    pop     rbx
     mov     rsi, s_mov_rcx_rax
     mov     rdx, s_mov_rcx_rax_len
+    push    rbx
+    push    r12
     call    emit_str
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
     call    emit_nl
+    pop     r12
+    pop     rbx
     mov     rsi, s_pop_rax
     mov     rdx, s_pop_rax_len
+    push    rbx
+    push    r12
     call    emit_str
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
     call    emit_nl
+    pop     r12
+    pop     rbx
     mov     r13, r12                    ; protect operand type
     mov     rax, [rbx + AST_A_OFF]      ; op, re-derive
     call    gen_binary_combine          ; in rax=op, r13=operand type
     jmp     .exit
 
 .land:
+    push    rbx
     call    next_label_suffix
+    pop     rbx
     mov     r12, rax                    ; unique suffix for this occurrence
     mov     rdi, [rbx + AST_B_OFF]      ; a
+    push    rbx
+    push    r12
     call    gen_rvalue
+    pop     r12
+    pop     rbx
     mov     rsi, s_cmp_rax_0
     mov     rdx, s_cmp_rax_0_len
+    push    rbx
+    push    r12
     call    emit_str
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
     call    emit_nl
+    pop     r12
+    pop     rbx
     mov     rsi, s_je_dotL
     mov     rdx, s_je_dotL_len
+    push    rbx
+    push    r12
     call    emit_str
+    pop     r12
+    pop     rbx
     mov     rax, r12
     mov     rsi, s_suf_false
     mov     rdx, s_suf_false_len
+    push    rbx
+    push    r12
     call    emit_label_ref
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
     call    emit_nl
+    pop     r12
+    pop     rbx
     mov     rdi, [rbx + AST_C_OFF]      ; b
+    push    r12
     call    gen_rvalue
+    pop     r12
     mov     rsi, s_jmp_dotL
     mov     rdx, s_jmp_dotL_len
+    push    r12
     call    emit_str
+    pop     r12
     mov     rax, r12
     mov     rsi, s_suf_end
     mov     rdx, s_suf_end_len
+    push    r12
     call    emit_label_ref
+    pop     r12
+    push    r12
     call    emit_nl
+    pop     r12
     mov     rax, r12
     mov     rsi, s_suf_false
     mov     rdx, s_suf_false_len
+    push    r12
     call    emit_label_def
+    pop     r12
     mov     rsi, s_mov_rax_0
     mov     rdx, s_mov_rax_0_len
+    push    r12
     call    emit_str
+    pop     r12
+    push    r12
     call    emit_nl
+    pop     r12
     mov     rax, r12
     mov     rsi, s_suf_end
     mov     rdx, s_suf_end_len
@@ -977,40 +1151,80 @@ gen_rvalue:
     jmp     .exit
 
 .lor:
+    push    rbx
     call    next_label_suffix
+    pop     rbx
     mov     r12, rax
     mov     rdi, [rbx + AST_B_OFF]      ; a
+    push    rbx
+    push    r12
     call    gen_rvalue
+    pop     r12
+    pop     rbx
     mov     rsi, s_cmp_rax_0
     mov     rdx, s_cmp_rax_0_len
+    push    rbx
+    push    r12
     call    emit_str
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
     call    emit_nl
+    pop     r12
+    pop     rbx
     mov     rsi, s_jne_dotL
     mov     rdx, s_jne_dotL_len
+    push    rbx
+    push    r12
     call    emit_str
+    pop     r12
+    pop     rbx
     mov     rax, r12
     mov     rsi, s_suf_true
     mov     rdx, s_suf_true_len
+    push    rbx
+    push    r12
     call    emit_label_ref
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
     call    emit_nl
+    pop     r12
+    pop     rbx
     mov     rdi, [rbx + AST_C_OFF]      ; b
+    push    r12
     call    gen_rvalue
+    pop     r12
     mov     rsi, s_jmp_dotL
     mov     rdx, s_jmp_dotL_len
+    push    r12
     call    emit_str
+    pop     r12
     mov     rax, r12
     mov     rsi, s_suf_end
     mov     rdx, s_suf_end_len
+    push    r12
     call    emit_label_ref
+    pop     r12
+    push    r12
     call    emit_nl
+    pop     r12
     mov     rax, r12
     mov     rsi, s_suf_true
     mov     rdx, s_suf_true_len
+    push    r12
     call    emit_label_def
+    pop     r12
     mov     rsi, s_mov_rax_1
     mov     rdx, s_mov_rax_1_len
+    push    r12
     call    emit_str
+    pop     r12
+    push    r12
     call    emit_nl
+    pop     r12
     mov     rax, r12
     mov     rsi, s_suf_end
     mov     rdx, s_suf_end_len
@@ -1024,7 +1238,9 @@ gen_rvalue:
     mov     r13, [rax + AST_B_OFF]      ; callee name_len
     mov     rdi, r12
     mov     rsi, r13
+    push    rbx
     call    lookup_callable
+    pop     rbx
     mov     r14, rax                    ; callable_table entry
     cmp     qword [r14 + CTE_IS_EXTERN], 0
     jne     .call_extern
@@ -1116,16 +1332,24 @@ gen_binary_combine:
     mov     rsi, s_xor_rax_rcx
     mov     rdx, s_xor_rax_rcx_len
 .arith_emit:
+    push    r13
     call    emit_str
+    pop     r13
+    push    r13
     call    emit_nl
+    pop     r13
     mov     rax, r13
     ret
 
 .shl:
     mov     rsi, s_shl_rax_cl
     mov     rdx, s_shl_rax_cl_len
+    push    r13
     call    emit_str
+    pop     r13
+    push    r13
     call    emit_nl
+    pop     r13
     mov     rax, r13
     ret
 .shr:
@@ -1142,8 +1366,12 @@ gen_binary_combine:
     mov     rsi, s_shr_rax_cl
     mov     rdx, s_shr_rax_cl_len
 .shr_emit:
+    push    r13
     call    emit_str
+    pop     r13
+    push    r13
     call    emit_nl
+    pop     r13
     mov     rax, r13
     ret
 
@@ -1156,22 +1384,38 @@ gen_binary_combine:
     je      .sdiv_u
     mov     rsi, s_cqo
     mov     rdx, s_cqo_len
+    push    r13
     call    emit_str
+    pop     r13
+    push    r13
     call    emit_nl
+    pop     r13
     mov     rsi, s_idiv_rcx
     mov     rdx, s_idiv_rcx_len
+    push    r13
     call    emit_str
+    pop     r13
+    push    r13
     call    emit_nl
+    pop     r13
     jmp     .sdiv_done
 .sdiv_u:
     mov     rsi, s_xor_rdx_rdx
     mov     rdx, s_xor_rdx_rdx_len
+    push    r13
     call    emit_str
+    pop     r13
+    push    r13
     call    emit_nl
+    pop     r13
     mov     rsi, s_div_rcx
     mov     rdx, s_div_rcx_len
+    push    r13
     call    emit_str
+    pop     r13
+    push    r13
     call    emit_nl
+    pop     r13
 .sdiv_done:
     mov     rax, r13
     ret
@@ -1185,27 +1429,47 @@ gen_binary_combine:
     je      .smod_u
     mov     rsi, s_cqo
     mov     rdx, s_cqo_len
+    push    r13
     call    emit_str
+    pop     r13
+    push    r13
     call    emit_nl
+    pop     r13
     mov     rsi, s_idiv_rcx
     mov     rdx, s_idiv_rcx_len
+    push    r13
     call    emit_str
+    pop     r13
+    push    r13
     call    emit_nl
+    pop     r13
     jmp     .smod_move
 .smod_u:
     mov     rsi, s_xor_rdx_rdx
     mov     rdx, s_xor_rdx_rdx_len
+    push    r13
     call    emit_str
+    pop     r13
+    push    r13
     call    emit_nl
+    pop     r13
     mov     rsi, s_div_rcx
     mov     rdx, s_div_rcx_len
+    push    r13
     call    emit_str
+    pop     r13
+    push    r13
     call    emit_nl
+    pop     r13
 .smod_move:
     mov     rsi, s_mov_rax_rdx
     mov     rdx, s_mov_rax_rdx_len
+    push    r13
     call    emit_str
+    pop     r13
+    push    r13
     call    emit_nl
+    pop     r13
     mov     rax, r13
     ret
 
@@ -1228,8 +1492,12 @@ gen_binary_combine:
 .lt:
     mov     rsi, s_cmp_rax_rcx
     mov     rdx, s_cmp_rax_rcx_len
+    push    r13
     call    emit_str
+    pop     r13
+    push    r13
     call    emit_nl
+    pop     r13
     push    r13
     mov     rdi, r13
     call    is_signed_type
@@ -1246,8 +1514,12 @@ gen_binary_combine:
 .gt:
     mov     rsi, s_cmp_rax_rcx
     mov     rdx, s_cmp_rax_rcx_len
+    push    r13
     call    emit_str
+    pop     r13
+    push    r13
     call    emit_nl
+    pop     r13
     push    r13
     mov     rdi, r13
     call    is_signed_type
@@ -1264,8 +1536,12 @@ gen_binary_combine:
 .le:
     mov     rsi, s_cmp_rax_rcx
     mov     rdx, s_cmp_rax_rcx_len
+    push    r13
     call    emit_str
+    pop     r13
+    push    r13
     call    emit_nl
+    pop     r13
     push    r13
     mov     rdi, r13
     call    is_signed_type
@@ -1282,8 +1558,12 @@ gen_binary_combine:
 .ge:
     mov     rsi, s_cmp_rax_rcx
     mov     rdx, s_cmp_rax_rcx_len
+    push    r13
     call    emit_str
+    pop     r13
+    push    r13
     call    emit_nl
+    pop     r13
     push    r13
     mov     rdi, r13
     call    is_signed_type
@@ -1325,7 +1605,11 @@ syscall_number_for:
     add     rdi, rbx
     mov     rsi, str_sys_read
     mov     rdx, 8
+    push    rbx
+    push    r12
     call    bytes_equal
+    pop     r12
+    pop     rbx
     cmp     rax, 1
     je      .read
 .not_read:
@@ -1335,7 +1619,11 @@ syscall_number_for:
     add     rdi, rbx
     mov     rsi, str_sys_write
     mov     rdx, 9
+    push    rbx
+    push    r12
     call    bytes_equal
+    pop     r12
+    pop     rbx
     cmp     rax, 1
     je      .write
 .not_write:
@@ -1345,7 +1633,11 @@ syscall_number_for:
     add     rdi, rbx
     mov     rsi, str_sys_mmap
     mov     rdx, 8
+    push    rbx
+    push    r12
     call    bytes_equal
+    pop     r12
+    pop     rbx
     cmp     rax, 1
     je      .mmap
 .not_mmap:
@@ -1355,7 +1647,11 @@ syscall_number_for:
     add     rdi, rbx
     mov     rsi, str_sys_exit
     mov     rdx, 8
+    push    rbx
+    push    r12
     call    bytes_equal
+    pop     r12
+    pop     rbx
     cmp     rax, 1
     je      .sys_exit
 .not_exit:
@@ -1395,7 +1691,8 @@ gen_extern_call:
     push    r13
     push    r14
     push    r15
-    mov     rbx, rdi                    ; AST_EX_CALL node
+    mov     rbx, rdi                    ; AST_EX_CALL node -- not read
+                                         ; again after the setup below
     mov     r12, rsi                    ; callable_table entry
     mov     r13, [rbx + AST_B_OFF]      ; args ptr
     mov     r14, [rbx + AST_C_OFF]      ; arg_count
@@ -1406,14 +1703,36 @@ gen_extern_call:
     je      .push_done
     dec     r15
     mov     rdi, [r13 + r15*8]          ; args[r15]
-    push    r15                         ; gen_rvalue doesn't preserve r15
+    push    r15
+    push    r12
+    push    r13
+    push    r14
     call    gen_rvalue                  ; emits code computing the value
                                          ; into the emitted program's rax
+    pop     r14
+    pop     r13
+    pop     r12
     pop     r15
     mov     rsi, s_push_rax             ; emit the matching (target-side)
     mov     rdx, s_push_rax_len         ; "push rax" text
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_str
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_nl
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
     jmp     .push_loop
 .push_done:
     ; pop into the fixed syscall registers, in order rdi/rsi/rdx/rcx(->r10)
@@ -1424,58 +1743,124 @@ gen_extern_call:
     jl      .args_popped
     mov     rsi, s_pop_rdi
     mov     rdx, s_pop_rdi_len
+    push    r12
+    push    r14
     call    emit_str
+    pop     r14
+    pop     r12
+    push    r12
+    push    r14
     call    emit_nl
+    pop     r14
+    pop     r12
     cmp     r14, 2
     jl      .args_popped
     mov     rsi, s_pop_rsi
     mov     rdx, s_pop_rsi_len
+    push    r12
+    push    r14
     call    emit_str
+    pop     r14
+    pop     r12
+    push    r12
+    push    r14
     call    emit_nl
+    pop     r14
+    pop     r12
     cmp     r14, 3
     jl      .args_popped
     mov     rsi, s_pop_rdx
     mov     rdx, s_pop_rdx_len
+    push    r12
+    push    r14
     call    emit_str
+    pop     r14
+    pop     r12
+    push    r12
+    push    r14
     call    emit_nl
+    pop     r14
+    pop     r12
     cmp     r14, 4
     jl      .args_popped
     mov     rsi, s_pop_rcx
     mov     rdx, s_pop_rcx_len
+    push    r12
+    push    r14
     call    emit_str
+    pop     r14
+    pop     r12
+    push    r12
+    push    r14
     call    emit_nl
+    pop     r14
+    pop     r12
     mov     rsi, s_mov_r10_rcx          ; syscall clobbers rcx/r11 itself,
     mov     rdx, s_mov_r10_rcx_len      ; so the 4th arg travels via r10
+    push    r12
+    push    r14
     call    emit_str
+    pop     r14
+    pop     r12
+    push    r12
+    push    r14
     call    emit_nl
+    pop     r14
+    pop     r12
     cmp     r14, 5
     jl      .args_popped
     mov     rsi, s_pop_r8
     mov     rdx, s_pop_r8_len
+    push    r12
+    push    r14
     call    emit_str
+    pop     r14
+    pop     r12
+    push    r12
+    push    r14
     call    emit_nl
+    pop     r14
+    pop     r12
     cmp     r14, 6
     jl      .args_popped
     mov     rsi, s_pop_r9
     mov     rdx, s_pop_r9_len
+    push    r12
     call    emit_str
+    pop     r12
+    push    r12
     call    emit_nl
+    pop     r12
 .args_popped:
     mov     rax, [r12 + CTE_SIG_PTR]
     mov     rdi, [rax + AST_A_OFF]      ; signature's name_offset
     mov     rsi, [rax + AST_B_OFF]      ; name_len
+    push    r12
     call    syscall_number_for
+    pop     r12
     mov     r13, rax                    ; protect across emit_str
     mov     rsi, s_mov_rax_
     mov     rdx, s_mov_rax__len
+    push    r12
+    push    r13
     call    emit_str
+    pop     r13
+    pop     r12
     mov     rax, r13
+    push    r12
     call    emit_dec
+    pop     r12
+    push    r12
     call    emit_nl
+    pop     r12
     mov     rsi, s_syscall
     mov     rdx, s_syscall_len
+    push    r12
     call    emit_str
+    pop     r12
+    push    r12
     call    emit_nl
+    pop     r12
     mov     rax, [r12 + CTE_RET_TYPE]   ; 0 = void
     pop     r15
     pop     r14
@@ -1509,7 +1894,11 @@ gen_user_call:
     cmp     rax, 0
     je      .ret_ok
     mov     rdi, rax
+    push    rbx
+    push    r12
     call    is_scalar_loadable_type
+    pop     r12
+    pop     rbx
     cmp     rax, 0
     jne     .ret_ok
     mov     rsi, msg_composite_call_boundary
@@ -1525,8 +1914,24 @@ gen_user_call:
     je      .no_pad
     mov     rsi, s_push_rax             ; dummy padding, pushed FIRST so
     mov     rdx, s_push_rax_len         ; it ends up farthest from rsp --
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
     call    emit_str                    ; arg1 (pushed last) still lands
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
     call    emit_nl                     ; exactly at [rsp]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
 .no_pad:
     mov     r15, r14                    ; loop index, counts arg_count..1
 .push_loop:
@@ -1535,35 +1940,102 @@ gen_user_call:
     dec     r15
     mov     rdi, [r13 + r15*8]
     push    r15
+    push    r12
+    push    r13
+    push    r14
     call    gen_rvalue                  ; self-guarded; emits value into
                                          ; the target program's rax
+    pop     r14
+    pop     r13
+    pop     r12
     pop     r15
     mov     rsi, s_push_rax
     mov     rdx, s_push_rax_len
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_str
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     call    emit_nl
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
     jmp     .push_loop
 .push_done:
     mov     rsi, s_mov_rdi_rsp
     mov     rdx, s_mov_rdi_rsp_len
+    push    rbx
+    push    r12
+    push    r14
     call    emit_str
+    pop     r14
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r14
     call    emit_nl
+    pop     r14
+    pop     r12
+    pop     rbx
     mov     rsi, s_mov_rsi_
     mov     rdx, s_mov_rsi__len
+    push    rbx
+    push    r12
+    push    r14
     call    emit_str
+    pop     r14
+    pop     r12
+    pop     rbx
     mov     rax, r14
+    push    rbx
+    push    r12
+    push    r14
     call    emit_dec
+    pop     r14
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r14
     call    emit_nl
+    pop     r14
+    pop     r12
+    pop     rbx
 
     mov     rsi, s_call_pf_
     mov     rdx, s_call_pf__len
+    push    rbx
+    push    r12
+    push    r14
     call    emit_str
+    pop     r14
+    pop     r12
+    pop     rbx
     mov     rax, [rbx + AST_A_OFF]      ; callee IDENT node
     mov     rsi, [parser_src_buf]
     add     rsi, [rax + AST_A_OFF]
     mov     rdx, [rax + AST_B_OFF]
-    call    emit_str
+    push    r12
+    push    r14
+    call    emit_str                    ; rbx (AST_EX_CALL node) is not
+                                         ; read again after this
+    pop     r14
+    pop     r12
+    push    r12
+    push    r14
     call    emit_nl
+    pop     r14
+    pop     r12
 
     mov     rax, r14
     imul    rax, rax, 8
@@ -1572,16 +2044,21 @@ gen_user_call:
                                          ; 16 -- correctly (N+1)*8 when N
                                          ; is odd, matching the padding
                                          ; push above
-    mov     r13, rax                    ; padded cleanup size -- rcx is
-                                         ; NOT safe across emit_str (its
-                                         ; own copy-loop counter, always
-                                         ; left at 0)
+    mov     r13, rax                    ; padded cleanup size
     mov     rsi, s_add_rsp_
     mov     rdx, s_add_rsp__len
+    push    r12
+    push    r13
     call    emit_str
+    pop     r13
+    pop     r12
     mov     rax, r13
+    push    r12
     call    emit_dec
+    pop     r12
+    push    r12
     call    emit_nl
+    pop     r12
 
     mov     rax, [r12 + CTE_RET_TYPE]   ; 0 = void
     pop     r15
