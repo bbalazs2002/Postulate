@@ -45,10 +45,15 @@ sub-passes, all still `v1.0.3`:
    classification instead of a separate check). Pointers with a
    composite pointee (`*Point`, `*int32[3]`) remain out of scope — see
    "Sub-pass 5b" below.
-6. **Composite pointees** (not yet done): struct/array-typed pointers
-   (removing the scalar-only restriction `type_ok_local`'s pointer
-   branch still imposes on the pointee). This section of the document
-   will be written when that sub-pass lands.
+6. **Composite pointees** (**done** — see "Sub-pass 5b" below):
+   struct/array-typed pointers (`*Point`, `*int32[3]`, `*(int32[3])`),
+   including a self-referential struct field (`next: *Node`, the
+   canonical linked-list shape) — `type_ok_local`'s pointer branch now
+   classifies the pointee recursively instead of requiring it to be
+   scalar. Pointer-to-pointer (`**T`) remains out of scope, the one
+   restriction this sub-pass keeps deliberately. **This closes out
+   `v1.0.3`** — every sub-pass in this document is now done; the next
+   step in the bootstrap plan is `v1.0.4`.
 
 ## Sub-pass 1: width unification
 
@@ -730,7 +735,122 @@ Write `const tmp := f(); tmp.field;` instead, for now.
 
 ## Sub-pass 5b: composite pointees
 
-Not yet implemented — see this document's "Scope" section above. Will
-be written up here once landed: struct/array-typed pointers, removing
-the scalar-only restriction `type_ok_local`'s pointer branch currently
-imposes on the pointee (`*Point`, `*int32[3]`).
+### The pointee is classified the same recursive way an array element already is
+
+`type_ok_local`'s pointer branch originally required the pointee to
+satisfy plain `type_ok` (scalar only). It now instead recurses --
+`type_ok_local(pointee)` -- exactly the same recursive shape the array
+branch already uses for its own element type, rejecting only a pointee
+that is itself a pointer (`elem_ok.is_pointer`, keeping `**T` out of
+scope) or that fails to classify at all. A struct or array pointee's
+own `struct_node`/`elem_type`/`elem_count` are carried straight through
+into the result.
+
+### `ExprResult`/`SymInfo` reuse their own composite-shape fields a second time, for the pointee
+
+Rather than add a whole parallel set of "pointee struct_node/elem_type/
+elem_count" fields, a pointer value's `is_array`/`struct_node`/
+`elem_type`/`elem_count` are reused to describe the *pointee's* shape
+when a new discriminator, `ptr_pointee_composite`, is true -- the exact
+same kind of context-dependent reuse `elem_type` already has between
+the struct and array cases, one level deeper. `width`/`is_signed` stay
+used for a scalar pointee, as before. A composite pointee's own address
+*is* the pointer's value (`reg`) -- there's never a separate "address
+of the pointee" to track, since every composite value's `reg` already
+*is* its address, and a pointer's `reg` already *is* the value it holds.
+This is what makes `&`/`*` on a composite lvalue/pointee cost **zero
+new instructions** on both sides: `&expr` is `gen_lvalue(expr)`'s own
+address, reclassified as a pointer value; `*p` (composite pointee) is
+`p`'s own value, reclassified back into a composite `ExprResult` --
+no `load`, unlike a scalar pointee's dereference, which still needs
+one. `pack_expr_pointer_composite` is the fourth `ExprResult`
+constructor (alongside `pack_expr`/`pack_expr_composite`/
+`pack_expr_array`/`pack_expr_pointer`), taking the same shape
+`pack_expr_array` does plus the pointer's own `reg`.
+
+### A struct/array literal's pointer-typed field, and an array literal's pointer-typed element, needed their own store shape
+
+`gen_struct_lit` and `gen_array_lit_typed` each only knew two field/
+element value shapes before this sub-pass: composite (whole-aggregate
+copy) or scalar (`coerce_width` + store). A pointer-typed field value
+(`Node { value := 3, next := null }`) is neither -- it needed a third
+shape, a direct `store ptr %v, ptr %faddr` with no `coerce_width` at
+all, mirroring every other pointer store in this file. Same fix in
+both places, same reason. `pack_lvalue_by_type` (used by `gen_lvalue`'s
+own `AST_EX_FIELD`/`AST_EX_INDEX` cases) needed the matching read-side
+fix -- a pointer-typed field is no longer a clean rejection (its own
+sub-pass-4a-era placeholder) but resolves its pointee the same
+recursive way `type_ok_local` does, so `node.next` (a self-referential
+struct field) actually works as an lvalue. `gen_expr`'s own
+`AST_EX_FIELD`/`AST_EX_INDEX` rvalue dispatch needed the same third
+branch (load as `ptr`, not `i<width>`) for reading a pointer-typed
+field as a plain expression value.
+
+### A real bug this sub-pass's own testing caught: reusing `is_struct`/`is_array` without gating on `is_pointer` first
+
+The field-reuse design above has a sharp edge: `TypeOkResult.is_struct`/
+`.is_array` mean "the pointee is a struct/array" whenever `.is_pointer`
+is true, but "this type itself is a struct/array" whenever it's false.
+Every one of this sub-pass's own new checks was written gated correctly
+(`if (rettok.is_pointer) {...} else { if (rettok.is_struct...) }`) --
+but **two pre-existing call sites, both untouched since earlier
+sub-passes, checked `tok.is_struct`/`ptok.is_struct` without that
+gate**, because at the time they were written `is_pointer` and
+`is_struct`/`is_array` genuinely were mutually exclusive:
+
+- `gen_decls`' own top-level dispatch, `if (tok.is_struct) { ... }`,
+  checked *first*, before ever reaching the pointer branch further
+  down. For `mut p : *Point := &pt;`, `tok.is_struct` is now true
+  (Point being the *pointee*), so this decl was silently misrouted
+  into the struct branch -- allocating a `%struct.Point` local and
+  expecting a composite initializer, instead of allocating a `ptr` and
+  expecting a pointer one. Caught immediately: `&pt` (correctly a
+  pointer value) failed the struct branch's own `!e.is_composite`
+  check, a clean `codegen error`, not silently wrong code -- but for
+  the wrong reason, on the wrong branch entirely.
+- `gen_user_call`'s argument-shape classification, `target_is_composite
+  := ptok.is_struct || ptok.is_array`, had the same blind spot: for a
+  `*Point` parameter, this read as "the parameter itself is composite"
+  (true), which then disagreed with the (correctly pointer-shaped)
+  argument's own `is_composite` (false) and rejected the call outright
+  -- `takes(&pt)` failed to compile even though it's exactly the
+  call this sub-pass exists to support.
+
+Both were caught the same way: writing the three-line "declare a
+pointer-to-struct, take its address, pass it somewhere" smoke test and
+running it through the *actual* pipeline, per this project's standing
+"build and run, don't just compile" discipline -- neither failure mode
+would have been caught by code review alone, since both read as
+locally reasonable before the pointee-reuse design existed. Fixed by
+auditing every `.is_struct`/`.is_array` check in the file for the same
+blind spot (`grep`, by hand) and adding an explicit `!tok.is_pointer`
+(or folding `is_pointer` into the same rejecting condition) at each
+one that wasn't already naturally gated by an enclosing `if
+(...is_pointer) {...} else {...}` -- including two array-broadcast
+`elem_tok` checks (`gen_decls`, `gen_assign_stmt`) that had the same
+latent shape but weren't yet reachable by any test (broadcasting into
+an array of pointers), fixed defensively at the same time rather than
+left for the next person to rediscover.
+
+## Testing (sub-pass 5b, composite pointees)
+
+End-to-end (`llc`+`ld`+actually **run**), via `Stage1/tests/codegen_
+cases/08_composite_pointees.ptl`: a `*Point` round-trip (`&pt`, then
+`(*pp).x := 100;` observed through `pt` itself, the pointer-to-struct
+analogue of the pointer sub-pass's own scalar round-trip test); a
+three-node linked list (`struct Node { value: int32; next: *Node; }`,
+the canonical self-referential shape this sub-pass exists to unlock)
+walked with a `while`/`==`-`null` loop via `(*cur).value`/`(*cur).next`
+chains; an array of pointers (`*int32[3]`, the *default* `*T[N]`
+reading per v0's own grammar, §2.5) with an element written through
+via `*ptrs[1] := 999;`; and a pointer to a whole array (`*(int32[3])`,
+the parenthesized reading of the same grammar rule) written through
+via `(*parr)[1] := 777;`. Verified by hand-computed and
+Docker-confirmed exit code (`1928 mod 256 = 136`). Also verified ad
+hoc: `**int32` (pointer-to-pointer) still cleanly rejected two
+independent ways (the declaration's own pointee fails `type_ok_local`,
+and separately `&p`'s own `inner.is_pointer` guard), and `*B := &a`
+where `a: A` and `A`/`B` are distinct structs with identical field
+layouts, cleanly rejected by exact struct-identity comparison (not
+structural shape) -- the same rejection precedent `06_pointers.ptl`
+already set for scalar pointees, now confirmed for composite ones too.

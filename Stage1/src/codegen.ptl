@@ -13,9 +13,8 @@
 // see below), a clean `codegen error` diagnostic with exit(1), never
 // silently wrong code.
 //
-// --- Scope: a scalar-only slice of v0, not full feature parity ---
+// --- Scope: all of v0 except `**T` and a couple of documented gaps ---
 //
-// This is a first working slice, not a complete Stage 1 codegen.
 // Supported: int8/16/32/64, uint8/16/32/64, bool as parameter/local/
 // return types; `function`/`extern function` (the sys_read/sys_write/
 // sys_exit whitelist only, matching v0's own, §5.2); mut/const decls;
@@ -32,17 +31,18 @@
 // `f().field` is a known, documented gap, see the design doc's own
 // "Sub-pass 5a" testing section), array broadcast-init (scalar or
 // struct source, at decl-init or assignment), and struct-to-struct/
-// array-to-array copy; pointers with a *scalar* pointee (`v1.0.3`'s
-// pointer sub-pass) -- `&`/`*`, `null`, pointer-typed locals/
-// parameters/return values, and `==`/`!=` pointer comparison. NOT
-// supported: pointers to a struct/array/pointer pointee (`*Point`,
-// `*int32[3]`, `**int32`) -- parser.ptl parses these fine (they're
-// part of v0), but this file's codegen recognizes them and fails
-// cleanly (`codegen error: ...`) rather than emitting wrong code, the
-// same discipline Hoare's own codegen uses for its own deliberately-
-// scoped-out cases (docs/postulate_stage0_codegen_spec.md Sec 10).
-// The rest of composite support is real, future work (`v1.0.3`'s next
-// sub-pass -- composite pointees).
+// array-to-array copy; pointers (`v1.0.3`'s pointer and composite-
+// pointee sub-passes) to *any* pointee -- scalar (`*int32`), struct
+// (`*Point`), or array (`*int32[3]`/`*(int32[3])`), including a
+// self-referential struct field (`next: *Node`) -- `&`/`*`, `null`,
+// pointer-typed locals/parameters/return values, and `==`/`!=`
+// pointer comparison. NOT supported: `**T` (pointer-to-pointer,
+// `v1.0.3`'s one deliberately out-of-scope case throughout) --
+// parser.ptl parses it fine (it's part of v0), but this file's
+// codegen recognizes it and fails cleanly (`codegen error: ...`)
+// rather than emitting wrong code, the same discipline Hoare's own
+// codegen uses for its own deliberately-scoped-out cases (docs/
+// postulate_stage0_codegen_spec.md Sec 10).
 //
 // --- Every value is at its true declared width (`v1.0.3` sub-pass 1) ---
 //
@@ -3733,6 +3733,7 @@ struct GBufs {
   sym_composite : *(int32[128]);
   sym_is_array : *(int32[128]);
   sym_is_pointer : *(int32[128]);
+  sym_ptr_pointee_composite : *(int32[128]);
   sym_signed : *(int32[128]);
   sym_width : *(uint64[128]);
   sym_struct_node : *(uint64[128]);
@@ -3797,11 +3798,24 @@ struct GState {
 // more fields, since a value is never both scalar and pointer at once.
 // Unlike a composite's `reg` (always an address), a pointer's `reg` is
 // the pointer *value* itself, same convention as an ordinary scalar.
+// `ptr_pointee_composite` (v1.0.3's composite-pointee sub-pass): when
+// `is_pointer` is true, this second discriminator says whether the
+// pointee itself is composite -- reusing `is_array`/`struct_node`/
+// `elem_type`/`elem_count` to describe *that* pointee's own shape
+// (exactly the same fields, exactly the same meaning, as when
+// `is_composite` is true for the value itself; never ambiguous, since
+// `is_pointer` and `is_composite` are mutually exclusive) when true,
+// or leaving `width`/`is_signed` as the pointee's scalar width/
+// signedness (as before) when false. A composite pointee's own
+// address *is* the pointer's value (`reg`) -- there is never a
+// separate "address of the pointee" to track, matching every other
+// composite value's own "reg is an address" convention.
 struct ExprResult {
   value_ok : bool;
   is_composite : bool;
   is_array : bool;
   is_pointer : bool;
+  ptr_pointee_composite : bool;
   is_signed : bool;
   width : uint64;
   struct_node : uint64;
@@ -3816,40 +3830,55 @@ struct ExprResult {
 
 function pack_expr(gst: GState, is_signed: bool, width: uint64, reg: uint64) : ExprResult {
   return ExprResult { value_ok := true, is_composite := false, is_array := false, is_pointer := false,
-                       is_signed := is_signed, width := width, struct_node := 0, elem_type := 0,
-                       elem_count := 0, reg := reg, out_pos := gst.out_pos, next_label := gst.next_label,
+                       ptr_pointee_composite := false, is_signed := is_signed, width := width,
+                       struct_node := 0, elem_type := 0, elem_count := 0, reg := reg,
+                       out_pos := gst.out_pos, next_label := gst.next_label,
                        sym_count := gst.sym_count, had_error := gst.had_error };
 }
 
 function pack_expr_composite(gst: GState, struct_node: uint64, reg: uint64) : ExprResult {
   return ExprResult { value_ok := true, is_composite := true, is_array := false, is_pointer := false,
-                       is_signed := false, width := 0, struct_node := struct_node, elem_type := 0,
-                       elem_count := 0, reg := reg, out_pos := gst.out_pos, next_label := gst.next_label,
+                       ptr_pointee_composite := false, is_signed := false, width := 0,
+                       struct_node := struct_node, elem_type := 0, elem_count := 0, reg := reg,
+                       out_pos := gst.out_pos, next_label := gst.next_label,
                        sym_count := gst.sym_count, had_error := gst.had_error };
 }
 
 function pack_expr_array(gst: GState, elem_type: uint64, elem_count: uint64, reg: uint64) : ExprResult {
   return ExprResult { value_ok := true, is_composite := true, is_array := true, is_pointer := false,
-                       is_signed := false, width := 0, struct_node := 0, elem_type := elem_type,
-                       elem_count := elem_count, reg := reg, out_pos := gst.out_pos,
-                       next_label := gst.next_label, sym_count := gst.sym_count, had_error := gst.had_error };
+                       ptr_pointee_composite := false, is_signed := false, width := 0, struct_node := 0,
+                       elem_type := elem_type, elem_count := elem_count, reg := reg,
+                       out_pos := gst.out_pos, next_label := gst.next_label,
+                       sym_count := gst.sym_count, had_error := gst.had_error };
 }
 
 // `pointee_width`/`pointee_signed` describe what the pointer points
-// to (see the struct's own header) -- this sub-pass only ever calls
-// this with a scalar pointee's own width/signedness.
+// to (see the struct's own header) -- for a *scalar* pointee.
 function pack_expr_pointer(gst: GState, pointee_width: uint64, pointee_signed: bool, reg: uint64) : ExprResult {
   return ExprResult { value_ok := true, is_composite := false, is_array := false, is_pointer := true,
-                       is_signed := pointee_signed, width := pointee_width, struct_node := 0, elem_type := 0,
-                       elem_count := 0, reg := reg, out_pos := gst.out_pos, next_label := gst.next_label,
+                       ptr_pointee_composite := false, is_signed := pointee_signed, width := pointee_width,
+                       struct_node := 0, elem_type := 0, elem_count := 0, reg := reg,
+                       out_pos := gst.out_pos, next_label := gst.next_label,
+                       sym_count := gst.sym_count, had_error := gst.had_error };
+}
+
+// Same as `pack_expr_pointer`, for a *composite* pointee -- `reg` is
+// the pointer value, which doubles as the pointee's own address (see
+// the struct's own header).
+function pack_expr_pointer_composite(gst: GState, is_array: bool, struct_node: uint64,
+                                      elem_type: uint64, elem_count: uint64, reg: uint64) : ExprResult {
+  return ExprResult { value_ok := true, is_composite := false, is_array := is_array, is_pointer := true,
+                       ptr_pointee_composite := true, is_signed := false, width := 0,
+                       struct_node := struct_node, elem_type := elem_type, elem_count := elem_count,
+                       reg := reg, out_pos := gst.out_pos, next_label := gst.next_label,
                        sym_count := gst.sym_count, had_error := gst.had_error };
 }
 
 function fail_expr(gst: GState) : ExprResult {
   return ExprResult { value_ok := false, is_composite := false, is_array := false, is_pointer := false,
-                       is_signed := true, width := 64, struct_node := 0, elem_type := 0, elem_count := 0,
-                       reg := 0, out_pos := gst.out_pos, next_label := gst.next_label,
-                       sym_count := gst.sym_count, had_error := true };
+                       ptr_pointee_composite := false, is_signed := true, width := 64, struct_node := 0,
+                       elem_type := 0, elem_count := 0, reg := 0, out_pos := gst.out_pos,
+                       next_label := gst.next_label, sym_count := gst.sym_count, had_error := true };
 }
 
 function expr_state(r: ExprResult) : GState {
@@ -3870,17 +3899,21 @@ function new_label(gst: GState) : GState {
 // mirror ExprResult's own (see its header) -- a composite local's
 // `reg` is its alloca's address; a scalar local's `reg` is also its
 // alloca's address (unchanged since `v1.0.2`), the two are only told
-// apart by `is_composite`. `is_pointer` (v1.0.3's pointer sub-pass)
-// mirrors ExprResult's own third kind the same way -- a pointer
-// local's `reg` is likewise its alloca's address (the address of the
-// slot that *holds* the pointer value, not the pointer value itself);
-// `width`/`is_signed` describe the pointee, exactly as in ExprResult.
+// apart by `is_composite`. `is_pointer`/`ptr_pointee_composite`
+// (v1.0.3's pointer and composite-pointee sub-passes) mirror
+// ExprResult's own third kind the same way -- a pointer local's `reg`
+// is likewise its alloca's address (the address of the slot that
+// *holds* the pointer value, not the pointer value itself); when
+// `ptr_pointee_composite` is false, `width`/`is_signed` describe a
+// scalar pointee; when true, `is_array`/`struct_node`/`elem_type`/
+// `elem_count` describe a composite one, exactly as in ExprResult.
 struct SymInfo {
   found : bool;
   reg : uint64;
   is_composite : bool;
   is_array : bool;
   is_pointer : bool;
+  ptr_pointee_composite : bool;
   is_signed : bool;
   width : uint64;
   struct_node : uint64;
@@ -3892,12 +3925,13 @@ function sym_find(bufs: GBufs, name_off: uint64, name_len: uint64, sym_count: ui
   mut i : uint64 := 0;
   mut looping : bool := true;
   mut result : SymInfo := SymInfo { found := false, reg := 0, is_composite := false, is_array := false,
-                                     is_pointer := false, is_signed := false, width := 64, struct_node := 0,
-                                     elem_type := 0, elem_count := 0 };
+                                     is_pointer := false, ptr_pointee_composite := false, is_signed := false,
+                                     width := 64, struct_node := 0, elem_type := 0, elem_count := 0 };
   mut sv : int32 := 0;
   mut cv : int32 := 0;
   mut av : int32 := 0;
   mut pv : int32 := 0;
+  mut ppv : int32 := 0;
 
   while (looping) {
     if (i >= sym_count) {
@@ -3908,9 +3942,11 @@ function sym_find(bufs: GBufs, name_off: uint64, name_len: uint64, sym_count: ui
         cv := (*bufs.sym_composite)[i];
         av := (*bufs.sym_is_array)[i];
         pv := (*bufs.sym_is_pointer)[i];
+        ppv := (*bufs.sym_ptr_pointee_composite)[i];
         result := SymInfo { found := true, reg := (*bufs.sym_reg)[i], is_composite := cv == 1,
-                             is_array := av == 1, is_pointer := pv == 1, is_signed := sv == 1,
-                             width := (*bufs.sym_width)[i], struct_node := (*bufs.sym_struct_node)[i],
+                             is_array := av == 1, is_pointer := pv == 1, ptr_pointee_composite := ppv == 1,
+                             is_signed := sv == 1, width := (*bufs.sym_width)[i],
+                             struct_node := (*bufs.sym_struct_node)[i],
                              elem_type := (*bufs.sym_elem_type)[i], elem_count := (*bufs.sym_elem_count)[i] };
         looping := false;
       } else {
@@ -3922,12 +3958,14 @@ function sym_find(bufs: GBufs, name_off: uint64, name_len: uint64, sym_count: ui
 }
 
 function sym_add(bufs: GBufs, name_off: uint64, name_len: uint64, reg: uint64, is_composite: bool,
-                  is_array: bool, is_pointer: bool, is_signed: bool, width: uint64, struct_node: uint64,
-                  elem_type: uint64, elem_count: uint64, sym_count: uint64) : uint64 {
+                  is_array: bool, is_pointer: bool, ptr_pointee_composite: bool, is_signed: bool,
+                  width: uint64, struct_node: uint64, elem_type: uint64, elem_count: uint64,
+                  sym_count: uint64) : uint64 {
   mut sv : int32 := 0;
   mut cv : int32 := 0;
   mut av : int32 := 0;
   mut pv : int32 := 0;
+  mut ppv : int32 := 0;
   if (is_signed) {
     sv := 1;
   }
@@ -3940,12 +3978,16 @@ function sym_add(bufs: GBufs, name_off: uint64, name_len: uint64, reg: uint64, i
   if (is_pointer) {
     pv := 1;
   }
+  if (ptr_pointee_composite) {
+    ppv := 1;
+  }
   (*bufs.sym_name_off)[sym_count] := name_off;
   (*bufs.sym_name_len)[sym_count] := name_len;
   (*bufs.sym_reg)[sym_count] := reg;
   (*bufs.sym_composite)[sym_count] := cv;
   (*bufs.sym_is_array)[sym_count] := av;
   (*bufs.sym_is_pointer)[sym_count] := pv;
+  (*bufs.sym_ptr_pointee_composite)[sym_count] := ppv;
   (*bufs.sym_signed)[sym_count] := sv;
   (*bufs.sym_width)[sym_count] := width;
   (*bufs.sym_struct_node)[sym_count] := struct_node;
@@ -4126,6 +4168,7 @@ function build_func_table(bufs: GBufs, prog_node: uint64) : GBufs {
                  sym_name_off := bufs.sym_name_off, sym_name_len := bufs.sym_name_len,
                  sym_reg := bufs.sym_reg, sym_composite := bufs.sym_composite,
                  sym_is_array := bufs.sym_is_array, sym_is_pointer := bufs.sym_is_pointer,
+                 sym_ptr_pointee_composite := bufs.sym_ptr_pointee_composite,
                  sym_signed := bufs.sym_signed, sym_width := bufs.sym_width,
                  sym_struct_node := bufs.sym_struct_node,
                  sym_elem_type := bufs.sym_elem_type, sym_elem_count := bufs.sym_elem_count,
@@ -4188,6 +4231,7 @@ function build_struct_table(bufs: GBufs, prog_node: uint64) : GBufs {
                  sym_name_off := bufs.sym_name_off, sym_name_len := bufs.sym_name_len,
                  sym_reg := bufs.sym_reg, sym_composite := bufs.sym_composite,
                  sym_is_array := bufs.sym_is_array, sym_is_pointer := bufs.sym_is_pointer,
+                 sym_ptr_pointee_composite := bufs.sym_ptr_pointee_composite,
                  sym_signed := bufs.sym_signed, sym_width := bufs.sym_width,
                  sym_struct_node := bufs.sym_struct_node,
                  sym_elem_type := bufs.sym_elem_type, sym_elem_count := bufs.sym_elem_count,
@@ -4267,11 +4311,31 @@ function type_ok_local(bufs: GBufs, type_node: uint64) : TypeOkResult {
     }
   } else {
   if (is_pointer_type_node(bufs, type_node)) {
+    // Composite-pointee sub-pass: the pointee is classified the same
+    // recursive way an array's own element type already is -- scalar,
+    // struct, or array, but NOT itself a pointer (`elem_ok.is_pointer`
+    // rejected below, keeping `**T` out of scope). A composite
+    // pointee's `struct_node`/`elem_type`/`elem_count` are reused here
+    // exactly as they are for `is_composite` elsewhere (see
+    // ExprResult's own header); `ptr_width`/`ptr_signed` stay used
+    // only for a genuinely scalar pointee, computed straight from the
+    // pointee's own type node the same way the original scalar-only
+    // version of this branch always did (`elem_ok.ptr_width` isn't
+    // reusable here -- it would only be populated if `pointee` were
+    // itself a pointer, which this branch has already excluded).
     pointee := (*bufs.pool_a)[type_node];
-    if (type_ok(bufs, pointee)) {
-      result := TypeOkResult { ok := true, is_struct := false, is_array := false, is_pointer := true,
-                                ptr_width := type_width(bufs, pointee), ptr_signed := type_is_signed(bufs, pointee),
-                                struct_node := 0, elem_type := 0, elem_count := 0 };
+    elem_ok := type_ok_local(bufs, pointee);
+    if (elem_ok.ok && !elem_ok.is_pointer) {
+      if (elem_ok.is_struct || elem_ok.is_array) {
+        result := TypeOkResult { ok := true, is_struct := elem_ok.is_struct, is_array := elem_ok.is_array,
+                                  is_pointer := true, ptr_width := 0, ptr_signed := false,
+                                  struct_node := elem_ok.struct_node, elem_type := elem_ok.elem_type,
+                                  elem_count := elem_ok.elem_count };
+      } else {
+        result := TypeOkResult { ok := true, is_struct := false, is_array := false, is_pointer := true,
+                                  ptr_width := type_width(bufs, pointee), ptr_signed := type_is_signed(bufs, pointee),
+                                  struct_node := 0, elem_type := 0, elem_count := 0 };
+      }
     }
   }}}}
   return result;
@@ -4486,7 +4550,8 @@ function gen_expr(bufs: GBufs, gst: GState, node: uint64) : ExprResult {
   mut result : ExprResult := fail_expr(gst);
   mut p : uint64 := gst.out_pos;
   mut sym : SymInfo := SymInfo { found := false, reg := 0, is_composite := false, is_array := false,
-                                   is_pointer := false, is_signed := false, width := 64, struct_node := 0, elem_type := 0,
+                                   is_pointer := false, ptr_pointee_composite := false, is_signed := false,
+                                   width := 64, struct_node := 0, elem_type := 0,
                                    elem_count := 0 };
   mut left : ExprResult := fail_expr(gst);
   mut right : ExprResult := fail_expr(gst);
@@ -4509,6 +4574,25 @@ function gen_expr(bufs: GBufs, gst: GState, node: uint64) : ExprResult {
       if (inner.is_composite) {
         result := inner;
       } else {
+      if (inner.is_pointer) {
+        cur := new_label(expr_state(inner));
+        reg := cur.next_label - 1;
+        p := emit_piece(bufs.out, cur.out_pos, 2);
+        p := append_uint(bufs.out, p, reg);
+        p := emit_piece(bufs.out, p, 81);
+        p := emit_piece(bufs.out, p, 92);
+        p := emit_piece(bufs.out, p, 7);
+        p := append_uint(bufs.out, p, inner.reg);
+        p := emit_piece(bufs.out, p, 1);
+        cur := GState { out_pos := p, next_label := cur.next_label,
+                         sym_count := cur.sym_count, had_error := cur.had_error };
+        if (inner.ptr_pointee_composite) {
+          result := pack_expr_pointer_composite(cur, inner.is_array, inner.struct_node, inner.elem_type,
+                                                 inner.elem_count, reg);
+        } else {
+          result := pack_expr_pointer(cur, inner.width, inner.is_signed, reg);
+        }
+      } else {
         cur := new_label(expr_state(inner));
         reg := cur.next_label - 1;
         p := emit_piece(bufs.out, cur.out_pos, 2);
@@ -4521,6 +4605,7 @@ function gen_expr(bufs: GBufs, gst: GState, node: uint64) : ExprResult {
         cur := GState { out_pos := p, next_label := cur.next_label,
                          sym_count := cur.sym_count, had_error := cur.had_error };
         result := pack_expr(cur, inner.is_signed, inner.width, reg);
+      }
       }
     }
   } else {
@@ -4621,7 +4706,12 @@ function gen_expr(bufs: GBufs, gst: GState, node: uint64) : ExprResult {
         p := emit_piece(bufs.out, p, 1);
         cur := GState { out_pos := p, next_label := cur.next_label,
                          sym_count := cur.sym_count, had_error := cur.had_error };
-        result := pack_expr_pointer(cur, sym.width, sym.is_signed, reg);
+        if (sym.ptr_pointee_composite) {
+          result := pack_expr_pointer_composite(cur, sym.is_array, sym.struct_node, sym.elem_type,
+                                                 sym.elem_count, reg);
+        } else {
+          result := pack_expr_pointer(cur, sym.width, sym.is_signed, reg);
+        }
       } else {
         cur := new_label(gst);
         reg := cur.next_label - 1;
@@ -4672,12 +4762,20 @@ function gen_expr(bufs: GBufs, gst: GState, node: uint64) : ExprResult {
     } else {
     if (op == 71) {
       // `*p` as an rvalue: `p` is evaluated as an ordinary *value*
-      // (its own pointer value, not its address) and loaded through --
-      // this sub-pass's pointee-is-always-scalar restriction (file
-      // header) means the loaded value is always a plain scalar.
+      // (its own pointer value, not its address) and dereferenced.
       inner := gen_expr(bufs, gst, (*bufs.pool_b)[node]);
       if (!inner.value_ok || !inner.is_pointer) {
         result := fail_expr(expr_state(inner));
+      } else {
+      if (inner.ptr_pointee_composite) {
+        // The pointee's own address *is* the pointer's value -- no
+        // load at all, matching every other composite value's "reg is
+        // an address" convention directly.
+        if (inner.is_array) {
+          result := pack_expr_array(expr_state(inner), inner.elem_type, inner.elem_count, inner.reg);
+        } else {
+          result := pack_expr_composite(expr_state(inner), inner.struct_node, inner.reg);
+        }
       } else {
         cur := new_label(expr_state(inner));
         reg := cur.next_label - 1;
@@ -4692,20 +4790,25 @@ function gen_expr(bufs: GBufs, gst: GState, node: uint64) : ExprResult {
                          sym_count := cur.sym_count, had_error := cur.had_error };
         result := pack_expr(cur, inner.is_signed, inner.width, reg);
       }
+      }
     } else {
     if (op == 72) {
       // `&expr`: gen_lvalue's own "reg is always the address"
-      // convention means the address it hands back for a plain scalar
-      // lvalue *is* the pointer value `&expr` produces -- no new
-      // instruction needed, just a reclassification. Composite and
-      // already-pointer lvalues are out of scope this sub-pass (see
-      // the file header's "scalar pointee" restriction) and are
-      // rejected here rather than silently mishandled.
+      // convention means the address it hands back -- for a scalar
+      // *or* a composite lvalue -- *is* the pointer value `&expr`
+      // produces, no new instruction needed either way, just a
+      // reclassification. An already-pointer lvalue stays out of
+      // scope (no `**T`, see the file header).
       inner := gen_lvalue(bufs, gst, (*bufs.pool_b)[node]);
-      if (!inner.value_ok || inner.is_composite || inner.is_pointer) {
+      if (!inner.value_ok || inner.is_pointer) {
         result := fail_expr(expr_state(inner));
       } else {
+      if (inner.is_composite) {
+        result := pack_expr_pointer_composite(expr_state(inner), inner.is_array, inner.struct_node,
+                                               inner.elem_type, inner.elem_count, inner.reg);
+      } else {
         result := pack_expr_pointer(expr_state(inner), inner.width, inner.is_signed, inner.reg);
+      }
       }
     } else {
       result := fail_expr(gst);
@@ -4777,6 +4880,10 @@ function gen_expr(bufs: GBufs, gst: GState, node: uint64) : ExprResult {
 // result the same way gen_lvalue itself always does.
 function pack_lvalue_by_type(bufs: GBufs, gst: GState, type_node: uint64, reg: uint64) : ExprResult {
   mut result : ExprResult := fail_expr(gst);
+  mut pointee : uint64 := 0;
+  mut elem_ok : TypeOkResult := TypeOkResult { ok := false, is_struct := false, is_array := false,
+                                                 is_pointer := false, ptr_width := 0, ptr_signed := false,
+                                                 struct_node := 0, elem_type := 0, elem_count := 0 };
   if (is_array_type_node(bufs, type_node)) {
     result := pack_expr_array(gst, (*bufs.pool_a)[type_node], array_type_elem_count(bufs, type_node), reg);
   } else {
@@ -4784,11 +4891,27 @@ function pack_lvalue_by_type(bufs: GBufs, gst: GState, type_node: uint64, reg: u
     result := pack_expr_composite(gst, struct_lookup(bufs, (*bufs.pool_b)[type_node], (*bufs.pool_c)[type_node]).node, reg);
   } else {
   if (is_pointer_type_node(bufs, type_node)) {
-    // A pointer-typed struct field or array element (this sub-pass
-    // supports bare pointer locals/params/return only, see the file
-    // header) -- a clean codegen error here, not a silent misclassify
-    // as a plain scalar (which would load it with the wrong LLVM type).
-    result := fail_expr(gst);
+    // A pointer-typed struct field or array element (e.g. a linked
+    // list's own `next: *Node`) -- classified the same recursive way
+    // type_ok_local's own pointer branch resolves a pointee, rejecting
+    // a pointer-to-pointer field the same way that branch does.
+    // `reg` is (as everywhere else in this function) the *address* of
+    // the pointer-typed slot, not the pointer's own value -- same
+    // "gen_lvalue always hands back an address" convention pack_expr_
+    // pointer('_composite')'s own doc already notes for the plain
+    // IDENT case.
+    pointee := (*bufs.pool_a)[type_node];
+    elem_ok := type_ok_local(bufs, pointee);
+    if (!elem_ok.ok || elem_ok.is_pointer) {
+      result := fail_expr(gst);
+    } else {
+    if (elem_ok.is_struct || elem_ok.is_array) {
+      result := pack_expr_pointer_composite(gst, elem_ok.is_array, elem_ok.struct_node,
+                                             elem_ok.elem_type, elem_ok.elem_count, reg);
+    } else {
+      result := pack_expr_pointer(gst, type_width(bufs, pointee), type_is_signed(bufs, pointee), reg);
+    }
+    }
   } else {
     result := pack_expr(gst, type_is_signed(bufs, type_node), type_width(bufs, type_node), reg);
   }}}
@@ -4811,7 +4934,8 @@ function gen_lvalue(bufs: GBufs, gst: GState, node: uint64) : ExprResult {
   mut kind : int32 := (*bufs.pool_kind)[node];
   mut result : ExprResult := fail_expr(gst);
   mut sym : SymInfo := SymInfo { found := false, reg := 0, is_composite := false, is_array := false,
-                                   is_pointer := false, is_signed := false, width := 64, struct_node := 0, elem_type := 0,
+                                   is_pointer := false, ptr_pointee_composite := false, is_signed := false,
+                                   width := 64, struct_node := 0, elem_type := 0,
                                    elem_count := 0 };
   mut base : ExprResult := fail_expr(gst);
   mut fi : FieldInfo := FieldInfo { found := false, index := 0, type_node := 0 };
@@ -4837,12 +4961,17 @@ function gen_lvalue(bufs: GBufs, gst: GState, node: uint64) : ExprResult {
       } else {
       if (sym.is_pointer) {
         // Same "reg is always the address" convention this whole
-        // function uses -- pack_expr_pointer's own doc says `reg` is
-        // the pointer *value*, but here (as with the plain-scalar
-        // branch just below) it is the address of the slot holding
-        // that value; gen_expr's own IDENT dispatch is what actually
-        // loads it into a real pointer value when needed.
-        result := pack_expr_pointer(gst, sym.width, sym.is_signed, sym.reg);
+        // function uses -- pack_expr_pointer('_composite')'s own doc
+        // says `reg` is the pointer *value*, but here (as with the
+        // plain-scalar branch just below) it is the address of the
+        // slot holding that value; gen_expr's own IDENT dispatch is
+        // what actually loads it into a real pointer value when needed.
+        if (sym.ptr_pointee_composite) {
+          result := pack_expr_pointer_composite(gst, sym.is_array, sym.struct_node, sym.elem_type,
+                                                 sym.elem_count, sym.reg);
+        } else {
+          result := pack_expr_pointer(gst, sym.width, sym.is_signed, sym.reg);
+        }
       } else {
         result := pack_expr(gst, sym.is_signed, sym.width, sym.reg);
       }}
@@ -4860,7 +4989,15 @@ function gen_lvalue(bufs: GBufs, gst: GState, node: uint64) : ExprResult {
       if (!inner.value_ok || !inner.is_pointer) {
         result := fail_expr(expr_state(inner));
       } else {
+      if (inner.ptr_pointee_composite) {
+        if (inner.is_array) {
+          result := pack_expr_array(expr_state(inner), inner.elem_type, inner.elem_count, inner.reg);
+        } else {
+          result := pack_expr_composite(expr_state(inner), inner.struct_node, inner.reg);
+        }
+      } else {
         result := pack_expr(expr_state(inner), inner.is_signed, inner.width, inner.reg);
+      }
       }
     } else {
       result := fail_expr(gst);
@@ -5006,6 +5143,21 @@ function gen_struct_lit(bufs: GBufs, gst: GState, node: uint64) : ExprResult {
             cur := emit_composite_copy(bufs, cur, fval.is_array, fval.struct_node,
                                         fval.elem_type, fval.elem_count, fval.reg, faddr);
           } else {
+          if (fval.is_pointer) {
+            if (!is_pointer_type_node(bufs, ffi.type_node)) {
+              ok := false;
+            } else {
+              p := emit_piece(bufs.out, cur.out_pos, 80);
+              p := emit_piece(bufs.out, p, 92);
+              p := emit_piece(bufs.out, p, 4);
+              p := append_uint(bufs.out, p, fval.reg);
+              p := emit_piece(bufs.out, p, 7);
+              p := append_uint(bufs.out, p, faddr);
+              p := emit_piece(bufs.out, p, 1);
+              cur := GState { out_pos := p, next_label := cur.next_label,
+                               sym_count := cur.sym_count, had_error := cur.had_error };
+            }
+          } else {
             fwidth := type_width(bufs, ffi.type_node);
             fc := coerce_width(bufs, cur, fval.reg, fval.width, fwidth, fval.is_signed);
             cur := expr_state(fc);
@@ -5018,6 +5170,7 @@ function gen_struct_lit(bufs: GBufs, gst: GState, node: uint64) : ExprResult {
             p := emit_piece(bufs.out, p, 1);
             cur := GState { out_pos := p, next_label := cur.next_label,
                              sym_count := cur.sym_count, had_error := cur.had_error };
+          }
           }
         }
       }
@@ -5105,6 +5258,21 @@ function gen_array_lit_typed(bufs: GBufs, gst: GState, node: uint64, elem_type: 
           cur := emit_composite_copy(bufs, cur, eval.is_array, eval.struct_node,
                                       eval.elem_type, eval.elem_count, eval.reg, eaddr);
         } else {
+        if (eval.is_pointer) {
+          if (!is_pointer_type_node(bufs, elem_type)) {
+            ok := false;
+          } else {
+            p := emit_piece(bufs.out, cur.out_pos, 80);
+            p := emit_piece(bufs.out, p, 92);
+            p := emit_piece(bufs.out, p, 4);
+            p := append_uint(bufs.out, p, eval.reg);
+            p := emit_piece(bufs.out, p, 7);
+            p := append_uint(bufs.out, p, eaddr);
+            p := emit_piece(bufs.out, p, 1);
+            cur := GState { out_pos := p, next_label := cur.next_label,
+                             sym_count := cur.sym_count, had_error := cur.had_error };
+          }
+        } else {
           ewidth := type_width(bufs, elem_type);
           ec := coerce_width(bufs, cur, eval.reg, eval.width, ewidth, eval.is_signed);
           cur := expr_state(ec);
@@ -5117,6 +5285,7 @@ function gen_array_lit_typed(bufs: GBufs, gst: GState, node: uint64, elem_type: 
           p := emit_piece(bufs.out, p, 1);
           cur := GState { out_pos := p, next_label := cur.next_label,
                            sym_count := cur.sym_count, had_error := cur.had_error };
+        }
         }
       }
       i := i + 1;
@@ -5595,8 +5764,14 @@ function gen_user_call(bufs: GBufs, gst: GState, name_off: uint64, name_len: uin
         ptype := (*bufs.pool_c)[param_node];
         ptok := type_ok_local(bufs, ptype);
         target_is_ptr := ptok.is_pointer;
-        target_is_composite := ptok.is_struct || ptok.is_array;
-        target_is_array := ptok.is_array;
+        // `ptok.is_struct`/`ptok.is_array` describe the *pointee's*
+        // shape when `ptok.is_pointer` is true (see type_ok_local's
+        // own header) -- gating on `!target_is_ptr` here is what keeps
+        // this "is the parameter itself composite" check from
+        // misreading a `*Point` parameter's struct *pointee* as making
+        // the parameter itself composite.
+        target_is_composite := !target_is_ptr && (ptok.is_struct || ptok.is_array);
+        target_is_array := !target_is_ptr && ptok.is_array;
         if (!target_is_ptr && !target_is_composite) { target_w := type_width(bufs, ptype); }
       }
       if (target_is_ptr != arg.is_pointer || target_is_composite != arg.is_composite
@@ -5727,7 +5902,12 @@ function gen_user_call(bufs: GBufs, gst: GState, name_off: uint64, name_len: uin
       cur := GState { out_pos := p, next_label := cur.next_label,
                        sym_count := cur.sym_count, had_error := cur.had_error };
       if (rettok.is_pointer) {
-        result := pack_expr_pointer(cur, rettok.ptr_width, rettok.ptr_signed, reg);
+        if (rettok.is_struct || rettok.is_array) {
+          result := pack_expr_pointer_composite(cur, rettok.is_array, rettok.struct_node, rettok.elem_type,
+                                                 rettok.elem_count, reg);
+        } else {
+          result := pack_expr_pointer(cur, rettok.ptr_width, rettok.ptr_signed, reg);
+        }
       } else {
       if (rettok.is_struct || rettok.is_array) {
         // The call's own result register holds the aggregate *value*
@@ -5892,7 +6072,13 @@ function gen_assign_stmt(bufs: GBufs, gst: GState, node: uint64) : GState {
             // branch is: type_width has no meaningful answer for a struct
             // type node.
             elem_tok := type_ok_local(bufs, lv.elem_type);
-            if (elem_tok.is_struct) {
+            if (elem_tok.is_pointer || (elem_tok.is_struct && !elem_tok.is_pointer)) {
+              // `elem_tok.is_pointer` is checked directly (not folded
+              // into a bare `is_struct` check) because type_ok_local
+              // reuses `is_struct` to describe a *pointer* element
+              // type's own pointee shape, not the element type itself
+              // -- see its own header. type_width has no meaningful
+              // answer for either a struct or a pointer element type.
               ok := false;
             } else {
               ec := coerce_width(bufs, cur, rhs_regs[i], rhs_widths[i], type_width(bufs, lv.elem_type), rhs_signed[i] == 1);
@@ -5926,7 +6112,7 @@ function gen_assign_stmt(bufs: GBufs, gst: GState, node: uint64) : GState {
           if (lv.is_array && rhs_composite[i] == 1 && rhs_is_array[i] != 1) {
             // Struct broadcast source, same rule as gen_decls' own.
             elem_tok := type_ok_local(bufs, lv.elem_type);
-            if (!elem_tok.is_struct || elem_tok.struct_node != rhs_struct_node[i]) {
+            if (elem_tok.is_pointer || !elem_tok.is_struct || elem_tok.struct_node != rhs_struct_node[i]) {
               ok := false;
             } else {
               j := 0;
@@ -6302,7 +6488,14 @@ function gen_decls(bufs: GBufs, gst: GState, start: uint64, count: uint64) : GSt
       cur := GState { out_pos := cur.out_pos, next_label := cur.next_label,
                        sym_count := cur.sym_count, had_error := true };
     } else {
-    if (tok.is_struct) {
+    if (tok.is_struct && !tok.is_pointer) {
+      // `!tok.is_pointer` matters here: for a *pointer* type,
+      // `tok.is_struct` (via type_ok_local's own reuse, see its
+      // header) means the *pointee* is a struct, not that this decl's
+      // own type is -- without this guard, `mut p : *Point;` would be
+      // misrouted into this branch (allocating a `%struct.Point` local
+      // instead of a `ptr` one) before the real pointer branch below
+      // is ever reached.
       cur := new_label(cur);
       dreg := cur.next_label - 1;
       p := emit_piece(bufs.out, cur.out_pos, 2);
@@ -6314,7 +6507,7 @@ function gen_decls(bufs: GBufs, gst: GState, start: uint64, count: uint64) : GSt
                        sym_count := cur.sym_count, had_error := cur.had_error };
 
       new_count := sym_add(bufs, (*bufs.pool_a)[decl_node], (*bufs.pool_b)[decl_node],
-                            dreg, true, false, false, false, 0, tok.struct_node, 0, 0, cur.sym_count);
+                            dreg, true, false, false, false, false, 0, tok.struct_node, 0, 0, cur.sym_count);
       cur := GState { out_pos := cur.out_pos, next_label := cur.next_label,
                        sym_count := new_count, had_error := cur.had_error };
 
@@ -6329,7 +6522,10 @@ function gen_decls(bufs: GBufs, gst: GState, start: uint64, count: uint64) : GSt
         }
       }
     } else {
-    if (tok.is_array) {
+    if (tok.is_array && !tok.is_pointer) {
+      // Same `!tok.is_pointer` guard as the struct branch above, and
+      // for the same reason (`tok.is_array` means "pointee is an
+      // array" for a pointer type, via type_ok_local's own reuse).
       cur := new_label(cur);
       dreg := cur.next_label - 1;
       p := emit_piece(bufs.out, cur.out_pos, 2);
@@ -6341,7 +6537,7 @@ function gen_decls(bufs: GBufs, gst: GState, start: uint64, count: uint64) : GSt
                        sym_count := cur.sym_count, had_error := cur.had_error };
 
       new_count := sym_add(bufs, (*bufs.pool_a)[decl_node], (*bufs.pool_b)[decl_node],
-                            dreg, true, true, false, false, 0, 0, tok.elem_type, tok.elem_count, cur.sym_count);
+                            dreg, true, true, false, false, false, 0, 0, tok.elem_type, tok.elem_count, cur.sym_count);
       cur := GState { out_pos := cur.out_pos, next_label := cur.next_label,
                        sym_count := new_count, had_error := cur.had_error };
 
@@ -6379,7 +6575,7 @@ function gen_decls(bufs: GBufs, gst: GState, start: uint64, count: uint64) : GSt
               // text predates this codegen catching up to Hoare's own,
               // slightly more permissive, check).
               elem_tok := type_ok_local(bufs, tok.elem_type);
-              if (!elem_tok.is_struct || elem_tok.struct_node != e.struct_node) {
+              if (elem_tok.is_pointer || !elem_tok.is_struct || elem_tok.struct_node != e.struct_node) {
                 cur := GState { out_pos := cur.out_pos, next_label := cur.next_label,
                                  sym_count := cur.sym_count, had_error := true };
               } else {
@@ -6415,7 +6611,7 @@ function gen_decls(bufs: GBufs, gst: GState, start: uint64, count: uint64) : GSt
             // node, so a scalar source is only valid when the element
             // type is itself scalar.
             elem_tok := type_ok_local(bufs, tok.elem_type);
-            if (elem_tok.is_struct) {
+            if (elem_tok.is_pointer || (elem_tok.is_struct && !elem_tok.is_pointer)) {
               cur := GState { out_pos := cur.out_pos, next_label := cur.next_label,
                                sym_count := cur.sym_count, had_error := true };
             } else {
@@ -6467,14 +6663,24 @@ function gen_decls(bufs: GBufs, gst: GState, start: uint64, count: uint64) : GSt
                        sym_count := cur.sym_count, had_error := cur.had_error };
 
       new_count := sym_add(bufs, (*bufs.pool_a)[decl_node], (*bufs.pool_b)[decl_node],
-                            dreg, false, false, true, tok.ptr_signed, tok.ptr_width, 0, 0, 0, cur.sym_count);
+                            dreg, false, tok.is_array, true, (tok.is_struct || tok.is_array),
+                            tok.ptr_signed, tok.ptr_width, tok.struct_node, tok.elem_type, tok.elem_count,
+                            cur.sym_count);
       cur := GState { out_pos := cur.out_pos, next_label := cur.next_label,
                        sym_count := new_count, had_error := cur.had_error };
 
       if (init_node != 0) {
         e := gen_expr(bufs, cur, init_node);
         cur := expr_state(e);
-        if (!e.value_ok || !e.is_pointer) {
+        if (!e.value_ok || !e.is_pointer || e.ptr_pointee_composite != (tok.is_struct || tok.is_array)
+            || (e.ptr_pointee_composite && e.is_array != tok.is_array)
+            || (e.ptr_pointee_composite && !tok.is_array && e.struct_node != tok.struct_node)) {
+          // Pointee-shape mismatch (scalar vs. composite, array vs.
+          // struct, or a struct pointee that isn't the exact same
+          // declared struct) -- rejected here rather than trusted, the
+          // same way the array-broadcast struct-source check is (a
+          // genuinely new acceptance path, not the looser precedent
+          // plain composite-to-composite copies elsewhere still use).
           cur := GState { out_pos := cur.out_pos, next_label := cur.next_label,
                            sym_count := cur.sym_count, had_error := true };
         } else {
@@ -6503,7 +6709,7 @@ function gen_decls(bufs: GBufs, gst: GState, start: uint64, count: uint64) : GSt
                        sym_count := cur.sym_count, had_error := cur.had_error };
 
       new_count := sym_add(bufs, (*bufs.pool_a)[decl_node], (*bufs.pool_b)[decl_node],
-                            dreg, false, false, false, is_signed, width, 0, 0, 0, cur.sym_count);
+                            dreg, false, false, false, false, is_signed, width, 0, 0, 0, cur.sym_count);
       cur := GState { out_pos := cur.out_pos, next_label := cur.next_label,
                        sym_count := new_count, had_error := cur.had_error };
 
@@ -6658,8 +6864,9 @@ function gen_function(bufs: GBufs, gst: GState, func_node: uint64) : GState {
       p := emit_piece(bufs.out, p, 1);
 
       new_count := sym_add(bufs, (*bufs.pool_a)[param_node], (*bufs.pool_b)[param_node],
-                            preg, false, false, true, ptok.ptr_signed, ptok.ptr_width,
-                            0, 0, 0, cur.sym_count);
+                            preg, false, ptok.is_array, true, (ptok.is_struct || ptok.is_array),
+                            ptok.ptr_signed, ptok.ptr_width, ptok.struct_node, ptok.elem_type, ptok.elem_count,
+                            cur.sym_count);
       cur := GState { out_pos := p, next_label := cur.next_label,
                        sym_count := new_count, had_error := cur.had_error };
     } else {
@@ -6680,7 +6887,7 @@ function gen_function(bufs: GBufs, gst: GState, func_node: uint64) : GState {
       p := emit_piece(bufs.out, p, 1);
 
       new_count := sym_add(bufs, (*bufs.pool_a)[param_node], (*bufs.pool_b)[param_node],
-                            preg, true, ptok.is_array, false, false, 0,
+                            preg, true, ptok.is_array, false, false, false, 0,
                             ptok.struct_node, ptok.elem_type, ptok.elem_count, cur.sym_count);
       cur := GState { out_pos := p, next_label := cur.next_label,
                        sym_count := new_count, had_error := cur.had_error };
@@ -6702,7 +6909,7 @@ function gen_function(bufs: GBufs, gst: GState, func_node: uint64) : GState {
       p := emit_piece(bufs.out, p, 1);
 
       new_count := sym_add(bufs, (*bufs.pool_a)[param_node], (*bufs.pool_b)[param_node],
-                            preg, false, false, false, type_is_signed(bufs, ptype), pwidth, 0, 0, 0, cur.sym_count);
+                            preg, false, false, false, false, type_is_signed(bufs, ptype), pwidth, 0, 0, 0, cur.sym_count);
       cur := GState { out_pos := p, next_label := cur.next_label,
                        sym_count := new_count, had_error := cur.had_error };
     }}}
@@ -6868,6 +7075,7 @@ function main() : int32 {
   mut sym_composite : int32[128] := 0;
   mut sym_is_array : int32[128] := 0;
   mut sym_is_pointer : int32[128] := 0;
+  mut sym_ptr_pointee_composite : int32[128] := 0;
   mut sym_signed : int32[128] := 0;
   mut sym_width : uint64[128] := 0;
   mut sym_struct_node : uint64[128] := 0;
@@ -6880,7 +7088,7 @@ function main() : int32 {
   mut struct_name_len : uint64[32] := 0;
   mut struct_node : uint64[32] := 0;
   mut pbufs : Buffers := Buffers { src := &src_buf, tok_kind := &tok_kind, tok_offset := &tok_offset, tok_length := &tok_length, pool_kind := &pool_kind, pool_a := &pool_a, pool_b := &pool_b, pool_c := &pool_c, pool_d := &pool_d, list_pool := &list_pool };
-  mut gbufs : GBufs := GBufs { src := &src_buf, pool_kind := &pool_kind, pool_a := &pool_a, pool_b := &pool_b, pool_c := &pool_c, pool_d := &pool_d, list_pool := &list_pool, out := &out_buf, sym_name_off := &sym_name_off, sym_name_len := &sym_name_len, sym_reg := &sym_reg, sym_composite := &sym_composite, sym_is_array := &sym_is_array, sym_is_pointer := &sym_is_pointer, sym_signed := &sym_signed, sym_width := &sym_width, sym_struct_node := &sym_struct_node, sym_elem_type := &sym_elem_type, sym_elem_count := &sym_elem_count, func_name_off := &func_name_off, func_name_len := &func_name_len, func_node := &func_node, func_count := 0, struct_name_off := &struct_name_off, struct_name_len := &struct_name_len, struct_node := &struct_node, struct_count := 0 };
+  mut gbufs : GBufs := GBufs { src := &src_buf, pool_kind := &pool_kind, pool_a := &pool_a, pool_b := &pool_b, pool_c := &pool_c, pool_d := &pool_d, list_pool := &list_pool, out := &out_buf, sym_name_off := &sym_name_off, sym_name_len := &sym_name_len, sym_reg := &sym_reg, sym_composite := &sym_composite, sym_is_array := &sym_is_array, sym_is_pointer := &sym_is_pointer, sym_ptr_pointee_composite := &sym_ptr_pointee_composite, sym_signed := &sym_signed, sym_width := &sym_width, sym_struct_node := &sym_struct_node, sym_elem_type := &sym_elem_type, sym_elem_count := &sym_elem_count, func_name_off := &func_name_off, func_name_len := &func_name_len, func_node := &func_node, func_count := 0, struct_name_off := &struct_name_off, struct_name_len := &struct_name_len, struct_node := &struct_node, struct_count := 0 };
   mut tr : TokenizeResult := TokenizeResult { count := 0, had_error := false, err_kind := 0, err_offset := 0, err_length := 0 };
   mut pst : PState := PState { tok_idx := 0, pool_next := 1, list_next := 0, had_error := false, err_tok := 0 };
   mut prog : ParseResult := pack_result(0, pst);
