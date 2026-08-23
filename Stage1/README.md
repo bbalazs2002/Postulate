@@ -73,7 +73,7 @@ directory — worth knowing before reading the source:
 |---|---|---|
 | Lexer | `src/lexer.ptl` | Done — reads a v0 program from stdin, writes Hoare's own token-dump format to stdout, matches Hoare's own diagnostics (message text, line/col, exit codes) exactly. Verified against `Hoare/tests/cases/*` unchanged: all 7 fixtures pass byte-for-byte. |
 | Parser | `src/parser.ptl` | Done — reads a v0 program from stdin, parses it as `program` (chapter 6 of the parser spec), dumps the resulting AST (a flat `<id> <kind> <a> <b> <c> <d>` listing, not Hoare's own s-expression format — see the file header) or a syntax diagnostic with line/col. Verified against `Hoare/tests/codegen_cases/*` (30 known-valid, composite-heavy programs — all parse), `Hoare/tests/checker_cases/*` (68 syntactically-valid programs — all parse, regardless of whether Hoare's checker itself would accept them semantically), and `Hoare/tests/blackbox_cases/*` (24 programs, `PROGRAM` directive line stripped — the 12 `_valid` ones parse, the 12 `_error` ones are correctly rejected, each for a genuine syntax defect — missing `;`, mismatched `(` — confirmed by inspection, not assumed). |
-| Codegen | (next) | Not started. |
+| Codegen | `src/codegen.ptl` | Done — reads a v0 program from stdin, parses it (its own copy of `parser.ptl`), and emits x86_64 NASM assembly to stdout, or a diagnostic. Deliberately scalar-only (int8‥64/uint8‥64/bool locals, params, and returns; no structs/arrays/pointers — parsed per the full grammar but rejected at codegen with a clean `codegen error`, never silently wrong code — see the file header). Verified end-to-end (assembled with `nasm`, linked with `ld`, actually **run**, exit code checked) against: every scalar-only-compatible fixture in `Hoare/tests/codegen_cases/*` (`01`–`10`, `19`, `20` — arithmetic, comparisons, `while`, short-circuit `&&`/`||`, extern `void` functions, unary/bitwise ops, simultaneous assignment, division/modulo, unsigned comparison, two-function calls, recursion); and a set of hand-written multi-function programs exercising parameters, calls, and boolean returns. |
 
 ### Two bugs this phase found in Hoare itself
 
@@ -96,6 +96,51 @@ the composite value to a named local before passing it alongside other
 arguments) — see the file's own header comment for the exact rule.
 Both are reminders that self-hosting is also a genuine correctness
 exercise for Stage 0, not just a milestone for Stage 1.
+
+### Three bugs this phase found in Stage 1's own code
+
+None of these are Hoare bugs — Stage 0 compiled every one of these
+programs exactly as written. They're logic mistakes in `parser.ptl`/
+`codegen.ptl` themselves, caught only once codegen output was actually
+assembled, linked, and *run* (not just "did it compile"):
+
+- **List-pool contiguity.** Every `(start, count)` list this arena
+  builds (call args, struct fields, decls, statements, params, top-
+  level decls, simultaneous-assignment pairs) was originally built by
+  "capture `start`, then append each item right after parsing it" —
+  which silently breaks the moment an item's own parsing does list
+  appends of its own (a nested call's args, a nested function's own
+  decls/statements), landing between this list's own entries. A
+  two-function program's second function ended up reading a stray
+  internal node id instead of its own. Fixed by staging item ids into
+  a local `uint64[256]` array while parsing, then bulk-appending them
+  to `list_pool` in one uninterrupted pass once parsing for that list
+  is complete — see any of the affected functions' own comments (e.g.
+  `parse_expr_list`) for the exact shape.
+- **A leftover instance of the "composite-in-non-last-position" Hoare
+  bug (§9b above) in Stage 1's own code**, despite the workaround rule
+  being documented and followed everywhere else: `parse_unary`
+  called `alloc_node(bufs, result_state(inner), 14, ...)`, passing a
+  freshly-computed `PState` (a call result, not a plain local) as the
+  *second* of seven arguments — corrupting the sibling arguments in
+  exactly the way `parse_primary`'s own header comment warns against.
+  In `codegen.ptl`, the same anti-pattern in `gen_expr`'s binary-
+  operator case, `gen_binop`, `gen_and`, and `gen_or` (a `GState { ... }`
+  literal built inline as a non-last call argument) corrupted `bufs`
+  itself, making every binary expression (`+`, `%`, `==`, …) fail with
+  a generic `codegen error`. Fixed the same way throughout: bind the
+  composite to an existing local first, then pass that local.
+- **`pop rbx` instead of `pop rax`** in `gen_expr`'s binary-operator
+  case — after evaluating the right operand and copying it into `rbx`,
+  the left operand (pushed earlier) needs popping back into `rax`; the
+  wrong emit-piece id was used, so `rbx` ended up holding the *left*
+  operand and `rax` still held the *right* one, silently swapping every
+  binary operator's operands (caught by `n % 2` returning the divisor
+  instead of the remainder). And `gen_or`'s short-circuit branch had
+  its `je`-target and fall-through swapped relative to what OR actually
+  needs (mirrored from `gen_and` without inverting the roles), making
+  `a || b` return `b`'s value when `a` is true instead of short-
+  circuiting to `true` — caught by `true || false` returning `false`.
 
 ## Building and testing
 
@@ -125,4 +170,15 @@ file instead, checking only the exit code:
 ./hoare ../Stage1/src/parser.ptl -o /tmp/stage1_parser
 /tmp/stage1_parser < tests/codegen_cases/24_composite_return.ptl
 echo $?   # 0 == parsed; the AST dump itself goes to stdout
+```
+
+The codegen phase can be driven all the way to a running binary, since
+its output is real NASM:
+
+```sh
+./hoare ../Stage1/src/codegen.ptl -o /tmp/stage1_codegen
+/tmp/stage1_codegen < tests/codegen_cases/20_recursion_factorial.ptl > /tmp/out.asm
+nasm -f elf64 -o /tmp/out.o /tmp/out.asm
+ld -static -no-pie -e _start -o /tmp/out /tmp/out.o
+/tmp/out; echo $?   # 120
 ```
