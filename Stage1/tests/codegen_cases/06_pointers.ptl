@@ -1,0 +1,33 @@
+function increment(p: *int32) : void {
+  *p := *p + 1;
+}
+
+function first_or_null(cond: bool, p: *int32) : *int32 {
+  if (cond) {
+    return p;
+  }
+  return null;
+}
+
+function main() : int32 {
+  mut a : int32 := 10;
+  mut b : int32 := 20;
+  mut pa : *int32 := &a;
+  mut pb : *int32 := null;
+
+  increment(pa);
+  *pa := *pa + 5;
+
+  pb := first_or_null(true, &b);
+  if (pb == null) {
+    return 0;
+  }
+  *pb := *pb * 2;
+
+  pa := first_or_null(false, &a);
+  if (pa == null) {
+    pa := &b;
+  }
+
+  return a + b + *pa;
+}
