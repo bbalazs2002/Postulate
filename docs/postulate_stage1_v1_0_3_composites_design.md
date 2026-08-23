@@ -23,10 +23,11 @@ sub-passes, all still `v1.0.3`:
 3. **Arrays — locals, indexing, literals, broadcast-init, copy**
    (**done**): array-typed locals, index read/write (including chained
    index/field lvalues like `pts[1].x`), array literals (including
-   array-of-struct and nested arrays), scalar broadcast-init, and
-   array-to-array copy. Same scope boundary as structs — array-typed
-   parameters/return values are still out of scope (`type_ok`
-   unchanged), and so are pointers (`&`/`*`).
+   array-of-struct and nested arrays), broadcast-init (scalar *or*
+   struct source, both at decl-init and at assignment — see "Broadcast-
+   init" below), and array-to-array copy. Same scope boundary as
+   structs — array-typed parameters/return values are still out of
+   scope (`type_ok` unchanged), and so are pointers (`&`/`*`).
 4. **Pointers and the calling convention** (not yet done): `&`/`*`, and
    composite parameters/return values (removing the `type_ok`
    restriction above). This section of the document will be written
@@ -292,6 +293,24 @@ array-typed function parameter is still cleanly rejected with
 declaration/dereference (`&x`, `*p`) is also still cleanly rejected —
 confirming both scope boundaries actually hold.
 
+The struct-source/assignment-time broadcast extension (see "Broadcast-
+init" above) added its own permanent fixture,
+`Stage1/tests/codegen_cases/05_struct_array_broadcast.ptl`: struct
+broadcast at decl-init (`mut pts: Point[4] := p;`) with a subsequent
+per-element mutation proving copy independence, and scalar broadcast at
+*assignment* (`nums := 7;` after `nums` was already declared) with its
+own independent element mutation. Verified by hand-computed exit code
+(`263 mod 256 = 7`). Also verified ad hoc (rejected cleanly with
+`codegen error`, not a silent miscompile): a struct source broadcasting
+into an array whose element type is a *different* struct (`A[3] := b;`
+where `b: B`, even though `A`/`B` have identical field layouts — the
+check is by declared struct identity, matching Hoare's own
+`types_equal`, not by structural shape), and a scalar source
+broadcasting into a struct-typed array element (`arr: A[3] := 5;` —
+`type_width` has no meaningful answer for a struct type node, so this
+is guarded explicitly rather than left to silently fall through to a
+type-mismatched `store` that only `llc`'s verifier would have caught).
+
 ## Sub-pass 3: arrays — locals, indexing, literals, broadcast-init, copy
 
 ### `ExprResult`/`SymInfo` grow a parallel array description, not a unified "type node"
@@ -343,19 +362,45 @@ used by `gen_array_lit_typed`/broadcast-init below to address element
 real bug caught during testing** (see below), not just a hypothetical
 one worth footnoting.
 
-### Broadcast-init: coerce once, store N times
+### Broadcast-init: coerce/copy once, store N times — scalar or struct source, decl-init or assignment
 
 A scalar decl-init source for an array-typed decl (`mut a: int32[4] :=
 7;`, v0 reference §4.1) is coerced to the element type exactly once,
 then the *same* already-coerced register is stored into each of the
 `elem_count` GEP'd element addresses in a compile-time-bounded loop (the
 count is always a literal in v0 — no need to re-evaluate or re-coerce
-per iteration). A composite broadcast source is rejected before this
-path is ever reached (checked alongside the composite-array-copy case,
-both branches of "the decl-init's own `gen_expr` result was
-composite") — matching Stage 0's own rule (Hoare's checker never
-allows a composite broadcast source either), not a Stage-1-only
-restriction invented here.
+per iteration).
+
+Initially this path rejected any composite broadcast source outright,
+on the assumption v0 only allows a scalar broadcast source — checking
+Hoare's own semantic checker (`Hoare/src/sema_stmt.asm`,
+`check_array_broadcast_compatible`) showed that assumption was too
+narrow: Hoare accepts *any* expression whose type matches the array's
+element type exactly, as long as it isn't literally an array literal —
+which includes a **struct-typed source broadcasting into an array-of-
+struct**, not just scalars. This was added as a second broadcast shape,
+alongside the scalar one: when the decl-init's own `gen_expr` result is
+composite-but-not-array, and the array's own element type resolves (via
+`type_ok_local`) to a struct exactly matching the source's `struct_node`,
+the same per-element GEP loop runs `emit_composite_copy` (a whole-
+aggregate load+store) into each element address instead of a scalar
+`coerce_width`+store. A source struct that doesn't match the element
+type's struct (or a scalar source against a struct-typed element, where
+`type_width` has no meaningful answer) is rejected with a codegen error,
+not silently miscompiled.
+
+Hoare's checker also confirmed broadcast-init isn't decl-init-only:
+`postulate_v0_language_reference.md` §4.2 already states an assignment's
+right-hand side "match[es] the same shapes and rules as a `decl`
+initializer," and `check_array_broadcast_compatible` is in fact called
+from *both* `check_decl` and the assignment-statement checker in Hoare.
+`gen_assign_stmt` initially didn't implement either broadcast shape at
+all (an array-typed assignment target required an exact array-to-array
+`emit_composite_copy`, nothing else) — this sub-pass closed that gap
+too, mirroring `gen_decls`' own scalar/struct broadcast logic exactly
+(same GEP-per-element loop, same struct-match/scalar-vs-struct-element
+guards), so `arr := 7;` and `arr := some_struct;` now work identically
+whether `arr` is being declared or merely reassigned.
 
 ### `emit_composite_copy`: one helper for every whole-aggregate copy
 

@@ -26,8 +26,9 @@
 // sub-passes, docs/postulate_stage1_v1_0_3_composites_design.md),
 // struct/array literals (nesting and array-of-struct included), field/
 // index read/write via `gen_lvalue` (chained lvalues like `pts[1].x`
-// included), array broadcast-init, and struct-to-struct/array-to-array
-// copy. NOT supported: pointers (`&`/`*`), struct/array *parameters or
+// included), array broadcast-init (scalar or struct source, at
+// decl-init or assignment), and struct-to-struct/array-to-array copy.
+// NOT supported: pointers (`&`/`*`), struct/array *parameters or
 // return values* -- parser.ptl parses all of these fine (they're part
 // of v0), but this file's codegen recognizes them and fails cleanly
 // (`codegen error: ...`) rather than emitting wrong code, the same
@@ -5456,6 +5457,12 @@ function gen_assign_stmt(bufs: GBufs, gst: GState, node: uint64) : GState {
   mut rhs_signed : int32[64] := 0;
   mut rhs_composite : int32[64] := 0;
   mut rhs_is_array : int32[64] := 0;
+  mut rhs_struct_node : uint64[64] := 0;
+  mut ec : ExprResult := fail_expr(gst);
+  mut j : uint64 := 0;
+  mut ereg : uint64 := 0;
+  mut elem_tok : TypeOkResult := TypeOkResult { ok := false, is_struct := false, is_array := false,
+                                                  struct_node := 0, elem_type := 0, elem_count := 0 };
 
   while (i < pair_count && ok) {
     pair_node := (*bufs.list_pool)[pairs_start + i];
@@ -5470,6 +5477,7 @@ function gen_assign_stmt(bufs: GBufs, gst: GState, node: uint64) : GState {
       if (e.is_signed) { rhs_signed[i] := 1; }
       if (e.is_composite) { rhs_composite[i] := 1; }
       if (e.is_array) { rhs_is_array[i] := 1; }
+      rhs_struct_node[i] := e.struct_node;
     }
     i := i + 1;
   }
@@ -5485,12 +5493,77 @@ function gen_assign_stmt(bufs: GBufs, gst: GState, node: uint64) : GState {
       } else {
         cur := expr_state(lv);
         if (lv.is_composite) {
+          if (lv.is_array && rhs_composite[i] != 1) {
+            // Scalar broadcast source (v0 Sec 4.2: assignment follows the
+            // same shapes/rules as a decl initializer, Sec 4.1) -- coerce
+            // once, store into every element. Guarded against a struct-
+            // element target the same way gen_decls' own scalar-broadcast
+            // branch is: type_width has no meaningful answer for a struct
+            // type node.
+            elem_tok := type_ok_local(bufs, lv.elem_type);
+            if (elem_tok.is_struct) {
+              ok := false;
+            } else {
+              ec := coerce_width(bufs, cur, rhs_regs[i], rhs_widths[i], type_width(bufs, lv.elem_type), rhs_signed[i] == 1);
+              cur := expr_state(ec);
+              j := 0;
+              while (j < lv.elem_count && !cur.had_error) {
+                cur := new_label(cur);
+                ereg := cur.next_label - 1;
+                p := emit_piece(bufs.out, cur.out_pos, 2);
+                p := append_uint(bufs.out, p, ereg);
+                p := emit_piece(bufs.out, p, 85);
+                p := emit_composite_type(bufs, p, true, 0, lv.elem_type, lv.elem_count);
+                p := emit_piece(bufs.out, p, 7);
+                p := append_uint(bufs.out, p, lv.reg);
+                p := emit_piece(bufs.out, p, 91);
+                p := append_uint(bufs.out, p, j);
+                p := emit_piece(bufs.out, p, 1);
+                p := emit_piece(bufs.out, p, 44);
+                p := append_uint(bufs.out, p, type_width(bufs, lv.elem_type));
+                p := emit_piece(bufs.out, p, 4);
+                p := append_uint(bufs.out, p, ec.reg);
+                p := emit_piece(bufs.out, p, 7);
+                p := append_uint(bufs.out, p, ereg);
+                p := emit_piece(bufs.out, p, 1);
+                cur := GState { out_pos := p, next_label := cur.next_label,
+                                 sym_count := cur.sym_count, had_error := cur.had_error };
+                j := j + 1;
+              }
+            }
+          } else {
+          if (lv.is_array && rhs_composite[i] == 1 && rhs_is_array[i] != 1) {
+            // Struct broadcast source, same rule as gen_decls' own.
+            elem_tok := type_ok_local(bufs, lv.elem_type);
+            if (!elem_tok.is_struct || elem_tok.struct_node != rhs_struct_node[i]) {
+              ok := false;
+            } else {
+              j := 0;
+              while (j < lv.elem_count && !cur.had_error) {
+                cur := new_label(cur);
+                ereg := cur.next_label - 1;
+                p := emit_piece(bufs.out, cur.out_pos, 2);
+                p := append_uint(bufs.out, p, ereg);
+                p := emit_piece(bufs.out, p, 85);
+                p := emit_composite_type(bufs, p, true, 0, lv.elem_type, lv.elem_count);
+                p := emit_piece(bufs.out, p, 7);
+                p := append_uint(bufs.out, p, lv.reg);
+                p := emit_piece(bufs.out, p, 91);
+                p := append_uint(bufs.out, p, j);
+                p := emit_piece(bufs.out, p, 1);
+                cur := GState { out_pos := p, next_label := cur.next_label,
+                                 sym_count := cur.sym_count, had_error := cur.had_error };
+                cur := emit_composite_copy(bufs, cur, false, elem_tok.struct_node, 0, 0, rhs_regs[i], ereg);
+                j := j + 1;
+              }
+            }
+          } else {
           if (rhs_composite[i] != 1 || (rhs_is_array[i] == 1) != lv.is_array) {
             ok := false;
           } else {
             cur := emit_composite_copy(bufs, cur, lv.is_array, lv.struct_node,
                                         lv.elem_type, lv.elem_count, rhs_regs[i], lv.reg);
-          }
+          }}}
         } else {
           e := coerce_width(bufs, cur, rhs_regs[i], rhs_widths[i], lv.width, rhs_signed[i] == 1);
           cur := expr_state(e);
@@ -5743,6 +5816,8 @@ function gen_decls(bufs: GBufs, gst: GState, start: uint64, count: uint64) : GSt
   mut dreg : uint64 := 0;
   mut tok : TypeOkResult := TypeOkResult { ok := false, is_struct := false, is_array := false,
                                              struct_node := 0, elem_type := 0, elem_count := 0 };
+  mut elem_tok : TypeOkResult := TypeOkResult { ok := false, is_struct := false, is_array := false,
+                                                  struct_node := 0, elem_type := 0, elem_count := 0 };
   mut j : uint64 := 0;
   mut ereg : uint64 := 0;
   mut ec : ExprResult := fail_expr(gst);
@@ -5825,41 +5900,80 @@ function gen_decls(bufs: GBufs, gst: GState, start: uint64, count: uint64) : GSt
           } else {
           if (e.is_composite) {
             if (!e.is_array) {
-              cur := GState { out_pos := cur.out_pos, next_label := cur.next_label,
-                               sym_count := cur.sym_count, had_error := true };
+              // Struct broadcast source (v0 checker parity, Hoare's own
+              // check_array_broadcast_compatible): valid iff the array's
+              // element type resolves to a struct exactly matching e's
+              // own struct_node -- not scalar-only despite the language
+              // reference's "single scalar expression" wording (that
+              // text predates this codegen catching up to Hoare's own,
+              // slightly more permissive, check).
+              elem_tok := type_ok_local(bufs, tok.elem_type);
+              if (!elem_tok.is_struct || elem_tok.struct_node != e.struct_node) {
+                cur := GState { out_pos := cur.out_pos, next_label := cur.next_label,
+                                 sym_count := cur.sym_count, had_error := true };
+              } else {
+                j := 0;
+                while (j < tok.elem_count && !cur.had_error) {
+                  cur := new_label(cur);
+                  ereg := cur.next_label - 1;
+                  p := emit_piece(bufs.out, cur.out_pos, 2);
+                  p := append_uint(bufs.out, p, ereg);
+                  p := emit_piece(bufs.out, p, 85);
+                  p := emit_composite_type(bufs, p, true, 0, tok.elem_type, tok.elem_count);
+                  p := emit_piece(bufs.out, p, 7);
+                  p := append_uint(bufs.out, p, dreg);
+                  p := emit_piece(bufs.out, p, 91);
+                  p := append_uint(bufs.out, p, j);
+                  p := emit_piece(bufs.out, p, 1);
+                  cur := GState { out_pos := p, next_label := cur.next_label,
+                                   sym_count := cur.sym_count, had_error := cur.had_error };
+                  cur := emit_composite_copy(bufs, cur, false, elem_tok.struct_node, 0, 0, e.reg, ereg);
+                  j := j + 1;
+                }
+              }
             } else {
               cur := emit_composite_copy(bufs, cur, true, 0, tok.elem_type, tok.elem_count, e.reg, dreg);
             }
           } else {
             // Array broadcast-init (v0 reference Sec 4.1): a single
             // scalar source, coerced once, stored into every element --
-            // a composite broadcast source is not v0-valid and is
-            // rejected just above, not silently accepted.
-            ec := coerce_width(bufs, cur, e.reg, e.width, type_width(bufs, tok.elem_type), e.is_signed);
-            cur := expr_state(ec);
-            j := 0;
-            while (j < tok.elem_count && !cur.had_error) {
-              cur := new_label(cur);
-              ereg := cur.next_label - 1;
-              p := emit_piece(bufs.out, cur.out_pos, 2);
-              p := append_uint(bufs.out, p, ereg);
-              p := emit_piece(bufs.out, p, 85);
-              p := emit_composite_type(bufs, p, true, 0, tok.elem_type, tok.elem_count);
-              p := emit_piece(bufs.out, p, 7);
-              p := append_uint(bufs.out, p, dreg);
-              p := emit_piece(bufs.out, p, 91);
-              p := append_uint(bufs.out, p, j);
-              p := emit_piece(bufs.out, p, 1);
-              p := emit_piece(bufs.out, p, 44);
-              p := append_uint(bufs.out, p, type_width(bufs, tok.elem_type));
-              p := emit_piece(bufs.out, p, 4);
-              p := append_uint(bufs.out, p, ec.reg);
-              p := emit_piece(bufs.out, p, 7);
-              p := append_uint(bufs.out, p, ereg);
-              p := emit_piece(bufs.out, p, 1);
-              cur := GState { out_pos := p, next_label := cur.next_label,
-                               sym_count := cur.sym_count, had_error := cur.had_error };
-              j := j + 1;
+            // a composite broadcast source into a scalar-element array
+            // is already rejected just above; the mirror case (a scalar
+            // source against a struct-element array) is guarded here --
+            // type_width has no meaningful answer for a struct type
+            // node, so a scalar source is only valid when the element
+            // type is itself scalar.
+            elem_tok := type_ok_local(bufs, tok.elem_type);
+            if (elem_tok.is_struct) {
+              cur := GState { out_pos := cur.out_pos, next_label := cur.next_label,
+                               sym_count := cur.sym_count, had_error := true };
+            } else {
+              ec := coerce_width(bufs, cur, e.reg, e.width, type_width(bufs, tok.elem_type), e.is_signed);
+              cur := expr_state(ec);
+              j := 0;
+              while (j < tok.elem_count && !cur.had_error) {
+                cur := new_label(cur);
+                ereg := cur.next_label - 1;
+                p := emit_piece(bufs.out, cur.out_pos, 2);
+                p := append_uint(bufs.out, p, ereg);
+                p := emit_piece(bufs.out, p, 85);
+                p := emit_composite_type(bufs, p, true, 0, tok.elem_type, tok.elem_count);
+                p := emit_piece(bufs.out, p, 7);
+                p := append_uint(bufs.out, p, dreg);
+                p := emit_piece(bufs.out, p, 91);
+                p := append_uint(bufs.out, p, j);
+                p := emit_piece(bufs.out, p, 1);
+                p := emit_piece(bufs.out, p, 44);
+                p := append_uint(bufs.out, p, type_width(bufs, tok.elem_type));
+                p := emit_piece(bufs.out, p, 4);
+                p := append_uint(bufs.out, p, ec.reg);
+                p := emit_piece(bufs.out, p, 7);
+                p := append_uint(bufs.out, p, ereg);
+                p := emit_piece(bufs.out, p, 1);
+                cur := GState { out_pos := p, next_label := cur.next_label,
+                                 sym_count := cur.sym_count, had_error := cur.had_error };
+                j := j + 1;
+              }
             }
           }}
         }

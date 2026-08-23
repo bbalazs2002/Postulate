@@ -1,0 +1,24 @@
+struct Point {
+  x: int32;
+  y: int32;
+}
+
+function main() : int32 {
+  const p : Point := Point { x := 3, y := 4 };
+  mut pts : Point[4] := p;
+  mut nums : int32[5] := 0;
+  mut i : int32 := 0;
+  mut sum : int32 := 0;
+
+  pts[2].x := 99;
+
+  nums := 7;
+  nums[2] := 111;
+
+  while (i < 5) {
+    sum := sum + nums[i];
+    i := i + 1;
+  }
+
+  return pts[0].x + pts[0].y + pts[1].x + pts[1].y + pts[2].x + pts[2].y + pts[3].x + pts[3].y + sum;
+}
