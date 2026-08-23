@@ -719,14 +719,31 @@ Unchanged from v0 (§3.8 there).
 
 ### 3.9 Function calls
 
-Unchanged from v0 (§3.9 there): bare-identifier callee only,
-right-to-left argument evaluation. `pure` (§7.2) restricts what a
-function may do, not how it's called — call syntax itself doesn't
-change. **Changed**: "everything passed by value" is no longer
-universal — a parameter declared `ref` (§5.3a) is passed by reference
-instead, and its call-site argument must be marked `ref` too
-(`f(ref x)`) and must be an lvalue. Every parameter *not* declared
-`ref` still follows v0's by-value rule exactly, composites included.
+Unchanged from v0 (§3.9 there): bare-identifier callee only. `pure`
+(§7.2) restricts what a function may do, not how it's called — call
+syntax itself doesn't change. **Changed**: "everything passed by
+value" is no longer universal — a parameter declared `ref` (§5.3a) is
+passed by reference instead, and its call-site argument must be marked
+`ref` too (`f(ref x)`) and must be an lvalue. Every parameter *not*
+declared `ref` still follows v0's by-value rule exactly, composites
+included.
+
+**Changed: argument evaluation order is left-to-right**, not v0's
+right-to-left. For `f(a(), b())`, `a()` now runs before `b()`. Still a
+*fixed, specified* order, never "unspecified" the way C leaves it (v0
+§1's non-negotiable principle carries over unchanged) — only which
+order is fixed changes. v0's right-to-left rule existed only because
+it was the natural order for Hoare's/the original Stage 1 proof of
+concept's push-based calling convention (the last-evaluated argument
+ends up closest to the stack pointer); Stage 1's LLVM IR backend
+(`v1.0.2`, see
+[`postulate_stage1_v1_0_2_llvm_backend_design.md`](postulate_stage1_v1_0_2_llvm_backend_design.md))
+removes that mechanism, and with it the only reason to prefer
+right-to-left, so `v1` adopts left-to-right — matching source reading
+order, the default every C-family language without a specific reason
+to do otherwise uses. v0 and Hoare are unaffected and keep
+right-to-left, frozen, exactly as documented there; the two languages
+are not meant to be reconciled.
 
 ### 3.10 Lvalues
 

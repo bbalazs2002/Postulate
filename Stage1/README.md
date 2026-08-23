@@ -12,6 +12,17 @@ Stage 1 does **not** implement v1 (the language design worked out in
 the same language Hoare already compiles. Extending Stage 1 to v1 is
 future work, after self-hosting is achieved.
 
+**One narrow, deliberate exception, starting `v1.0.2`:** function-call
+argument evaluation order follows v1's left-to-right rule, not v0's
+right-to-left one — the only place Stage 1 currently deviates from
+"targets exactly v0." See
+[`docs/postulate_stage1_v1_0_2_llvm_backend_design.md`](../docs/postulate_stage1_v1_0_2_llvm_backend_design.md)
+for why (short version: v0's right-to-left order was a byproduct of
+the NASM backend's push-based calling convention, which the LLVM IR
+backend removes). This is not a precedent for pulling in other v1
+features early — the next deliberate one is statement sugar at
+`v1.0.7`.
+
 ## Why everything here looks the way it does
 
 v0 has real, load-bearing constraints that shaped every file in this
@@ -73,7 +84,7 @@ directory — worth knowing before reading the source:
 |---|---|---|
 | Lexer | `src/lexer.ptl` | Done, now including `v1.0.1`'s `#include` — reads a program from stdin (the entry file), resolves every `#include` transitively via a three-phase discover/order/emit pass (`docs/postulate_stage1_v1_0_1_include_design.md`) before tokenizing the merged result, writes Hoare's own token-dump format to stdout, matches Hoare's own diagnostics (message text, line/col, exit codes) exactly for the zero-`#include` case, and gains a filename once more than one file is involved. Verified against `Hoare/tests/cases/*` unchanged (all 7 fixtures pass byte-for-byte) plus `Stage1/tests/include_cases/*` (16 fixtures: ordering, diamond dedup, cycle detection, nested relative paths, malformed/reserved forms, preamble rules, comment-safety, multi-directive-per-line, and diagnostic file/line/byte-offset correctness at various nesting depths) — run via `BINARY_KIND=lexer Stage1/tests/run_include_tests.sh`. `sys_openat`/`sys_close` (Linux 257/3) were added to Hoare's own extern whitelist to unblock this (`docs/postulate_v0_language_reference.md` §5.2). |
 | Parser | `src/parser.ptl` | Done, `#include` included — the same `resolve_includes` pass (byte-for-byte identical source to the lexer's copy, per the design doc's "tripled" duplication) ported over; diagnostics gain a filename the same way, using the parser's own wording ("parse error at token N in file '...'"). Verified against everything it always was (`Hoare/tests/codegen_cases/*`, `Hoare/tests/checker_cases/*`, `Hoare/tests/blackbox_cases/*` — 100+24 programs, `PROGRAM` line stripped) plus the same 16 `include_cases` fixtures (`BINARY_KIND=parser Stage1/tests/run_include_tests.sh` — exit codes only; parser diagnostics have their own wording, not compared byte-for-byte against the lexer's). |
-| Codegen | `src/codegen.ptl` | Done, `#include` included — same pass ported a third time. Deliberately scalar-only (int8‥64/uint8‥64/bool locals, params, and returns; no structs/arrays/pointers — parsed per the full grammar but rejected at codegen with a clean `codegen error`). Verified end-to-end (assembled with `nasm`, linked with `ld`, actually **run**) against every scalar-only-compatible fixture in `Hoare/tests/codegen_cases/*` (`01`–`10`, `19`, `20`) plus the 16 `include_cases` fixtures both for exit code (`BINARY_KIND=codegen Stage1/tests/run_include_tests.sh`) and, for a representative subset (`01`, `03`, `05`, `13`), the full pipeline through to a running binary with the correct computed exit code (diamond dedup and 3+-level transitivity included). |
+| Codegen | `src/codegen.ptl` | Done, `#include` included, and now on the `v1.0.2` LLVM IR backend (`docs/postulate_stage1_v1_0_2_llvm_backend_design.md`) — emits LLVM IR text instead of x86 NASM, lowered with `llc -filetype=obj` instead of assembled with `nasm`; `ld` linking is unchanged. Same scalar-only feature set as before (int8‥64/uint8‥64/bool locals, params, and returns; no structs/arrays/pointers — parsed per the full grammar but rejected at codegen with a clean `codegen error`) — a backend swap, not a feature addition, **except** one deliberate, documented exception: function-call argument evaluation order is now **left to right** (v1's rule), not v0's right-to-left — see the design doc and the callout above. Verified end-to-end (lowered with `llc`, linked with `ld`, actually **run**) against every scalar-only-compatible fixture in `Hoare/tests/codegen_cases/*` (`01`–`10`, `19`, `20`, all producing identical exit codes to the NASM backend), the 16 `include_cases` fixtures both for exit code (`BINARY_KIND=codegen Stage1/tests/run_include_tests.sh`) and, for a representative subset (`01`, `03`, `05`, `13`), the full pipeline through to a running binary with the correct computed exit code (diamond dedup and 3+-level transitivity included), plus a new `Stage1/tests/codegen_cases/*` fixture proving the left-to-right evaluation-order change itself (Hoare, by design, would compute a different result for the same program — see that fixture's own header comment). |
 
 ### Two bugs this phase found in Hoare itself
 
@@ -177,12 +188,15 @@ echo $?   # 0 == parsed; the AST dump itself goes to stdout
 ```
 
 The codegen phase can be driven all the way to a running binary, since
-its output is real NASM:
+its output is LLVM IR (`v1.0.2` — see
+[`docs/postulate_stage1_v1_0_2_llvm_backend_design.md`](../docs/postulate_stage1_v1_0_2_llvm_backend_design.md);
+`llc` and `opt` ship in Ubuntu's `llvm` package, alongside `nasm`/
+`binutils` in `Hoare/Dockerfile`):
 
 ```sh
 ./hoare ../Stage1/src/codegen.ptl -o /tmp/stage1_codegen
-/tmp/stage1_codegen < tests/codegen_cases/20_recursion_factorial.ptl > /tmp/out.asm
-nasm -f elf64 -o /tmp/out.o /tmp/out.asm
+/tmp/stage1_codegen < tests/codegen_cases/20_recursion_factorial.ptl > /tmp/out.ll
+llc -filetype=obj -mtriple=x86_64-unknown-linux-gnu -o /tmp/out.o /tmp/out.ll
 ld -static -no-pie -e _start -o /tmp/out /tmp/out.o
 /tmp/out; echo $?   # 120
 ```

@@ -1,0 +1,31 @@
+// Proves v1.0.2's argument-evaluation-order change (right-to-left, v0's
+// rule -> left-to-right, v1's rule -- see docs/postulate_stage1_v1_0_2_
+// llvm_backend_design.md and Stage1/README.md's own callout). Each of
+// `first`/`second` exits the whole process immediately with its own
+// distinct code, so whichever one `combine`'s arguments evaluate FIRST
+// is the one whose exit code is actually observed -- the other never
+// runs. Left to right means `first()` runs before `second()`, so the
+// expected exit code is 1, not 2.
+//
+// This fixture is intentionally NOT under Hoare/tests/codegen_cases/:
+// Hoare (Stage 0) still implements v0's right-to-left rule and would
+// produce exit code 2 for this exact program -- the two backends are
+// not expected to agree here, by design (see Stage1/README.md).
+
+function first() : int32 {
+  sys_exit(1);
+  return 0;
+}
+
+function second() : int32 {
+  sys_exit(2);
+  return 0;
+}
+
+function combine(a: int32, b: int32) : int32 {
+  return a + b;
+}
+
+function main() : int32 {
+  return combine(first(), second());
+}

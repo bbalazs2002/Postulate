@@ -1,7 +1,7 @@
 FROM ubuntu:24.04
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends nasm binutils bash diffutils \
+ && apt-get install -y --no-install-recommends nasm binutils bash diffutils llvm \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
