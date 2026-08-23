@@ -1,0 +1,5 @@
+// A's own header comment
+#include "./b.ptl";
+function main() : int32 {
+  return c_val + b_val;
+}

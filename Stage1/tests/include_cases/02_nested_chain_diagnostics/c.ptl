@@ -1,0 +1,3 @@
+// C's own header comment
+// second comment line
+const c_val : int32 := @;

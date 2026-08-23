@@ -1,0 +1,3 @@
+// A's own leading comment
+#include "./b.ptl";
+function main() : int32 { return b_val; }

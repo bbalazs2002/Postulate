@@ -34,10 +34,12 @@ global check_decl
 global check_extern_whitelist
 
 section .data
-str_sys_read:  db "sys_read"
-str_sys_write: db "sys_write"
-str_sys_mmap:  db "sys_mmap"
-str_sys_exit:  db "sys_exit"
+str_sys_read:   db "sys_read"
+str_sys_write:  db "sys_write"
+str_sys_mmap:   db "sys_mmap"
+str_sys_exit:   db "sys_exit"
+str_sys_openat: db "sys_openat"
+str_sys_close:  db "sys_close"
 
 msg_expected_bool:            db "expected 'bool'"
 msg_expected_bool_len         equ $ - msg_expected_bool
@@ -839,6 +841,26 @@ check_extern_whitelist:
     cmp     rax, 1
     je      .is_exit
 .not_exit:
+    cmp     r13, 10
+    jne     .not_openat
+    mov     rdi, [parser_src_buf]
+    add     rdi, r12
+    mov     rsi, str_sys_openat
+    mov     rdx, 10
+    call    bytes_equal
+    cmp     rax, 1
+    je      .is_openat
+.not_openat:
+    cmp     r13, 9
+    jne     .not_close
+    mov     rdi, [parser_src_buf]
+    add     rdi, r12
+    mov     rsi, str_sys_close
+    mov     rdx, 9
+    call    bytes_equal
+    cmp     rax, 1
+    je      .is_close
+.not_close:
     call    sema_report_begin
     mov     rsi, msg_extern_not_whitelisted
     mov     rdx, msg_extern_not_whitelisted_len
@@ -959,6 +981,71 @@ check_extern_whitelist:
     call    check_param_exact
 
     xor     rsi, rsi
+    mov     rdi, rbx
+    call    check_return_exact
+    jmp     .done
+
+; sys_openat: (dirfd: int64, path: *uint8, flags: int64, mode: int64) : int64
+; path is *uint8, not *char -- v0 has no char type (see v1.0.1 include
+; design doc); the eventual v1 signature will say *char once v1.0.8 adds it.
+.is_openat:
+    mov     rax, [rbx + AST_A_OFF]
+    mov     rcx, [rax + AST_D_OFF]
+    cmp     rcx, 4
+    jne     .sig_mismatch
+
+    mov     rdi, TOK_KW_INT64
+    call    mk_base
+    mov     rdx, rax
+    mov     rdi, [rbx + AST_A_OFF]
+    mov     rsi, 0
+    call    check_param_exact
+
+    mov     rdi, TOK_KW_UINT8
+    call    mk_ptr_base
+    mov     rdx, rax
+    mov     rdi, [rbx + AST_A_OFF]
+    mov     rsi, 1
+    call    check_param_exact
+
+    mov     rdi, TOK_KW_INT64
+    call    mk_base
+    mov     rdx, rax
+    mov     rdi, [rbx + AST_A_OFF]
+    mov     rsi, 2
+    call    check_param_exact
+
+    mov     rdi, TOK_KW_INT64
+    call    mk_base
+    mov     rdx, rax
+    mov     rdi, [rbx + AST_A_OFF]
+    mov     rsi, 3
+    call    check_param_exact
+
+    mov     rdi, TOK_KW_INT64
+    call    mk_base
+    mov     rsi, rax
+    mov     rdi, rbx
+    call    check_return_exact
+    jmp     .done
+
+; sys_close: (fd: int64) : int64
+.is_close:
+    mov     rax, [rbx + AST_A_OFF]
+    mov     rcx, [rax + AST_D_OFF]
+    cmp     rcx, 1
+    jne     .sig_mismatch
+
+    mov     rdi, TOK_KW_INT64
+    call    mk_base
+    mov     rdx, rax
+    mov     rdi, [rbx + AST_A_OFF]
+    mov     rsi, 0
+    call    check_param_exact
+
+    mov     rdi, TOK_KW_INT64
+    call    mk_base
+    mov     rsi, rax
     mov     rdi, rbx
     call    check_return_exact
     jmp     .done

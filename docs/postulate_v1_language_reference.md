@@ -1125,9 +1125,26 @@ type-erased memory:
 | `sys_clone` | `(flags: int64, stack: *void, parent_tid: *int32, child_tid: *int32, tls: uint64) : int64` |
 | `sys_futex` | `(addr: *uint32, op: int64, val: uint32, timeout: *void, addr2: *uint32, val3: uint32) : int64` |
 | `sys_gettid` | `() : int64` |
+| `sys_openat` | `(dirfd: int64, path: *char, flags: int64, mode: int64) : int64` |
+| `sys_close` | `(fd: int64) : int64` |
 
 (`sys_read`/`sys_write` keep `*uint8` — raw bytes, not necessarily
 text; a future `char`-based I/O layer would cast at the boundary, §3.7a.)
+
+`sys_openat`/`sys_close` are also new — added by `v1.0.1`
+(docs/postulate_stage1_bootstrap_plan.md) specifically to unblock
+`#include` (§6.2): none of the syscalls above can open a file by path,
+only read one already-open descriptor (`sys_read`), which is fine for
+today's single stdin-fed compiler but not for a preprocessor that has
+to open an unbounded, recursively-discovered set of included files
+itself. `path` is written `*char` here to match the type this table
+will eventually use everywhere once `char` exists — until then, Stage
+1's own use of these two externs (still v0 code, no `char` yet) reads
+and writes paths as `*uint8`, exactly like `sys_read`/`sys_write`'s own
+`buf` parameter above. `openat`, not the older `open`, is deliberate:
+`dirfd` is always passed as `AT_FDCWD` (`-100`) since path resolution
+itself is done by the caller's own string logic, never left to the
+kernel — see the include design doc for the full rationale.
 
 `sys_munmap`/`sys_mremap` are new — the deallocate/reallocate
 counterparts to the alloc-only `sys_mmap` v0 already had, closing an

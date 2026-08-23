@@ -1,0 +1,2 @@
+#include "./d.ptl";
+const b_val : int32 := 2;

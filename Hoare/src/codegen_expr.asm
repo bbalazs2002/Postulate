@@ -247,10 +247,12 @@ s_pop_r9_len equ $ - s_pop_r9
 s_syscall: db "    syscall"
 s_syscall_len equ $ - s_syscall
 
-str_sys_read:  db "sys_read"
-str_sys_write: db "sys_write"
-str_sys_mmap:  db "sys_mmap"
-str_sys_exit:  db "sys_exit"
+str_sys_read:   db "sys_read"
+str_sys_write:  db "sys_write"
+str_sys_mmap:   db "sys_mmap"
+str_sys_exit:   db "sys_exit"
+str_sys_openat: db "sys_openat"
+str_sys_close:  db "sys_close"
 msg_unknown_extern: db "codegen internal error: extern function not on the recognized syscall whitelist (should have been rejected by the semantic checker)"
 msg_unknown_extern_len equ $ - msg_unknown_extern
 
@@ -1759,10 +1761,10 @@ gen_binary_combine:
 
 ; ===========================================================================
 ; syscall_number_for: internal. in rdi = name_offset, rsi = name_len.
-; out: rax = the fixed Linux x86_64 syscall number for one of the 4
+; out: rax = the fixed Linux x86_64 syscall number for one of the 6
 ; whitelisted extern names, cross-checked against runtime.asm's own
 ; hardcoded numbers for its I/O. Never called on a name that isn't one of
-; these four -- check_extern_whitelist already rejected everything else
+; these six -- check_extern_whitelist already rejected everything else
 ; before codegen ever runs.
 ; ===========================================================================
 syscall_number_for:
@@ -1824,6 +1826,34 @@ syscall_number_for:
     cmp     rax, 1
     je      .sys_exit
 .not_exit:
+    cmp     r12, 10
+    jne     .not_openat
+    mov     rdi, [parser_src_buf]
+    add     rdi, rbx
+    mov     rsi, str_sys_openat
+    mov     rdx, 10
+    push    rbx
+    push    r12
+    call    bytes_equal
+    pop     r12
+    pop     rbx
+    cmp     rax, 1
+    je      .openat
+.not_openat:
+    cmp     r12, 9
+    jne     .not_close
+    mov     rdi, [parser_src_buf]
+    add     rdi, rbx
+    mov     rsi, str_sys_close
+    mov     rdx, 9
+    push    rbx
+    push    r12
+    call    bytes_equal
+    pop     r12
+    pop     rbx
+    cmp     rax, 1
+    je      .close
+.not_close:
     mov     rsi, msg_unknown_extern
     mov     rdx, msg_unknown_extern_len
     call    codegen_fail
@@ -1838,6 +1868,12 @@ syscall_number_for:
     jmp     .done
 .sys_exit:
     mov     rax, 60
+    jmp     .done
+.openat:
+    mov     rax, 257
+    jmp     .done
+.close:
+    mov     rax, 3
     jmp     .done
 .done:
     ret

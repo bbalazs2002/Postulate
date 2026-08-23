@@ -629,6 +629,16 @@ signature that doesn't match exactly, is a compile error.
 | `sys_write` | `(fd: int64, buf: *uint8, count: uint64) : int64` |
 | `sys_mmap` | `(addr: uint64, length: uint64, prot: int64, flags: int64, fd: int64, offset: int64) : *uint8` |
 | `sys_exit` | `(code: int64) : void` |
+| `sys_openat` | `(dirfd: int64, path: *uint8, flags: int64, mode: int64) : int64` |
+| `sys_close` | `(fd: int64) : int64` |
+
+`sys_openat`/`sys_close` (Linux syscalls 257/3) were added specifically
+to unblock `v1.0.1`'s `#include` (docs/postulate_stage1_v1_0_1_include_design.md)
+— Stage 1's own source is v0, and no earlier extern can open a file by
+path, only read an already-open descriptor. `path` is `*uint8`, not
+`*char`, since v0 has no `char` type at all (the v1 reference's own
+§5.2 table for these two names uses `*char`, matching the type that
+form will eventually take once `char` exists).
 
 These map directly onto the identically-named Linux x86_64 syscalls.
 `extern function` has no body — it is terminated by `;`, and its

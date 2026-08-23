@@ -1,0 +1,5 @@
+#include "./b.ptl";
+#include "./c.ptl";
+function main() : int32 {
+  return d_val + b_val + c_val;
+}

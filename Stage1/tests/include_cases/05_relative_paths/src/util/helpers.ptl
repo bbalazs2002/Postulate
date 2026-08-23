@@ -1,0 +1,2 @@
+#include "../shared/types.ptl";
+const helper_val : int32 := shared_val + 1;
