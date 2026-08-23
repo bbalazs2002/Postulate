@@ -183,8 +183,9 @@ digraph; an earlier draft tried `√` and was reverted, see §3.2), `as`
 statement-only, never usable as part of a larger expression), `:+`/
 `:-`/`:*`/`:/` (compound assignment, §4.2 — `:*` in particular looks
 like it collides with a pointer type's leading `*`, resolved by
-context-sensitive lexing, see §4.2's own note), `#` (only meaningful at
-the start of an `#include` line, §6.2 — not a general-purpose token).
+context-sensitive lexing, see §4.2's own note), `#` (only meaningful as
+the start of an `#include` directive, §6.2 — not a general-purpose
+token).
 
 ---
 
@@ -1319,26 +1320,103 @@ flat, order-independent top level.
 New in v1:
 
 ```ebnf
-include_directive ::= "#" "include" path_text newline
+include_directive ::= "#" "include" quoted_path ";"
+quoted_path        ::= '"' path_text '"'
 ```
 
-`path_text` is everything from the first non-space character after
-`include` to the end of the line, taken literally as a filesystem path,
-resolved **relative to the file containing the `#include`** (not the
-current working directory, not the top-level compiled file). The path
-must already carry its own `.ptl` extension:
+`path_text` is everything between the two `"` characters, taken
+literally as a filesystem path, resolved **relative to the file
+containing the `#include`** (not the current working directory, not the
+top-level compiled file). The path must already carry its own `.ptl`
+extension:
 
 ```postulate
-#include ./structs.ptl
-#include ../shared/math.ptl
+#include "./structs.ptl";
+#include "../shared/math.ptl";
 ```
 
+**Terminated by `;`, not by the newline — deliberately, to match every
+other statement/declaration in the language** (§1.1: "no
+statement-terminating newlines"). An earlier draft of this rule ended
+the directive at end-of-line instead, which quietly broke that
+principle: it made `#include` the one construct that couldn't share a
+physical line with anything else, code that can otherwise always be
+compressed onto one line. With `;` as the terminator, `#include`
+behaves exactly like any other line in that respect — nothing stops
+several directives, or a directive and ordinary code, from sharing one
+physical line:
+
+```postulate
+#include "./a.ptl"; #include "./b.ptl"; function main() : void { ... }
+```
+
+(not idiomatic, just not specially disallowed — the same way cramming
+unrelated statements onto one line elsewhere in the language isn't
+specially disallowed either). A `//` comment may still follow the `;`,
+exactly like after any other statement — nothing `#include`-specific
+about that.
+
+**Every `#include` in a file must appear before anything else in that
+file except comments and other `#include`s.** This is a genuine,
+positional rule, not just a style convention — a `#include` that
+follows any real declaration (a `function`/`struct`/`extern function`,
+in that same file) is a compile error. This is for readability, plainly
+stated as the reason: a file's dependencies are always visible in one
+place, at the top, never scattered through the body where they're easy
+to miss on a skim. Comments are exempt entirely — a file may open with
+a license header, an explanatory block comment, or line comments
+between individual `#include`s, none of which count as "something
+else" for this rule:
+
+```postulate
+// gcd.ptl -- greatest common divisor, specified against gcd_spec.
+
+#include "./contracts.ptl";
+// shared Point/Line struct defs
+#include "./structs.ptl";
+
+function lnko(x : uint, y : uint) : uint [ ... ] { ... }
+```
+
+```postulate
+function lnko(x : uint, y : uint) : uint [ ... ] { ... }
+
+#include "./structs.ptl";   // compile error: after lnko's declaration
+```
+
+This applies **per file**, independently of `#include`'s own recursive
+nature: each file spliced in (the entry file, and every file it
+transitively `#include`s) is checked against this rule against its own
+content alone — an included file is free to open with its own leading
+comments and its own `#include`s before its own first real declaration,
+regardless of where in some *other* file's body the `#include` that
+pulled it in happens to sit.
+
+**The quotes reserve syntax space, not just delimit a string.**
+`#include "path"` is the only legal spelling in v1 — an angle-bracket
+form, `#include <path>`, is deliberately left syntactically unclaimed
+for a possible future path-resolution mode (a search-path/"system
+include" convention, in the spirit of C's distinction between `"..."`
+and `<...>`), should one ever be designed. That mode is not designed,
+not implemented, and not given any meaning here — `#include <anything>`
+is simply not valid v1 syntax today, reserved rather than spent.
+
 `#include` is a **preprocessing** step — a textual splice performed
-before lexing begins, not part of the token/AST grammar proper. The
-compiler builds one merged source (the top-level file, with each
-`#include`d file's contents substituted in at that point, recursively)
-and then lexes/parses/checks that **as a single `program`**, exactly as
-v0 already does for one file. This is why §1.3's "one global namespace"
+before lexing begins, not part of the token/AST grammar proper, and
+`;`-termination (above) doesn't change that: it makes the directive
+*read* consistently with the rest of the language, not *behave* like an
+ordinary parsed statement. One real consequence follows from no longer
+being anchored to "alone on its own line": the preprocessing scan has to
+recognize v1's comment syntax (§1.2) well enough to skip over `//` and
+`/* */` content without mistaking `#include`-looking text inside a
+comment for a real directive — a small, bounded amount of lexical
+awareness
+(comment-skipping only, nothing about identifiers, literals, or any
+other token shape), not a step toward `#include` becoming a real grammar
+production. The compiler builds one merged source (the top-level file,
+with each `#include`d file's contents substituted in at that point,
+recursively) and then lexes/parses/checks that **as a single `program`**,
+exactly as v0 already does for one file. This is why §1.3's "one global namespace"
 note says "per translation unit" now: everything reachable through a
 chain of `#include`s shares that one flat namespace, same as if it had
 all been pasted into one file by hand — because, mechanically, it has.
@@ -2006,6 +2084,9 @@ and still apply.
 - A file already included anywhere earlier in the same compilation is
   silently skipped on a repeat `#include` (§6.2).
 - A genuine inclusion cycle is a compile error (§6.2).
+- Every `#include` in a file must precede every non-comment,
+  non-`#include` content in that same file — checked per file, not
+  globally across the whole inclusion graph (§6.2).
 
 ### 8.5 Casts
 
@@ -2021,7 +2102,8 @@ and still apply.
 ```ebnf
 program            ::= top_level_decl+
 top_level_decl      ::= function_decl | struct_decl | extern_decl | operator_decl
-include_directive    ::= "#" "include" path_text newline
+include_directive    ::= "#" "include" quoted_path ";"
+quoted_path          ::= '"' path_text '"'
 
 struct_decl        ::= "struct" identifier "{" field_decl+ "}"
 field_decl         ::= identifier ":" type ";"

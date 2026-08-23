@@ -4,8 +4,8 @@ The self-hosting successor to Hoare (Stage 0): a Postulate compiler
 written **in Postulate itself** — specifically, in the v0 language
 Hoare (the hand-written x86_64 NASM Stage 0 compiler) already defines,
 so that Hoare can compile Stage 1's own source. Once Stage 1 can
-compile itself, Stage 0 becomes historical/discardable — see the
-project's bootstrap plan.
+compile itself, Stage 0 becomes historical/discardable — see
+[the project's bootstrap plan](../docs/postulate_stage1_bootstrap_plan.md).
 
 Stage 1 does **not** implement v1 (the language design worked out in
 `docs/postulate_v1_language_reference.md`) — it targets exactly v0,
