@@ -138,6 +138,8 @@
 extern function sys_read(fd: int64, buf: *uint8, count: uint64) : int64;
 extern function sys_write(fd: int64, buf: *uint8, count: uint64) : int64;
 extern function sys_exit(code: int64) : void;
+extern function sys_openat(dirfd: int64, path: *uint8, flags: int64, mode: int64) : int64;
+extern function sys_close(fd: int64) : int64;
 struct Token {
   kind : int32;
   offset : uint64;
@@ -165,6 +167,751 @@ struct LexOutcome {
 struct LineCol {
   line : uint64;
   col : uint64;
+}
+// ---------------------------------------------------------------------
+// `#include` resolution (v1.0.1, docs/postulate_stage1_v1_0_1_include_
+// design.md) -- runs before tokenization, replacing "read stdin into
+// src_buf" with a three-phase (discover/order/emit) pass over a shared
+// FileTable. Every array below is a flat, parallel-scalar-array shape
+// (see the design doc's "Data structures") -- v0 has no struct-typed
+// arrays and no composite values crossing a call boundary, so a
+// FileTable "struct" is really thirteen pointer fields sharing an
+// index, not an actual array of structs.
+//
+// The entry file (index 0) is the one exception to "every file is
+// opened by path": there is no argv in v0 until v1.0.11, so main()
+// still has no way to learn its own path. Its own #include targets
+// therefore resolve relative to the process's cwd, not to wherever the
+// entry file physically lives -- documented, deliberate, see the design
+// doc's "Path resolution". Its own content still comes from stdin, as
+// today; every other file is opened via sys_openat/sys_read/sys_close.
+// ---------------------------------------------------------------------
+
+struct FileTable {
+  file_path_off : *(uint64[64]);
+  file_path_len : *(uint64[64]);
+  file_content_off : *(uint64[64]);
+  file_content_len : *(uint64[64]);
+  file_body_off : *(uint64[64]);
+  file_body_line : *(uint64[64]);
+  file_dep_start : *(uint64[64]);
+  file_dep_count : *(uint64[64]);
+  file_indegree : *(uint64[64]);
+  file_emit_pos : *(uint64[64]);
+  dep_pool : *(uint64[256]);
+  order : *(uint64[64]);
+  path_pool : *(uint8[16384]);
+  source_pool : *(uint8[1048576]);
+}
+
+// err_kind: 0 none, 1 cannot-open, 2 io/too-big, 3 malformed directive,
+// 4 preamble violation, 5 cycle, 6 path too long, 7 table/pool full,
+// 8 unterminated block comment in a preamble.
+struct ResolveState {
+  file_count : uint64;
+  dep_next : uint64;
+  path_pool_next : uint64;
+  source_pool_next : uint64;
+  order_count : uint64;
+  had_error : bool;
+  err_kind : int32;
+  err_file : uint64;
+  err_off : uint64;
+}
+
+struct DirectiveResult {
+  ok : bool;
+  path_off : uint64;
+  path_len : uint64;
+  cursor : uint64;
+}
+
+struct ResolvedPath {
+  len : uint64;
+  too_long : bool;
+}
+
+struct FileLine {
+  file : uint64;
+  line : uint64;
+  col : uint64;
+  byte_off : uint64;
+}
+
+function is_hspace(b: uint8) : bool {
+  return b == 32 || b == 9;
+}
+
+// path_pool[pool_off..pool_off+pool_len) == cand[0..cand_len)?
+function path_matches(pool: *(uint8[16384]), pool_off: uint64, pool_len: uint64, cand: *(uint8[256]), cand_len: uint64) : bool {
+  mut result : bool := true;
+  mut i : uint64 := 0;
+  if (pool_len != cand_len) {
+    result := false;
+  } else {
+    while (i < cand_len) {
+      if ((*pool)[pool_off + i] != (*cand)[i]) {
+        result := false;
+      }
+      i := i + 1;
+    }
+  }
+  return result;
+}
+
+// Linear scan over the known files' own resolved paths -- returns
+// file_count (a value no real index ever equals) as the "not found"
+// sentinel, exactly like list_pool-style code elsewhere in this
+// session uses an out-of-range index for "no match".
+function find_known_file(ft: FileTable, file_count: uint64, cand: *(uint8[256]), cand_len: uint64) : uint64 {
+  mut i : uint64 := 0;
+  mut result : uint64 := file_count;
+  mut found : bool := false;
+  while (i < file_count) {
+    if (!found) {
+      if (path_matches(ft.path_pool, (*ft.file_path_off)[i], (*ft.file_path_len)[i], cand, cand_len)) {
+        result := i;
+        found := true;
+      }
+    }
+    i := i + 1;
+  }
+  return result;
+}
+
+// Copies pool[off..off+len)'s own directory prefix (everything up to
+// and including its last '/', or nothing if it has none) into out.
+// Returns the copied length.
+function extract_dir(pool: *(uint8[16384]), off: uint64, len: uint64, out: *(uint8[256])) : uint64 {
+  mut i : uint64 := 0;
+  mut last_slash_rel : uint64 := 0;
+  mut found : bool := false;
+  mut j : uint64 := 0;
+  mut result : uint64 := 0;
+
+  while (i < len) {
+    if ((*pool)[off + i] == 47) {
+      last_slash_rel := i;
+      found := true;
+    }
+    i := i + 1;
+  }
+
+  if (found) {
+    j := 0;
+    while (j <= last_slash_rel) {
+      (*out)[j] := (*pool)[off + j];
+      j := j + 1;
+    }
+    result := last_slash_rel + 1;
+  }
+
+  return result;
+}
+
+function append_source_to_scratch(out: *(uint8[256]), pos: uint64, src: *(uint8[1048576]), off: uint64, ln: uint64) : uint64 {
+  mut i : uint64 := 0;
+  mut new_pos : uint64 := pos;
+  while (i < ln) {
+    (*out)[new_pos] := (*src)[off + i];
+    new_pos := new_pos + 1;
+    i := i + 1;
+  }
+  return new_pos;
+}
+
+function copy_scratch_to_pool(pool: *(uint8[16384]), pos: uint64, s: *(uint8[256]), s_len: uint64) : void {
+  mut i : uint64 := 0;
+  while (i < s_len) {
+    (*pool)[pos + i] := (*s)[i];
+    i := i + 1;
+  }
+  return;
+}
+
+// Collapses "./" and "dir/../" segments out of raw[0..raw_len) into
+// out, by keeping a stack of (start,len) spans for the segments seen
+// so far and popping one on "..". Never grows the input, so out's own
+// 256-byte capacity is already guaranteed by raw's.
+function normalize_path(raw: *(uint8[256]), raw_len: uint64, out: *(uint8[256])) : uint64 {
+  mut seg_start : uint64[64] := 0;
+  mut seg_len : uint64[64] := 0;
+  mut seg_count : uint64 := 0;
+  mut i : uint64 := 0;
+  mut seg_from : uint64 := 0;
+  mut this_len : uint64 := 0;
+  mut is_dot : bool := false;
+  mut is_dotdot : bool := false;
+  mut out_pos : uint64 := 0;
+  mut k : uint64 := 0;
+  mut s : uint64 := 0;
+
+  while (i <= raw_len) {
+    if (i == raw_len || (*raw)[i] == 47) {
+      this_len := i - seg_from;
+      if (this_len > 0) {
+        is_dot := this_len == 1 && (*raw)[seg_from] == 46;
+        is_dotdot := this_len == 2 && (*raw)[seg_from] == 46 && (*raw)[seg_from + 1] == 46;
+        if (is_dotdot) {
+          if (seg_count > 0) {
+            seg_count := seg_count - 1;
+          }
+        } else {
+          if (!is_dot) {
+            seg_start[seg_count] := seg_from;
+            seg_len[seg_count] := this_len;
+            seg_count := seg_count + 1;
+          }
+        }
+      }
+      seg_from := i + 1;
+    }
+    i := i + 1;
+  }
+
+  k := 0;
+  while (k < seg_count) {
+    if (k > 0) {
+      (*out)[out_pos] := 47;
+      out_pos := out_pos + 1;
+    }
+    s := 0;
+    while (s < seg_len[k]) {
+      (*out)[out_pos] := (*raw)[seg_start[k] + s];
+      out_pos := out_pos + 1;
+      s := s + 1;
+    }
+    k := k + 1;
+  }
+
+  return out_pos;
+}
+
+// Resolves a directive's raw path_text (a span in source_pool) against
+// base_file's own directory, lexically -- see "Path resolution" in the
+// design doc. Capped so the result always leaves room for a NUL
+// terminator in the 256-byte scratch buffers callers pass around.
+function resolve_include_path(ft: FileTable, base_file: uint64, rel_off: uint64, rel_len: uint64, out: *(uint8[256])) : ResolvedPath {
+  mut raw : uint8[256] := 0;
+  mut dir_len : uint64 := 0;
+  mut raw_len : uint64 := 0;
+  mut result : ResolvedPath := ResolvedPath { len := 0, too_long := false };
+
+  dir_len := extract_dir(ft.path_pool, (*ft.file_path_off)[base_file], (*ft.file_path_len)[base_file], &raw);
+  if (dir_len + rel_len >= 256) {
+    result := ResolvedPath { len := 0, too_long := true };
+  } else {
+    raw_len := append_source_to_scratch(&raw, dir_len, ft.source_pool, rel_off, rel_len);
+    result := ResolvedPath { len := normalize_path(&raw, raw_len, out), too_long := false };
+  }
+  return result;
+}
+
+function matches_include_kw(src: *(uint8[1048576]), off: uint64, end: uint64) : bool {
+  mut result : bool := false;
+  if (off + 7 <= end) {
+    if ((*src)[off + 0] == 105 && (*src)[off + 1] == 110 && (*src)[off + 2] == 99 && (*src)[off + 3] == 108 && (*src)[off + 4] == 117 && (*src)[off + 5] == 100 && (*src)[off + 6] == 101) {
+      result := true;
+    }
+  }
+  return result;
+}
+
+// Parses everything after "#include" itself: mandatory space(s), a
+// quoted path, optional space(s)/tab(s), and a mandatory ';' -- see
+// "Comment-awareness and the preamble boundary"'s IN_DIRECTIVE bullet.
+// `start` is the position right after the 'e' of "include".
+function parse_directive_body(src: *(uint8[1048576]), start: uint64, len: uint64) : DirectiveResult {
+  mut cursor : uint64 := start;
+  mut saw_space : bool := false;
+  mut path_off : uint64 := 0;
+  mut path_len : uint64 := 0;
+  mut failed : bool := false;
+  mut result : DirectiveResult := DirectiveResult { ok := false, path_off := 0, path_len := 0, cursor := start };
+
+  while (cursor < len && is_hspace((*src)[cursor])) {
+    saw_space := true;
+    cursor := cursor + 1;
+  }
+  if (!saw_space) {
+    failed := true;
+  }
+
+  if (!failed) {
+    if (cursor < len && (*src)[cursor] == 34) {
+      cursor := cursor + 1;
+      path_off := cursor;
+      while (cursor < len && (*src)[cursor] != 34) {
+        cursor := cursor + 1;
+      }
+      if (cursor >= len) {
+        failed := true;
+      } else {
+        path_len := cursor - path_off;
+        cursor := cursor + 1;
+      }
+    } else {
+      failed := true;
+    }
+  }
+
+  if (!failed) {
+    while (cursor < len && is_hspace((*src)[cursor])) {
+      cursor := cursor + 1;
+    }
+    if (cursor < len && (*src)[cursor] == 59) {
+      cursor := cursor + 1;
+    } else {
+      failed := true;
+    }
+  }
+
+  if (!failed) {
+    result := DirectiveResult { ok := true, path_off := path_off, path_len := path_len, cursor := cursor };
+  } else {
+    result := DirectiveResult { ok := false, path_off := 0, path_len := 0, cursor := cursor };
+  }
+  return result;
+}
+
+// Scans file i's own content span once (comment-aware, four states:
+// NORMAL folded into the outer dispatch below, LINE_COMMENT=1,
+// BLOCK_COMMENT=2; IN_DIRECTIVE is parse_directive_body's own
+// sequential sub-parse rather than a per-byte state, see its header).
+// Registers every #include target it finds (resolving + look-up/
+// allocate against the file table) and, on a clean finish, records
+// file_body_off/line/dep_start/dep_count/indegree for file i.
+function scan_file(ft: FileTable, rs: ResolveState, i: uint64) : ResolveState {
+  mut content_off : uint64 := (*ft.file_content_off)[i];
+  mut content_len : uint64 := (*ft.file_content_len)[i];
+  mut cursor : uint64 := content_off;
+  mut end : uint64 := content_off + content_len;
+  mut state : int32 := 0;
+  mut seen_body : bool := false;
+  mut body_off : uint64 := end;
+  mut body_line : uint64 := 1;
+  mut line : uint64 := 1;
+  mut looping : bool := true;
+  mut b : uint8 := 0;
+  mut dr : DirectiveResult := DirectiveResult { ok := false, path_off := 0, path_len := 0, cursor := 0 };
+  mut rp : ResolvedPath := ResolvedPath { len := 0, too_long := false };
+  mut resolved : uint8[256] := 0;
+  mut found_idx : uint64 := 0;
+  mut new_state : ResolveState := rs;
+  mut dep_start_here : uint64 := rs.dep_next;
+  mut block_comment_start : uint64 := 0;
+
+  while (looping) {
+    if (cursor >= end) {
+      if (state == 2 && !seen_body) {
+        // Only a genuine preamble comment is this pass's problem to
+        // report -- an unterminated comment that starts after the body
+        // began is left for the tokenizer's own skip_trivia to catch
+        // natively (same message it always used), since that whole
+        // span is copied into the body verbatim either way.
+        new_state.had_error := true;
+        new_state.err_kind := 8;
+        new_state.err_file := i;
+        new_state.err_off := block_comment_start;
+      }
+      looping := false;
+    } else {
+      b := (*ft.source_pool)[cursor];
+      if (state == 1) {
+        if (b == 10) {
+          line := line + 1;
+          state := 0;
+        }
+        cursor := cursor + 1;
+      } else {
+        if (state == 2) {
+          if (b == 10) {
+            line := line + 1;
+          }
+          if (b == 42 && cursor + 1 < end && (*ft.source_pool)[cursor + 1] == 47) {
+            cursor := cursor + 2;
+            state := 0;
+          } else {
+            cursor := cursor + 1;
+          }
+        } else {
+          if (b == 47 && cursor + 1 < end && (*ft.source_pool)[cursor + 1] == 47) {
+            state := 1;
+            cursor := cursor + 2;
+          } else {
+            if (b == 47 && cursor + 1 < end && (*ft.source_pool)[cursor + 1] == 42) {
+              block_comment_start := cursor;
+              state := 2;
+              cursor := cursor + 2;
+            } else {
+              if (b == 35) {
+                if (seen_body) {
+                  new_state.had_error := true;
+                  new_state.err_kind := 4;
+                  new_state.err_file := i;
+                  new_state.err_off := cursor;
+                  looping := false;
+                } else {
+                  if (!matches_include_kw(ft.source_pool, cursor + 1, end)) {
+                    new_state.had_error := true;
+                    new_state.err_kind := 3;
+                    new_state.err_file := i;
+                    new_state.err_off := cursor;
+                    looping := false;
+                  } else {
+                    dr := parse_directive_body(ft.source_pool, cursor + 8, end);
+                    if (!dr.ok) {
+                      new_state.had_error := true;
+                      new_state.err_kind := 3;
+                      new_state.err_file := i;
+                      new_state.err_off := cursor;
+                      looping := false;
+                    } else {
+                      rp := resolve_include_path(ft, i, dr.path_off, dr.path_len, &resolved);
+                      if (rp.too_long) {
+                        new_state.had_error := true;
+                        new_state.err_kind := 6;
+                        new_state.err_file := i;
+                        new_state.err_off := cursor;
+                        looping := false;
+                      } else {
+                        found_idx := find_known_file(ft, new_state.file_count, &resolved, rp.len);
+                        if (found_idx == new_state.file_count) {
+                          if (new_state.file_count >= 64 || new_state.path_pool_next + rp.len >= 16384) {
+                            new_state.had_error := true;
+                            new_state.err_kind := 7;
+                            new_state.err_file := i;
+                            new_state.err_off := cursor;
+                            looping := false;
+                          } else {
+                            copy_scratch_to_pool(ft.path_pool, new_state.path_pool_next, &resolved, rp.len);
+                            (*ft.file_path_off)[found_idx] := new_state.path_pool_next;
+                            (*ft.file_path_len)[found_idx] := rp.len;
+                            new_state.path_pool_next := new_state.path_pool_next + rp.len;
+                            new_state.file_count := new_state.file_count + 1;
+                          }
+                        }
+                        if (!new_state.had_error) {
+                          if (new_state.dep_next >= 256) {
+                            new_state.had_error := true;
+                            new_state.err_kind := 7;
+                            new_state.err_file := i;
+                            new_state.err_off := cursor;
+                            looping := false;
+                          } else {
+                            (*ft.dep_pool)[new_state.dep_next] := found_idx;
+                            new_state.dep_next := new_state.dep_next + 1;
+                            cursor := dr.cursor;
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              } else {
+                if (is_ws(b)) {
+                  if (b == 10) {
+                    line := line + 1;
+                  }
+                  cursor := cursor + 1;
+                } else {
+                  if (!seen_body) {
+                    body_off := cursor;
+                    body_line := line;
+                    seen_body := true;
+                  }
+                  cursor := cursor + 1;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (!new_state.had_error) {
+    (*ft.file_body_off)[i] := body_off;
+    (*ft.file_body_line)[i] := body_line;
+    (*ft.file_dep_start)[i] := dep_start_here;
+    (*ft.file_dep_count)[i] := new_state.dep_next - dep_start_here;
+    (*ft.file_indegree)[i] := new_state.dep_next - dep_start_here;
+  }
+
+  return new_state;
+}
+
+// Phase 1 (Discover), "queue of file-indices" realized as a plain
+// growing-bound loop: new files are only ever appended at file_count
+// (never inserted), and are processed in that same ascending order, so
+// `while (i < file_count) { ...; i := i + 1; }` already gives FIFO
+// order without a separate queue array -- see the design doc's own
+// aside on this in "Resolution algorithm".
+function run_discover(ft: FileTable, rs: ResolveState) : ResolveState {
+  mut new_state : ResolveState := rs;
+  mut i : uint64 := 0;
+  mut fd : int64 := 0;
+  mut n : int64 := 0;
+  mut reading : bool := true;
+  mut open_buf : uint8[256] := 0;
+  mut path_len : uint64 := 0;
+  mut j : uint64 := 0;
+  mut off : uint64 := 0;
+
+  while (i < new_state.file_count && !new_state.had_error) {
+    off := new_state.source_pool_next;
+    reading := true;
+
+    if (i == 0) {
+      while (reading) {
+        if (new_state.source_pool_next >= 1048576) {
+          new_state.had_error := true;
+          new_state.err_kind := 2;
+          new_state.err_file := i;
+          reading := false;
+        } else {
+          n := sys_read(0, &(*ft.source_pool)[new_state.source_pool_next], 1048576 - new_state.source_pool_next);
+          if (n < 0) {
+            new_state.had_error := true;
+            new_state.err_kind := 2;
+            new_state.err_file := i;
+            reading := false;
+          } else {
+            if (n == 0) {
+              reading := false;
+            } else {
+              new_state.source_pool_next := new_state.source_pool_next + int64_to_uint64(n);
+            }
+          }
+        }
+      }
+      (*ft.file_content_off)[i] := off;
+      (*ft.file_content_len)[i] := new_state.source_pool_next - off;
+    } else {
+      path_len := (*ft.file_path_len)[i];
+      j := 0;
+      while (j < path_len) {
+        open_buf[j] := (*ft.path_pool)[(*ft.file_path_off)[i] + j];
+        j := j + 1;
+      }
+      open_buf[path_len] := 0;
+      fd := sys_openat(-100, &open_buf[0], 0, 0);
+      if (fd < 0) {
+        new_state.had_error := true;
+        new_state.err_kind := 1;
+        new_state.err_file := i;
+      } else {
+        while (reading) {
+          if (new_state.source_pool_next >= 1048576) {
+            new_state.had_error := true;
+            new_state.err_kind := 2;
+            new_state.err_file := i;
+            reading := false;
+          } else {
+            n := sys_read(fd, &(*ft.source_pool)[new_state.source_pool_next], 1048576 - new_state.source_pool_next);
+            if (n < 0) {
+              new_state.had_error := true;
+              new_state.err_kind := 2;
+              new_state.err_file := i;
+              reading := false;
+            } else {
+              if (n == 0) {
+                reading := false;
+              } else {
+                new_state.source_pool_next := new_state.source_pool_next + int64_to_uint64(n);
+              }
+            }
+          }
+        }
+        sys_close(fd);
+        (*ft.file_content_off)[i] := off;
+        (*ft.file_content_len)[i] := new_state.source_pool_next - off;
+      }
+    }
+
+    if (!new_state.had_error) {
+      new_state := scan_file(ft, new_state, i);
+    }
+
+    i := i + 1;
+  }
+
+  return new_state;
+}
+
+// Phase 2 (Order): Kahn's algorithm, with `order` itself doubling as
+// the queue -- seeding it with every indegree-0 file is "enqueue",
+// and walking it with a separate `processed` cursor is "dequeue",
+// so no second array is needed (mirrors run_discover's own trick).
+function run_order(ft: FileTable, rs: ResolveState) : ResolveState {
+  mut new_state : ResolveState := rs;
+  mut i : uint64 := 0;
+  mut processed : uint64 := 0;
+  mut cur : uint64 := 0;
+  mut j : uint64 := 0;
+  mut k : uint64 := 0;
+  mut dep : uint64 := 0;
+  mut start : uint64 := 0;
+  mut count : uint64 := 0;
+  mut named : bool := false;
+
+  i := 0;
+  while (i < new_state.file_count) {
+    if ((*ft.file_indegree)[i] == 0) {
+      (*ft.order)[new_state.order_count] := i;
+      new_state.order_count := new_state.order_count + 1;
+    }
+    i := i + 1;
+  }
+
+  processed := 0;
+  while (processed < new_state.order_count) {
+    cur := (*ft.order)[processed];
+    j := 0;
+    while (j < new_state.file_count) {
+      start := (*ft.file_dep_start)[j];
+      count := (*ft.file_dep_count)[j];
+      k := 0;
+      while (k < count) {
+        dep := (*ft.dep_pool)[start + k];
+        if (dep == cur) {
+          (*ft.file_indegree)[j] := (*ft.file_indegree)[j] - 1;
+          if ((*ft.file_indegree)[j] == 0) {
+            (*ft.order)[new_state.order_count] := j;
+            new_state.order_count := new_state.order_count + 1;
+          }
+        }
+        k := k + 1;
+      }
+      j := j + 1;
+    }
+    processed := processed + 1;
+  }
+
+  if (new_state.order_count < new_state.file_count) {
+    i := 0;
+    while (i < new_state.file_count) {
+      if (!named) {
+        if ((*ft.file_indegree)[i] > 0) {
+          new_state.err_file := i;
+          named := true;
+        }
+      }
+      i := i + 1;
+    }
+    new_state.had_error := true;
+    new_state.err_kind := 5;
+  }
+
+  return new_state;
+}
+
+// Phase 3 (Emit): walk `order`, appending each file's own body span
+// (verbatim) to `merged`, recording where it landed for diagnostics.
+function run_emit(ft: FileTable, rs: ResolveState, merged: *(uint8[1048576])) : uint64 {
+  mut out_pos : uint64 := 0;
+  mut k : uint64 := 0;
+  mut fi : uint64 := 0;
+  mut body_off : uint64 := 0;
+  mut body_end : uint64 := 0;
+  mut span_len : uint64 := 0;
+  mut s : uint64 := 0;
+
+  k := 0;
+  while (k < rs.order_count) {
+    fi := (*ft.order)[k];
+    (*ft.file_emit_pos)[fi] := out_pos;
+    body_off := (*ft.file_body_off)[fi];
+    body_end := (*ft.file_content_off)[fi] + (*ft.file_content_len)[fi];
+    span_len := body_end - body_off;
+    s := 0;
+    while (s < span_len) {
+      (*merged)[out_pos] := (*ft.source_pool)[body_off + s];
+      out_pos := out_pos + 1;
+      s := s + 1;
+    }
+    k := k + 1;
+  }
+
+  return out_pos;
+}
+
+// 1-based line/col of `target` (an absolute source_pool offset) within
+// one file's own content span, counting newlines from that file's own
+// `base` (its file_content_off) -- used only for diagnostics raised
+// during resolve_includes itself (phases 1/2, before a merged buffer
+// exists), as opposed to offset_to_file_line below (phase 3 onward).
+function pool_line_col(pool: *(uint8[1048576]), base: uint64, target: uint64) : LineCol {
+  mut i : uint64 := base;
+  mut line : uint64 := 1;
+  mut last_line_start : uint64 := base;
+  mut col : uint64 := 0;
+  while (i < target) {
+    if ((*pool)[i] == 10) {
+      line := line + 1;
+      last_line_start := i + 1;
+    }
+    i := i + 1;
+  }
+  col := (target - last_line_start) + 1;
+  return LineCol { line := line, col := col };
+}
+
+// Maps a merged-buffer offset back to (file, local line, local col,
+// original byte offset within that file) -- see "Diagnostics under
+// this model". Correct even when file_count == 1 and that one file had
+// its own leading preamble stripped (body_off > content_off): the
+// byte_off correction below adds back exactly the stripped preamble's
+// length, so a plain single-file program's diagnostics stay identical
+// to what they were before this pass existed, preamble or not.
+function offset_to_file_line(ft: FileTable, rs: ResolveState, target: uint64) : FileLine {
+  mut best_file : uint64 := 0;
+  mut best_pos : uint64 := 0;
+  mut found : bool := false;
+  mut k : uint64 := 0;
+  mut fi : uint64 := 0;
+  mut pos : uint64 := 0;
+  mut local_off : uint64 := 0;
+  mut body_off : uint64 := 0;
+  mut i : uint64 := 0;
+  mut line : uint64 := 1;
+  mut last_line_start : uint64 := 0;
+  mut col : uint64 := 0;
+  mut byte_off : uint64 := 0;
+
+  k := 0;
+  while (k < rs.order_count) {
+    fi := (*ft.order)[k];
+    pos := (*ft.file_emit_pos)[fi];
+    if (pos <= target) {
+      if (!found) {
+        best_file := fi;
+        best_pos := pos;
+        found := true;
+      } else {
+        if (pos > best_pos) {
+          best_file := fi;
+          best_pos := pos;
+        }
+      }
+    }
+    k := k + 1;
+  }
+
+  local_off := target - best_pos;
+  body_off := (*ft.file_body_off)[best_file];
+  i := 0;
+  while (i < local_off) {
+    if ((*ft.source_pool)[body_off + i] == 10) {
+      line := line + 1;
+      last_line_start := i + 1;
+    }
+    i := i + 1;
+  }
+  col := (local_off - last_line_start) + 1;
+  byte_off := local_off + (body_off - (*ft.file_content_off)[best_file]);
+
+  return FileLine { file := best_file, line := (*ft.file_body_line)[best_file] + (line - 1), col := col, byte_off := byte_off };
 }
 
 // ---------------------------------------------------------------------
@@ -195,7 +942,7 @@ function is_ws(b: uint8) : bool {
 // Trivia: whitespace + line/block comments (chapter 6.3)
 // ---------------------------------------------------------------------
 
-function skip_trivia(src: *(uint8[65536]), start: uint64, len: uint64) : TriviaResult {
+function skip_trivia(src: *(uint8[1048576]), start: uint64, len: uint64) : TriviaResult {
   mut cursor : uint64 := start;
   mut looping : bool := true;
   mut had_error : bool := false;
@@ -275,7 +1022,7 @@ function skip_trivia(src: *(uint8[65536]), start: uint64, len: uint64) : TriviaR
 // Identifier / keyword span scanning (chapter 6.4)
 // ---------------------------------------------------------------------
 
-function scan_ident_end(src: *(uint8[65536]), start: uint64, len: uint64) : uint64 {
+function scan_ident_end(src: *(uint8[1048576]), start: uint64, len: uint64) : uint64 {
   mut cursor : uint64 := start;
   mut looping : bool := true;
 
@@ -300,7 +1047,7 @@ function scan_ident_end(src: *(uint8[65536]), start: uint64, len: uint64) : uint
 // a hand-rolled trie: clarity over micro-optimization at this stage,
 // matching the project's own "Stage 0 has no optimization pass, by
 // design" precedent (see project memory) applied here to Stage 1.
-function classify_word(src: *(uint8[65536]), off: uint64, len: uint64) : int32 {
+function classify_word(src: *(uint8[1048576]), off: uint64, len: uint64) : int32 {
   mut result : int32 := 1;
 
   if (len == 2) {
@@ -350,7 +1097,7 @@ function classify_word(src: *(uint8[65536]), off: uint64, len: uint64) : int32 {
 // value, so phase 1 doesn't need it (a future parser phase will).
 // ---------------------------------------------------------------------
 
-function scan_number(src: *(uint8[65536]), start: uint64, len: uint64) : NumberResult {
+function scan_number(src: *(uint8[1048576]), start: uint64, len: uint64) : NumberResult {
   mut cursor : uint64 := start;
   mut looping : bool := true;
   mut had_error : bool := false;
@@ -406,7 +1153,7 @@ function scan_number(src: *(uint8[65536]), start: uint64, len: uint64) : NumberR
 // either way).
 // ---------------------------------------------------------------------
 
-function lex_next(src: *(uint8[65536]), start: uint64, len: uint64) : LexOutcome {
+function lex_next(src: *(uint8[1048576]), start: uint64, len: uint64) : LexOutcome {
   mut trivia : TriviaResult := skip_trivia(src, start, len);
   mut cursor : uint64 := trivia.cursor;
   mut kind : int32 := 0;
@@ -570,7 +1317,7 @@ struct TokenizeResult {
   err_length : uint64;
 }
 
-function tokenize_all(src: *(uint8[65536]), src_len: uint64,
+function tokenize_all(src: *(uint8[1048576]), src_len: uint64,
                        tok_kind: *(int32[8192]), tok_offset: *(uint64[8192]),
                        tok_length: *(uint64[8192])) : TokenizeResult {
   mut cursor : uint64 := 0;
@@ -619,7 +1366,7 @@ function tokenize_all(src: *(uint8[65536]), src_len: uint64,
 // *and* three separate return values on every single parse function.
 // ===========================================================================
 struct Buffers {
-  src : *(uint8[65536]);
+  src : *(uint8[1048576]);
   tok_kind : *(int32[8192]);
   tok_offset : *(uint64[8192]);
   tok_length : *(uint64[8192]);
@@ -779,7 +1526,7 @@ function byte_digit_value(b: uint8) : uint64 {
 // decimal_form / based_form -> numeric value, same algorithm as lexer_
 // spec.md Sec 4.3 (the lexer itself skips this -- its dump format only
 // ever needs the raw source text -- but AST_EX_INT needs a real value).
-function compute_int_value(src: *(uint8[65536]), offset: uint64, length: uint64) : uint64 {
+function compute_int_value(src: *(uint8[1048576]), offset: uint64, length: uint64) : uint64 {
   mut i : uint64 := 0;
   mut value : uint64 := 0;
   mut looping : bool := true;
@@ -2440,7 +3187,7 @@ function append_str(out: *(uint8[1048576]), pos: uint64, s: *(uint8[80]), s_len:
   return new_pos;
 }
 
-function append_slice(out: *(uint8[1048576]), pos: uint64, src: *(uint8[65536]), off: uint64, ln: uint64) : uint64 {
+function append_slice(out: *(uint8[1048576]), pos: uint64, src: *(uint8[1048576]), off: uint64, ln: uint64) : uint64 {
   mut i : uint64 := 0;
   mut new_pos : uint64 := pos;
   while (i < ln) {
@@ -2505,7 +3252,7 @@ function write_all(fd: int64, buf: *(uint8[1048576]), total: uint64) : bool {
   return ok;
 }
 
-function compute_line_col(src: *(uint8[65536]), src_len: uint64, target: uint64) : LineCol {
+function compute_line_col(src: *(uint8[1048576]), src_len: uint64, target: uint64) : LineCol {
   mut i : uint64 := 0;
   mut line : uint64 := 1;
   mut last_line_start : uint64 := 0;
@@ -2620,6 +3367,20 @@ function append_str_e(out: *(uint8[2048]), pos: uint64, s: *(uint8[80]), s_len: 
 function append_byte_e(out: *(uint8[2048]), pos: uint64, b: uint8) : uint64 {
   (*out)[pos] := b;
   return pos + 1;
+}
+
+// Copies pool[off..off+ln) (a resolved filename, from path_pool) into
+// the 2048-byte diagnostic buffer -- same shape as append_str_e, just
+// retargeted at path_pool's own size.
+function append_pool_e(out: *(uint8[2048]), pos: uint64, pool: *(uint8[16384]), off: uint64, ln: uint64) : uint64 {
+  mut i : uint64 := 0;
+  mut new_pos : uint64 := pos;
+  while (i < ln) {
+    (*out)[new_pos] := (*pool)[off + i];
+    new_pos := new_pos + 1;
+    i := i + 1;
+  }
+  return new_pos;
 }
 
 function append_uint_e(out: *(uint8[2048]), pos: uint64, value: uint64) : uint64 {
@@ -2825,7 +3586,7 @@ function emit_piece(out: *(uint8[1048576]), pos: uint64, piece: int32) : uint64 
 // function below needs.
 // ===========================================================================
 
-function span_eq(src: *(uint8[65536]), off1: uint64, len1: uint64, off2: uint64, len2: uint64) : bool {
+function span_eq(src: *(uint8[1048576]), off1: uint64, len1: uint64, off2: uint64, len2: uint64) : bool {
   mut result : bool := true;
   mut i : uint64 := 0;
   if (len1 != len2) {
@@ -2842,7 +3603,7 @@ function span_eq(src: *(uint8[65536]), off1: uint64, len1: uint64, off2: uint64,
 }
 
 struct GBufs {
-  src : *(uint8[65536]);
+  src : *(uint8[1048576]);
   pool_kind : *(int32[8192]);
   pool_a : *(uint64[8192]);
   pool_b : *(uint64[8192]);
@@ -2975,7 +3736,7 @@ function extern_kind(bufs: GBufs, name_off: uint64, name_len: uint64) : int32 {
   return result;
 }
 
-function span_eq_lit8(src: *(uint8[65536]), off: uint64, lit: *(uint8[80])) : bool {
+function span_eq_lit8(src: *(uint8[1048576]), off: uint64, lit: *(uint8[80])) : bool {
   mut result : bool := true;
   mut i : uint64 := 0;
   while (i < 8) {
@@ -2987,7 +3748,7 @@ function span_eq_lit8(src: *(uint8[65536]), off: uint64, lit: *(uint8[80])) : bo
   return result;
 }
 
-function span_eq_lit9(src: *(uint8[65536]), off: uint64, lit: *(uint8[80])) : bool {
+function span_eq_lit9(src: *(uint8[1048576]), off: uint64, lit: *(uint8[80])) : bool {
   mut result : bool := true;
   mut i : uint64 := 0;
   while (i < 9) {
@@ -3843,7 +4604,7 @@ function gen_program(bufs: GBufs, gst: GState, prog_node: uint64) : GState {
   return cur;
 }
 
-function span_eq_lit4(src: *(uint8[65536]), off: uint64, lit: *(uint8[80])) : bool {
+function span_eq_lit4(src: *(uint8[1048576]), off: uint64, lit: *(uint8[80])) : bool {
   mut result : bool := true;
   mut i : uint64 := 0;
   while (i < 4) {
@@ -3896,13 +4657,27 @@ function main_returns_value(bufs: GBufs, prog_node: uint64) : bool {
 }
 
 function main() : int32 {
-  mut src_buf : uint8[65536] := 0;
+  mut file_path_off : uint64[64] := 0;
+  mut file_path_len : uint64[64] := 0;
+  mut file_content_off : uint64[64] := 0;
+  mut file_content_len : uint64[64] := 0;
+  mut file_body_off : uint64[64] := 0;
+  mut file_body_line : uint64[64] := 0;
+  mut file_dep_start : uint64[64] := 0;
+  mut file_dep_count : uint64[64] := 0;
+  mut file_indegree : uint64[64] := 0;
+  mut file_emit_pos : uint64[64] := 0;
+  mut dep_pool : uint64[256] := 0;
+  mut order : uint64[64] := 0;
+  mut path_pool : uint8[16384] := 0;
+  mut source_pool : uint8[1048576] := 0;
+  mut src_buf : uint8[1048576] := 0;
   mut out_buf : uint8[1048576] := 0;
   mut err_buf : uint8[2048] := 0;
   mut src_len : uint64 := 0;
-  mut read_n : int64 := 0;
-  mut reading : bool := true;
-  mut io_error : bool := false;
+  mut ft : FileTable := FileTable { file_path_off := &file_path_off, file_path_len := &file_path_len, file_content_off := &file_content_off, file_content_len := &file_content_len, file_body_off := &file_body_off, file_body_line := &file_body_line, file_dep_start := &file_dep_start, file_dep_count := &file_dep_count, file_indegree := &file_indegree, file_emit_pos := &file_emit_pos, dep_pool := &dep_pool, order := &order, path_pool := &path_pool, source_pool := &source_pool };
+  mut rs : ResolveState := ResolveState { file_count := 1, dep_next := 0, path_pool_next := 7, source_pool_next := 0, order_count := 0, had_error := false, err_kind := 0, err_file := 0, err_off := 0 };
+  mut fl : FileLine := FileLine { file := 0, line := 0, col := 0, byte_off := 0 };
   mut tok_kind : int32[8192] := 0;
   mut tok_offset : uint64[8192] := 0;
   mut tok_length : uint64[8192] := 0;
@@ -3932,43 +4707,109 @@ function main() : int32 {
   mut err_parse : uint8[80] := {112, 97, 114, 115, 101, 32, 101, 114, 114, 111, 114, 32, 97, 116, 32, 116, 111, 107, 101, 110, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
   mut err_codegen : uint8[80] := {99, 111, 100, 101, 103, 101, 110, 32, 101, 114, 114, 111, 114, 58, 32, 117, 110, 115, 117, 112, 112, 111, 114, 116, 101, 100, 32, 99, 111, 110, 115, 116, 114, 117, 99, 116, 32, 111, 114, 32, 115, 99, 111, 112, 101, 32, 108, 105, 109, 105, 116, 32, 40, 99, 111, 109, 112, 111, 115, 105, 116, 101, 115, 41, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
   mut err_nl : uint8[80] := {10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut lbl_in_file_q : uint8[80] := {32, 105, 110, 32, 102, 105, 108, 101, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut lbl_q_nl : uint8[80] := {39, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut lbl_close_quote_nl : uint8[80] := {39, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut lbl_cannot_open : uint8[80] := {108, 101, 120, 32, 101, 114, 114, 111, 114, 58, 32, 99, 97, 110, 110, 111, 116, 32, 111, 112, 101, 110, 32, 105, 110, 99, 108, 117, 100, 101, 100, 32, 102, 105, 108, 101, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut lbl_io_error_reading : uint8[80] := {108, 101, 120, 32, 101, 114, 114, 111, 114, 58, 32, 73, 47, 79, 32, 101, 114, 114, 111, 114, 32, 119, 104, 105, 108, 101, 32, 114, 101, 97, 100, 105, 110, 103, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut lbl_malformed_directive : uint8[80] := {108, 101, 120, 32, 101, 114, 114, 111, 114, 58, 32, 109, 97, 108, 102, 111, 114, 109, 101, 100, 32, 35, 105, 110, 99, 108, 117, 100, 101, 32, 100, 105, 114, 101, 99, 116, 105, 118, 101, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut lbl_preamble_violation : uint8[80] := {108, 101, 120, 32, 101, 114, 114, 111, 114, 58, 32, 35, 105, 110, 99, 108, 117, 100, 101, 32, 109, 117, 115, 116, 32, 97, 112, 112, 101, 97, 114, 32, 98, 101, 102, 111, 114, 101, 32, 97, 110, 121, 32, 111, 116, 104, 101, 114, 32, 100, 101, 99, 108, 97, 114, 97, 116, 105, 111, 110, 32, 105, 110, 32, 116, 104, 105, 115, 32, 102, 105, 108, 101, 0, 0, 0, 0, 0, 0, 0};
+  mut lbl_cycle : uint8[80] := {108, 101, 120, 32, 101, 114, 114, 111, 114, 58, 32, 35, 105, 110, 99, 108, 117, 100, 101, 32, 99, 121, 99, 108, 101, 32, 100, 101, 116, 101, 99, 116, 101, 100, 44, 32, 115, 116, 97, 114, 116, 105, 110, 103, 32, 97, 116, 32, 102, 105, 108, 101, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut lbl_path_too_long : uint8[80] := {108, 101, 120, 32, 101, 114, 114, 111, 114, 58, 32, 114, 101, 115, 111, 108, 118, 101, 100, 32, 35, 105, 110, 99, 108, 117, 100, 101, 32, 112, 97, 116, 104, 32, 101, 120, 99, 101, 101, 100, 115, 32, 97, 110, 32, 105, 110, 116, 101, 114, 110, 97, 108, 32, 108, 105, 109, 105, 116, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut lbl_too_many_files : uint8[80] := {108, 101, 120, 32, 101, 114, 114, 111, 114, 58, 32, 116, 111, 111, 32, 109, 97, 110, 121, 32, 105, 110, 99, 108, 117, 100, 101, 100, 32, 102, 105, 108, 101, 115, 32, 40, 105, 110, 116, 101, 114, 110, 97, 108, 32, 108, 105, 109, 105, 116, 32, 114, 101, 97, 99, 104, 101, 100, 41, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut lbl_unterm_block_preamble : uint8[80] := {108, 101, 120, 32, 101, 114, 114, 111, 114, 58, 32, 117, 110, 116, 101, 114, 109, 105, 110, 97, 116, 101, 100, 32, 98, 108, 111, 99, 107, 32, 99, 111, 109, 109, 101, 110, 116, 32, 115, 116, 97, 114, 116, 105, 110, 103, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
-  while (reading) {
-    if (src_len >= 65536) {
-      reading := false;
-      io_error := true;
+  path_pool[0] := 60;
+  path_pool[1] := 115;
+  path_pool[2] := 116;
+  path_pool[3] := 100;
+  path_pool[4] := 105;
+  path_pool[5] := 110;
+  path_pool[6] := 62;
+  file_path_off[0] := 0;
+  file_path_len[0] := 7;
+
+  rs := run_discover(ft, rs);
+  if (!rs.had_error) {
+    rs := run_order(ft, rs);
+  }
+  if (!rs.had_error) {
+    src_len := run_emit(ft, rs, &src_buf);
+  }
+
+  if (rs.had_error) {
+    if (rs.err_kind == 1) {
+      err_pos := append_str_e(&err_buf, err_pos, &lbl_cannot_open, 38);
+      err_pos := append_pool_e(&err_buf, err_pos, &path_pool, file_path_off[rs.err_file], file_path_len[rs.err_file]);
+      err_pos := append_str_e(&err_buf, err_pos, &lbl_close_quote_nl, 2);
+      exit_code := 1;
     } else {
-      read_n := sys_read(0, &src_buf[src_len], 65536 - src_len);
-      if (read_n < 0) {
-        reading := false;
-        io_error := true;
+      if (rs.err_kind == 2) {
+        err_pos := append_str_e(&err_buf, err_pos, &lbl_io_error_reading, 36);
+        err_pos := append_pool_e(&err_buf, err_pos, &path_pool, file_path_off[rs.err_file], file_path_len[rs.err_file]);
+        err_pos := append_str_e(&err_buf, err_pos, &lbl_close_quote_nl, 2);
+        exit_code := 2;
       } else {
-        if (read_n == 0) {
-          reading := false;
+        if (rs.err_kind == 5) {
+          err_pos := append_str_e(&err_buf, err_pos, &lbl_cycle, 54);
+          err_pos := append_pool_e(&err_buf, err_pos, &path_pool, file_path_off[rs.err_file], file_path_len[rs.err_file]);
+          err_pos := append_str_e(&err_buf, err_pos, &lbl_close_quote_nl, 2);
+          exit_code := 1;
         } else {
-          src_len := src_len + int64_to_uint64(read_n);
+          if (rs.err_kind == 3) {
+            err_pos := append_str_e(&err_buf, err_pos, &lbl_malformed_directive, 39);
+          } else {
+            if (rs.err_kind == 4) {
+              err_pos := append_str_e(&err_buf, err_pos, &lbl_preamble_violation, 73);
+            } else {
+              if (rs.err_kind == 6) {
+                err_pos := append_str_e(&err_buf, err_pos, &lbl_path_too_long, 59);
+              } else {
+                if (rs.err_kind == 7) {
+                  err_pos := append_str_e(&err_buf, err_pos, &lbl_too_many_files, 59);
+                } else {
+                  err_pos := append_str_e(&err_buf, err_pos, &lbl_unterm_block_preamble, 46);
+                }
+              }
+            }
+          }
+          err_pos := append_str_e(&err_buf, err_pos, &lbl_in_file_q, 10);
+          err_pos := append_pool_e(&err_buf, err_pos, &path_pool, file_path_off[rs.err_file], file_path_len[rs.err_file]);
+          err_pos := append_str_e(&err_buf, err_pos, &lbl_q_nl, 2);
+          exit_code := 1;
         }
       }
     }
-  }
-
-  if (io_error) {
-    exit_code := 2;
+    wrote_ok := write_all_e(2, &err_buf, err_pos);
   } else {
     tr := tokenize_all(&src_buf, src_len, &tok_kind, &tok_offset, &tok_length);
     if (tr.had_error) {
       exit_code := 1;
+      fl := offset_to_file_line(ft, rs, tr.err_offset);
       err_pos := append_str_e(&err_buf, err_pos, &err_lex, 53);
-      err_pos := append_uint_e(&err_buf, err_pos, tr.err_offset);
-      err_pos := append_str_e(&err_buf, err_pos, &err_nl, 1);
+      err_pos := append_uint_e(&err_buf, err_pos, fl.byte_off);
+      if (rs.file_count > 1) {
+        err_pos := append_str_e(&err_buf, err_pos, &lbl_in_file_q, 10);
+        err_pos := append_pool_e(&err_buf, err_pos, &path_pool, file_path_off[fl.file], file_path_len[fl.file]);
+        err_pos := append_str_e(&err_buf, err_pos, &lbl_close_quote_nl, 2);
+      } else {
+        err_pos := append_str_e(&err_buf, err_pos, &err_nl, 1);
+      }
       wrote_ok := write_all_e(2, &err_buf, err_pos);
     } else {
       prog := parse_program(pbufs, pst);
       if (prog.had_error) {
         exit_code := 1;
+        fl := offset_to_file_line(ft, rs, (*pbufs.tok_offset)[prog.err_tok]);
         err_pos := append_str_e(&err_buf, err_pos, &err_parse, 22);
         err_pos := append_uint_e(&err_buf, err_pos, prog.err_tok);
-        err_pos := append_str_e(&err_buf, err_pos, &err_nl, 1);
+        if (rs.file_count > 1) {
+          err_pos := append_str_e(&err_buf, err_pos, &lbl_in_file_q, 10);
+          err_pos := append_pool_e(&err_buf, err_pos, &path_pool, file_path_off[fl.file], file_path_len[fl.file]);
+          err_pos := append_str_e(&err_buf, err_pos, &lbl_close_quote_nl, 2);
+        } else {
+          err_pos := append_str_e(&err_buf, err_pos, &err_nl, 1);
+        }
         wrote_ok := write_all_e(2, &err_buf, err_pos);
       } else {
         want_value := main_returns_value(gbufs, prog.node);

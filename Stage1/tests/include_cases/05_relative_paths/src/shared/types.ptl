@@ -1,1 +1,1 @@
-const shared_val : int32 := 9;
+function shared_val() : int32 { return 9; }

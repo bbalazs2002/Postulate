@@ -1,4 +1,4 @@
 #include "./b.ptl";
 function main() : int32 {
-  return b_val;
+  return b_val();
 }

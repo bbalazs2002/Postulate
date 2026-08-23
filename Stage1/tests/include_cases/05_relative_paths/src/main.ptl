@@ -1,4 +1,4 @@
 #include "./util/helpers.ptl";
 function main() : int32 {
-  return helper_val;
+  return helper_val();
 }

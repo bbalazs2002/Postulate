@@ -1,3 +1,3 @@
 // B's own leading comment
 #include "./c.ptl";
-const b_val : int32 := c_val + 1;
+function b_val() : int32 { return c_val() + 1; }

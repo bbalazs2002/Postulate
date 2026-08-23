@@ -2,4 +2,4 @@
 #include "./b.ptl";
 // comment between includes
 #include "./c.ptl";
-function main() : int32 { return b_val + c_val; }
+function main() : int32 { return b_val() + c_val(); }

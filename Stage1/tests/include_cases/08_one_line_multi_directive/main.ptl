@@ -1,1 +1,1 @@
-#include "./b.ptl"; #include "./c.ptl"; function main() : int32 { return b_val + c_val; }
+#include "./b.ptl"; #include "./c.ptl"; function main() : int32 { return b_val() + c_val(); }
