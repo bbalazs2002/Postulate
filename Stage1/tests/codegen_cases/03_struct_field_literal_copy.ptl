@@ -1,0 +1,31 @@
+// Proves v1.0.3's struct sub-pass: struct-typed locals, struct literal
+// construction (including a nested struct literal as a field's own
+// value), field read/write via GEP (including chained field access
+// through a nested struct), a packed mixed-width layout (int8 next to
+// int32, no padding), and struct-copy independence (mutating the copy
+// must not affect the original -- see docs/postulate_stage1_v1_0_3_
+// composites_design.md).
+
+struct Point {
+  x: int8;
+  y: int32;
+}
+
+struct Line {
+  start: Point;
+  finish: Point;
+}
+
+function main() : int32 {
+  mut l: Line := Line {
+    start := Point { x := 1, y := 2 },
+    finish := Point { x := 3, y := 4 }
+  };
+  mut l2: Line := l;
+  l.start.x := 9;
+  l2.finish.y := 100;
+  // l unaffected by l2's mutation, and vice versa, if copies are truly
+  // independent: 9 + 2 + 3 + 4 (l) + 1 + 2 + 3 + 100 (l2) = 124.
+  return l.start.x + l.start.y + l.finish.x + l.finish.y
+       + l2.start.x + l2.start.y + l2.finish.x + l2.finish.y;
+}

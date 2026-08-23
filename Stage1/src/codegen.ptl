@@ -22,15 +22,19 @@
 // single- and multi-pair assignment; if/elseif-shaped nesting via
 // else; while; return; expression statements (calls); every unary/
 // binary operator, with short-circuit `&&`/`||`; user and extern
-// calls. NOT supported: structs, arrays, pointers (`&`/`*`, indexing,
-// field access), struct/array literals -- parser.ptl parses these
-// fine (they're part of v0), but this file's codegen recognizes them
-// and fails cleanly (`codegen error: ...`) rather than emitting wrong
-// code, the same discipline Hoare's own codegen uses for its own
-// deliberately-scoped-out cases (docs/postulate_stage0_codegen_spec.md
-// Sec 10). Composite support is real, future work (`v1.0.3`'s second
-// sub-pass, built directly against LLVM's own aggregate types -- see
-// docs/postulate_stage1_v1_0_3_composites_design.md).
+// calls; struct- and array-typed *locals* (`v1.0.3`'s struct and array
+// sub-passes, docs/postulate_stage1_v1_0_3_composites_design.md),
+// struct/array literals (nesting and array-of-struct included), field/
+// index read/write via `gen_lvalue` (chained lvalues like `pts[1].x`
+// included), array broadcast-init, and struct-to-struct/array-to-array
+// copy. NOT supported: pointers (`&`/`*`), struct/array *parameters or
+// return values* -- parser.ptl parses all of these fine (they're part
+// of v0), but this file's codegen recognizes them and fails cleanly
+// (`codegen error: ...`) rather than emitting wrong code, the same
+// discipline Hoare's own codegen uses for its own deliberately-scoped-
+// out cases (docs/postulate_stage0_codegen_spec.md Sec 10). The rest
+// of composite support is real, future work (`v1.0.3`'s next sub-pass
+// -- pointers and the calling convention).
 //
 // --- Every value is at its true declared width (`v1.0.3` sub-pass 1) ---
 //
@@ -3538,6 +3542,20 @@ function emit_piece(out: *(uint8[1048576]), pos: uint64, piece: int32) : uint64 
   mut s75 : uint8[80] := {32, 61, 32, 122, 101, 120, 116, 32, 105, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
   mut s76 : uint8[80] := {32, 61, 32, 115, 101, 120, 116, 32, 105, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
   mut s77 : uint8[80] := {32, 116, 111, 32, 105, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut s78 : uint8[80] := {37, 115, 116, 114, 117, 99, 116, 46, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut s79 : uint8[80] := {32, 61, 32, 97, 108, 108, 111, 99, 97, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut s80 : uint8[80] := {32, 32, 115, 116, 111, 114, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut s81 : uint8[80] := {32, 61, 32, 108, 111, 97, 100, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut s82 : uint8[80] := {60, 123, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut s83 : uint8[80] := {32, 125, 62, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut s84 : uint8[80] := {32, 61, 32, 116, 121, 112, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut s85 : uint8[80] := {32, 61, 32, 103, 101, 116, 101, 108, 101, 109, 101, 110, 116, 112, 116, 114, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut s86 : uint8[80] := {44, 32, 105, 51, 50, 32, 48, 44, 32, 105, 51, 50, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut s87 : uint8[80] := {91, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut s88 : uint8[80] := {32, 120, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut s89 : uint8[80] := {93, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut s90 : uint8[80] := {44, 32, 105, 54, 52, 32, 48, 44, 32, 105, 54, 52, 32, 37, 118, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut s91 : uint8[80] := {44, 32, 105, 54, 52, 32, 48, 44, 32, 105, 54, 52, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
   if (piece == 1) { p := append_str(out, p, &s1, 1); }  // NL '\n'
   if (piece == 2) { p := append_str(out, p, &s2, 4); }  // IND_PCT_V '  %v'
@@ -3616,6 +3634,20 @@ function emit_piece(out: *(uint8[1048576]), pos: uint64, piece: int32) : uint64 
   if (piece == 75) { p := append_str(out, p, &s75, 9); }  // EQ_ZEXT_I ' = zext i'
   if (piece == 76) { p := append_str(out, p, &s76, 9); }  // EQ_SEXT_I ' = sext i'
   if (piece == 77) { p := append_str(out, p, &s77, 5); }  // TO_I ' to i'
+  if (piece == 78) { p := append_str(out, p, &s78, 8); }  // PCT_STRUCT_DOT '%struct.'
+  if (piece == 79) { p := append_str(out, p, &s79, 10); }  // EQ_ALLOCA_SP ' = alloca '
+  if (piece == 80) { p := append_str(out, p, &s80, 8); }  // STORE_SP '  store '
+  if (piece == 81) { p := append_str(out, p, &s81, 8); }  // EQ_LOAD_SP ' = load '
+  if (piece == 82) { p := append_str(out, p, &s82, 3); }  // LT_LBRACE_SP '<{ '
+  if (piece == 83) { p := append_str(out, p, &s83, 3); }  // SP_RBRACE_GT ' }>'
+  if (piece == 84) { p := append_str(out, p, &s84, 8); }  // SP_EQ_TYPE_SP ' = type '
+  if (piece == 85) { p := append_str(out, p, &s85, 17); }  // EQ_GETELEMENTPTR_SP ' = getelementptr '
+  if (piece == 86) { p := append_str(out, p, &s86, 13); }  // COMMA_I32_0_COMMA_I32_SP ', i32 0, i32 '
+  if (piece == 87) { p := append_str(out, p, &s87, 1); }  // LBRACKET '['
+  if (piece == 88) { p := append_str(out, p, &s88, 3); }  // SP_X_SP ' x '
+  if (piece == 89) { p := append_str(out, p, &s89, 1); }  // RBRACKET ']'
+  if (piece == 90) { p := append_str(out, p, &s90, 15); }  // COMMA_I64_0_COMMA_I64_SP_PCT_V ', i64 0, i64 %v'
+  if (piece == 91) { p := append_str(out, p, &s91, 13); }  // COMMA_I64_0_COMMA_I64_SP ', i64 0, i64 '
   return p;
 }
 
@@ -3652,12 +3684,21 @@ struct GBufs {
   sym_name_off : *(uint64[128]);
   sym_name_len : *(uint64[128]);
   sym_reg : *(uint64[128]);
+  sym_composite : *(int32[128]);
+  sym_is_array : *(int32[128]);
   sym_signed : *(int32[128]);
   sym_width : *(uint64[128]);
+  sym_struct_node : *(uint64[128]);
+  sym_elem_type : *(uint64[128]);
+  sym_elem_count : *(uint64[128]);
   func_name_off : *(uint64[64]);
   func_name_len : *(uint64[64]);
   func_node : *(uint64[64]);
   func_count : uint64;
+  struct_name_off : *(uint64[32]);
+  struct_name_len : *(uint64[32]);
+  struct_node : *(uint64[32]);
+  struct_count : uint64;
 }
 
 struct GState {
@@ -3675,10 +3716,39 @@ struct GState {
 // gen_* function now threads it alongside `reg` so a consumer (a
 // store, a binop, a call argument) always knows exactly what type the
 // value it just got back actually is.
+// `is_composite` marks a struct- *or* array-typed result (v1.0.3's
+// composite sub-passes) -- `reg` then holds an *address* (the value's
+// own alloca, or a freshly materialized temporary), never a loaded
+// aggregate value. For a struct, `struct_node` is its AST_STRUCT_DECL
+// node (used to spell `%struct.<Name>` and to resolve field names via
+// struct_field_lookup); for an array, `is_array` is set instead and
+// `elem_type`/`elem_count` describe it directly (an element *type
+// node*, recursing for nested composites, and its declared size) --
+// two parallel, mutually-exclusive descriptions rather than one
+// unified "type node" field, deliberately: a struct/array *literal*
+// has no existing type-annotation node to point back to (only a name
+// span, resolved once at construction time), so every composite-
+// producing site already resolves to "the concrete declaration" (a
+// struct's decl node, or an array's element-type-and-count pair)
+// before ever constructing an ExprResult -- storing anything less
+// resolved would just push the same resolution work to every
+// consumer instead. A composite result's `is_signed`/`width` are
+// unused. Every composite-valued expression in these sub-passes (a
+// composite-typed ident, a struct/array literal, a field/index access
+// whose own type is itself composite) is address-shaped already, so
+// no whole-aggregate `load` is ever needed inside gen_expr itself --
+// only a *consumer* (gen_decls, gen_assign_stmt) that actually needs
+// to copy the value does the one load+store pair, using the value's
+// own type both times (emit_composite_type, dispatching on `is_array`).
 struct ExprResult {
   value_ok : bool;
+  is_composite : bool;
+  is_array : bool;
   is_signed : bool;
   width : uint64;
+  struct_node : uint64;
+  elem_type : uint64;
+  elem_count : uint64;
   reg : uint64;
   out_pos : uint64;
   next_label : uint64;
@@ -3687,13 +3757,29 @@ struct ExprResult {
 }
 
 function pack_expr(gst: GState, is_signed: bool, width: uint64, reg: uint64) : ExprResult {
-  return ExprResult { value_ok := true, is_signed := is_signed, width := width, reg := reg,
+  return ExprResult { value_ok := true, is_composite := false, is_array := false, is_signed := is_signed,
+                       width := width, struct_node := 0, elem_type := 0, elem_count := 0, reg := reg,
                        out_pos := gst.out_pos, next_label := gst.next_label,
                        sym_count := gst.sym_count, had_error := gst.had_error };
 }
 
+function pack_expr_composite(gst: GState, struct_node: uint64, reg: uint64) : ExprResult {
+  return ExprResult { value_ok := true, is_composite := true, is_array := false, is_signed := false,
+                       width := 0, struct_node := struct_node, elem_type := 0, elem_count := 0, reg := reg,
+                       out_pos := gst.out_pos, next_label := gst.next_label, sym_count := gst.sym_count,
+                       had_error := gst.had_error };
+}
+
+function pack_expr_array(gst: GState, elem_type: uint64, elem_count: uint64, reg: uint64) : ExprResult {
+  return ExprResult { value_ok := true, is_composite := true, is_array := true, is_signed := false,
+                       width := 0, struct_node := 0, elem_type := elem_type, elem_count := elem_count,
+                       reg := reg, out_pos := gst.out_pos, next_label := gst.next_label,
+                       sym_count := gst.sym_count, had_error := gst.had_error };
+}
+
 function fail_expr(gst: GState) : ExprResult {
-  return ExprResult { value_ok := false, is_signed := true, width := 64, reg := 0,
+  return ExprResult { value_ok := false, is_composite := false, is_array := false, is_signed := true,
+                       width := 64, struct_node := 0, elem_type := 0, elem_count := 0, reg := 0,
                        out_pos := gst.out_pos, next_label := gst.next_label,
                        sym_count := gst.sym_count, had_error := true };
 }
@@ -3712,18 +3798,32 @@ function new_label(gst: GState) : GState {
                    sym_count := gst.sym_count, had_error := gst.had_error };
 }
 
+// `is_composite`/`is_array`/`struct_node`/`elem_type`/`elem_count`
+// mirror ExprResult's own (see its header) -- a composite local's
+// `reg` is its alloca's address; a scalar local's `reg` is also its
+// alloca's address (unchanged since `v1.0.2`), the two are only told
+// apart by `is_composite`.
 struct SymInfo {
   found : bool;
   reg : uint64;
+  is_composite : bool;
+  is_array : bool;
   is_signed : bool;
   width : uint64;
+  struct_node : uint64;
+  elem_type : uint64;
+  elem_count : uint64;
 }
 
 function sym_find(bufs: GBufs, name_off: uint64, name_len: uint64, sym_count: uint64) : SymInfo {
   mut i : uint64 := 0;
   mut looping : bool := true;
-  mut result : SymInfo := SymInfo { found := false, reg := 0, is_signed := false, width := 64 };
+  mut result : SymInfo := SymInfo { found := false, reg := 0, is_composite := false, is_array := false,
+                                     is_signed := false, width := 64, struct_node := 0,
+                                     elem_type := 0, elem_count := 0 };
   mut sv : int32 := 0;
+  mut cv : int32 := 0;
+  mut av : int32 := 0;
 
   while (looping) {
     if (i >= sym_count) {
@@ -3731,8 +3831,12 @@ function sym_find(bufs: GBufs, name_off: uint64, name_len: uint64, sym_count: ui
     } else {
       if (span_eq(bufs.src, (*bufs.sym_name_off)[i], (*bufs.sym_name_len)[i], name_off, name_len)) {
         sv := (*bufs.sym_signed)[i];
-        result := SymInfo { found := true, reg := (*bufs.sym_reg)[i], is_signed := sv == 1,
-                             width := (*bufs.sym_width)[i] };
+        cv := (*bufs.sym_composite)[i];
+        av := (*bufs.sym_is_array)[i];
+        result := SymInfo { found := true, reg := (*bufs.sym_reg)[i], is_composite := cv == 1,
+                             is_array := av == 1, is_signed := sv == 1, width := (*bufs.sym_width)[i],
+                             struct_node := (*bufs.sym_struct_node)[i],
+                             elem_type := (*bufs.sym_elem_type)[i], elem_count := (*bufs.sym_elem_count)[i] };
         looping := false;
       } else {
         i := i + 1;
@@ -3742,17 +3846,31 @@ function sym_find(bufs: GBufs, name_off: uint64, name_len: uint64, sym_count: ui
   return result;
 }
 
-function sym_add(bufs: GBufs, name_off: uint64, name_len: uint64, reg: uint64,
-                  is_signed: bool, width: uint64, sym_count: uint64) : uint64 {
+function sym_add(bufs: GBufs, name_off: uint64, name_len: uint64, reg: uint64, is_composite: bool,
+                  is_array: bool, is_signed: bool, width: uint64, struct_node: uint64,
+                  elem_type: uint64, elem_count: uint64, sym_count: uint64) : uint64 {
   mut sv : int32 := 0;
+  mut cv : int32 := 0;
+  mut av : int32 := 0;
   if (is_signed) {
     sv := 1;
+  }
+  if (is_composite) {
+    cv := 1;
+  }
+  if (is_array) {
+    av := 1;
   }
   (*bufs.sym_name_off)[sym_count] := name_off;
   (*bufs.sym_name_len)[sym_count] := name_len;
   (*bufs.sym_reg)[sym_count] := reg;
+  (*bufs.sym_composite)[sym_count] := cv;
+  (*bufs.sym_is_array)[sym_count] := av;
   (*bufs.sym_signed)[sym_count] := sv;
   (*bufs.sym_width)[sym_count] := width;
+  (*bufs.sym_struct_node)[sym_count] := struct_node;
+  (*bufs.sym_elem_type)[sym_count] := elem_type;
+  (*bufs.sym_elem_count)[sym_count] := elem_count;
   return sym_count + 1;
 }
 
@@ -3926,9 +4044,315 @@ function build_func_table(bufs: GBufs, prog_node: uint64) : GBufs {
                  pool_b := bufs.pool_b, pool_c := bufs.pool_c, pool_d := bufs.pool_d,
                  list_pool := bufs.list_pool, out := bufs.out,
                  sym_name_off := bufs.sym_name_off, sym_name_len := bufs.sym_name_len,
-                 sym_reg := bufs.sym_reg, sym_signed := bufs.sym_signed, sym_width := bufs.sym_width,
+                 sym_reg := bufs.sym_reg, sym_composite := bufs.sym_composite,
+                 sym_is_array := bufs.sym_is_array,
+                 sym_signed := bufs.sym_signed, sym_width := bufs.sym_width,
+                 sym_struct_node := bufs.sym_struct_node,
+                 sym_elem_type := bufs.sym_elem_type, sym_elem_count := bufs.sym_elem_count,
                  func_name_off := bufs.func_name_off, func_name_len := bufs.func_name_len,
-                 func_node := bufs.func_node, func_count := n };
+                 func_node := bufs.func_node, func_count := n,
+                 struct_name_off := bufs.struct_name_off, struct_name_len := bufs.struct_name_len,
+                 struct_node := bufs.struct_node, struct_count := bufs.struct_count };
+}
+
+// Same shape as func_lookup/build_func_table, for AST_STRUCT_DECL
+// (kind 35) instead of AST_FUNCTION -- name -> the struct's own
+// top-level node id, so a use site (a `type T` reference, a field
+// lookup) can walk the declaration's field list directly rather than
+// needing a separately cached layout.
+struct StructInfo {
+  found : bool;
+  node : uint64;
+}
+
+function struct_lookup(bufs: GBufs, name_off: uint64, name_len: uint64) : StructInfo {
+  mut i : uint64 := 0;
+  mut looping : bool := true;
+  mut result : StructInfo := StructInfo { found := false, node := 0 };
+
+  while (looping) {
+    if (i >= bufs.struct_count) {
+      looping := false;
+    } else {
+      if (span_eq(bufs.src, (*bufs.struct_name_off)[i], (*bufs.struct_name_len)[i], name_off, name_len)) {
+        result := StructInfo { found := true, node := (*bufs.struct_node)[i] };
+        looping := false;
+      } else {
+        i := i + 1;
+      }
+    }
+  }
+  return result;
+}
+
+function build_struct_table(bufs: GBufs, prog_node: uint64) : GBufs {
+  mut start : uint64 := (*bufs.pool_a)[prog_node];
+  mut count : uint64 := (*bufs.pool_b)[prog_node];
+  mut i : uint64 := 0;
+  mut n : uint64 := 0;
+  mut decl_node : uint64 := 0;
+
+  while (i < count) {
+    decl_node := (*bufs.list_pool)[start + i];
+    if ((*bufs.pool_kind)[decl_node] == 35) {
+      (*bufs.struct_name_off)[n] := (*bufs.pool_a)[decl_node];
+      (*bufs.struct_name_len)[n] := (*bufs.pool_b)[decl_node];
+      (*bufs.struct_node)[n] := decl_node;
+      n := n + 1;
+    }
+    i := i + 1;
+  }
+  return GBufs { src := bufs.src, pool_kind := bufs.pool_kind, pool_a := bufs.pool_a,
+                 pool_b := bufs.pool_b, pool_c := bufs.pool_c, pool_d := bufs.pool_d,
+                 list_pool := bufs.list_pool, out := bufs.out,
+                 sym_name_off := bufs.sym_name_off, sym_name_len := bufs.sym_name_len,
+                 sym_reg := bufs.sym_reg, sym_composite := bufs.sym_composite,
+                 sym_is_array := bufs.sym_is_array,
+                 sym_signed := bufs.sym_signed, sym_width := bufs.sym_width,
+                 sym_struct_node := bufs.sym_struct_node,
+                 sym_elem_type := bufs.sym_elem_type, sym_elem_count := bufs.sym_elem_count,
+                 func_name_off := bufs.func_name_off, func_name_len := bufs.func_name_len,
+                 func_node := bufs.func_node, func_count := bufs.func_count,
+                 struct_name_off := bufs.struct_name_off, struct_name_len := bufs.struct_name_len,
+                 struct_node := bufs.struct_node, struct_count := n };
+}
+
+// A type node is a named-struct reference iff it's AST_TY_BASE (kind
+// 1) with builtin tag 0 -- see type_is_signed's own header for the
+// tag table this is the complement of.
+function is_struct_type_node(bufs: GBufs, type_node: uint64) : bool {
+  return (*bufs.pool_kind)[type_node] == 1 && (*bufs.pool_a)[type_node] == 0;
+}
+
+// Usable as a *local*'s declared type: a scalar (type_ok, unchanged --
+// still the only thing usable as a *parameter*/return type this
+// sub-pass), a named type that actually resolves to a declared struct,
+// or an array whose own element type is itself locally-ok (recursing,
+// so array-of-struct and nested arrays both validate correctly). Kept
+// distinct from type_ok deliberately -- composite parameters/returns
+// are still out of scope until the calling-convention sub-pass, so a
+// composite-typed *local* is fine but a composite-typed *parameter*
+// must still be rejected by type_ok exactly as before.
+struct TypeOkResult {
+  ok : bool;
+  is_struct : bool;
+  is_array : bool;
+  struct_node : uint64;
+  elem_type : uint64;
+  elem_count : uint64;
+}
+
+function type_ok_local(bufs: GBufs, type_node: uint64) : TypeOkResult {
+  mut result : TypeOkResult := TypeOkResult { ok := false, is_struct := false, is_array := false,
+                                                struct_node := 0, elem_type := 0, elem_count := 0 };
+  mut si : StructInfo := StructInfo { found := false, node := 0 };
+  mut elem_ok : TypeOkResult := TypeOkResult { ok := false, is_struct := false, is_array := false,
+                                                 struct_node := 0, elem_type := 0, elem_count := 0 };
+  mut elem : uint64 := 0;
+
+  if (type_ok(bufs, type_node)) {
+    result := TypeOkResult { ok := true, is_struct := false, is_array := false,
+                              struct_node := 0, elem_type := 0, elem_count := 0 };
+  } else {
+  if (is_struct_type_node(bufs, type_node)) {
+    si := struct_lookup(bufs, (*bufs.pool_b)[type_node], (*bufs.pool_c)[type_node]);
+    if (si.found) {
+      result := TypeOkResult { ok := true, is_struct := true, is_array := false,
+                                struct_node := si.node, elem_type := 0, elem_count := 0 };
+    }
+  } else {
+  if (is_array_type_node(bufs, type_node)) {
+    elem := (*bufs.pool_a)[type_node];
+    elem_ok := type_ok_local(bufs, elem);
+    if (elem_ok.ok) {
+      result := TypeOkResult { ok := true, is_struct := false, is_array := true, struct_node := 0,
+                                elem_type := elem, elem_count := array_type_elem_count(bufs, type_node) };
+    }
+  }}}
+  return result;
+}
+
+// Finds `name` among a struct declaration's own fields (AST_FIELD_DECL,
+// a=name_offset b=name_len c=type(id)) -- returns its declaration-order
+// index (for `getelementptr`'s field-index operand) and its own type
+// node (scalar or, for a nested struct field, another AST_STRUCT_DECL
+// by way of type_ok_local).
+struct FieldInfo {
+  found : bool;
+  index : uint64;
+  type_node : uint64;
+}
+
+function struct_field_lookup(bufs: GBufs, struct_decl_node: uint64, name_off: uint64, name_len: uint64) : FieldInfo {
+  mut start : uint64 := (*bufs.pool_c)[struct_decl_node];
+  mut count : uint64 := (*bufs.pool_d)[struct_decl_node];
+  mut i : uint64 := 0;
+  mut looping : bool := true;
+  mut field_node : uint64 := 0;
+  mut result : FieldInfo := FieldInfo { found := false, index := 0, type_node := 0 };
+
+  while (looping) {
+    if (i >= count) {
+      looping := false;
+    } else {
+      field_node := (*bufs.list_pool)[start + i];
+      if (span_eq(bufs.src, (*bufs.pool_a)[field_node], (*bufs.pool_b)[field_node], name_off, name_len)) {
+        result := FieldInfo { found := true, index := i, type_node := (*bufs.pool_c)[field_node] };
+        looping := false;
+      } else {
+        i := i + 1;
+      }
+    }
+  }
+  return result;
+}
+
+// Emits a field/local/param's own LLVM type spelling at the current
+// output position: `i<width>` for a scalar, `%struct.<Name>` for a
+// (possibly nested) struct -- the one place this file turns a type
+// AST node into LLVM syntax, reused by every alloca/load/store/type-
+// definition site that needs a composite-aware type instead of a bare
+// width number.
+function emit_scalar_type(bufs: GBufs, pos: uint64, type_node: uint64) : uint64 {
+  mut p : uint64 := emit_piece(bufs.out, pos, 5);
+  return append_uint(bufs.out, p, type_width(bufs, type_node));
+}
+
+function emit_struct_type_ref(bufs: GBufs, pos: uint64, struct_decl_node: uint64) : uint64 {
+  mut p : uint64 := emit_piece(bufs.out, pos, 78);
+  return append_slice(bufs.out, p, bufs.src, (*bufs.pool_a)[struct_decl_node], (*bufs.pool_b)[struct_decl_node]);
+}
+
+// A type node is an array reference iff it's AST_TY_ARRAY (kind 3) --
+// see is_struct_type_node's own header for the complement.
+function is_array_type_node(bufs: GBufs, type_node: uint64) : bool {
+  return (*bufs.pool_kind)[type_node] == 3;
+}
+
+// AST_TY_ARRAY's own size field is a *node id* pointing at the literal
+// int the parser materialized for it (parser.ptl's parse_array_size),
+// not the raw count itself -- v0's own array sizes are always a literal
+// written directly in the type, never a computed expression, so one
+// extra indirection here is all reading it through takes.
+function array_type_elem_count(bufs: GBufs, array_type_node: uint64) : uint64 {
+  mut size_node : uint64 := (*bufs.pool_b)[array_type_node];
+  return (*bufs.pool_a)[size_node];
+}
+
+// Recursively spells a *type AST node*'s LLVM type -- `i<width>` for a
+// scalar, `%struct.<Name>` for a named struct, `[N x ElemType]` for an
+// array (recursing for a nested array/struct element type). Used for
+// struct field types and array element types, i.e. wherever a type is
+// known only as a bare type-annotation node rather than an already-
+// classified composite value (see emit_composite_type for that case).
+function emit_any_type(bufs: GBufs, pos: uint64, type_node: uint64) : uint64 {
+  mut p : uint64 := pos;
+  mut elem : uint64 := 0;
+  mut n : uint64 := 0;
+
+  if (is_array_type_node(bufs, type_node)) {
+    elem := (*bufs.pool_a)[type_node];
+    n := array_type_elem_count(bufs, type_node);
+    p := emit_piece(bufs.out, p, 87);
+    p := append_uint(bufs.out, p, n);
+    p := emit_piece(bufs.out, p, 88);
+    p := emit_any_type(bufs, p, elem);
+    p := emit_piece(bufs.out, p, 89);
+  } else {
+    if (is_struct_type_node(bufs, type_node)) {
+      p := emit_struct_type_ref(bufs, p, struct_lookup(bufs, (*bufs.pool_b)[type_node], (*bufs.pool_c)[type_node]).node);
+    } else {
+      p := emit_scalar_type(bufs, p, type_node);
+    }
+  }
+  return p;
+}
+
+// Spells an *already-classified* composite value's LLVM type --
+// exactly ExprResult's/SymInfo's own `is_composite` shape (see
+// ExprResult's header): `struct_node` for a struct, `elem_type`/
+// `elem_count` for an array. Used at every composite copy/alloca site
+// where a value's classification is already in hand, rather than a
+// bare type node needing to be walked from scratch.
+function emit_composite_type(bufs: GBufs, pos: uint64, is_array: bool, struct_node: uint64,
+                              elem_type: uint64, elem_count: uint64) : uint64 {
+  mut p : uint64 := pos;
+  if (is_array) {
+    p := emit_piece(bufs.out, p, 87);
+    p := append_uint(bufs.out, p, elem_count);
+    p := emit_piece(bufs.out, p, 88);
+    p := emit_any_type(bufs, p, elem_type);
+    p := emit_piece(bufs.out, p, 89);
+  } else {
+    p := emit_struct_type_ref(bufs, p, struct_node);
+  }
+  return p;
+}
+
+// The one whole-aggregate `load` (from `src_addr`) + `store` (into
+// `dst_addr`) pair every composite value copy in this file boils down
+// to (a decl-init/assignment from an already-composite rhs, a nested
+// struct/array-literal field/element whose own value is itself
+// composite) -- factored out once since the same six-line shape would
+// otherwise repeat at every one of those call sites.
+function emit_composite_copy(bufs: GBufs, gst: GState, is_array: bool, struct_node: uint64,
+                              elem_type: uint64, elem_count: uint64, src_addr: uint64, dst_addr: uint64) : GState {
+  mut cur : GState := new_label(gst);
+  mut lreg : uint64 := cur.next_label - 1;
+  mut p : uint64 := emit_piece(bufs.out, cur.out_pos, 2);
+  p := append_uint(bufs.out, p, lreg);
+  p := emit_piece(bufs.out, p, 81);
+  p := emit_composite_type(bufs, p, is_array, struct_node, elem_type, elem_count);
+  p := emit_piece(bufs.out, p, 7);
+  p := append_uint(bufs.out, p, src_addr);
+  p := emit_piece(bufs.out, p, 1);
+  p := emit_piece(bufs.out, p, 80);
+  p := emit_composite_type(bufs, p, is_array, struct_node, elem_type, elem_count);
+  p := emit_piece(bufs.out, p, 4);
+  p := append_uint(bufs.out, p, lreg);
+  p := emit_piece(bufs.out, p, 7);
+  p := append_uint(bufs.out, p, dst_addr);
+  p := emit_piece(bufs.out, p, 1);
+  return GState { out_pos := p, next_label := cur.next_label,
+                   sym_count := cur.sym_count, had_error := cur.had_error };
+}
+
+// Emits one `%struct.<Name> = type <{ Field1, Field2, ... }>` line per
+// declared struct, in declaration order -- referencing another struct
+// by name inside a field is always valid regardless of textual order
+// (LLVM type definitions don't need forward declaration the way
+// functions do), so declaration order here is only for determinism,
+// not correctness.
+function emit_struct_types(bufs: GBufs, pos: uint64) : uint64 {
+  mut p : uint64 := pos;
+  mut i : uint64 := 0;
+  mut j : uint64 := 0;
+  mut decl_node : uint64 := 0;
+  mut start : uint64 := 0;
+  mut count : uint64 := 0;
+  mut field_node : uint64 := 0;
+  mut ftype : uint64 := 0;
+
+  while (i < bufs.struct_count) {
+    decl_node := (*bufs.struct_node)[i];
+    p := emit_struct_type_ref(bufs, p, decl_node);
+    p := emit_piece(bufs.out, p, 84);
+    p := emit_piece(bufs.out, p, 82);
+    start := (*bufs.pool_c)[decl_node];
+    count := (*bufs.pool_d)[decl_node];
+    j := 0;
+    while (j < count) {
+      field_node := (*bufs.list_pool)[start + j];
+      ftype := (*bufs.pool_c)[field_node];
+      if (j > 0) { p := emit_piece(bufs.out, p, 30); }
+      p := emit_any_type(bufs, p, ftype);
+      j := j + 1;
+    }
+    p := emit_piece(bufs.out, p, 83);
+    p := emit_piece(bufs.out, p, 1);
+    i := i + 1;
+  }
+  return p;
 }
 
 // ===========================================================================
@@ -3943,7 +4367,9 @@ function gen_expr(bufs: GBufs, gst: GState, node: uint64) : ExprResult {
   mut kind : int32 := (*bufs.pool_kind)[node];
   mut result : ExprResult := fail_expr(gst);
   mut p : uint64 := gst.out_pos;
-  mut sym : SymInfo := SymInfo { found := false, reg := 0, is_signed := false, width := 64 };
+  mut sym : SymInfo := SymInfo { found := false, reg := 0, is_composite := false, is_array := false,
+                                   is_signed := false, width := 64, struct_node := 0, elem_type := 0,
+                                   elem_count := 0 };
   mut left : ExprResult := fail_expr(gst);
   mut right : ExprResult := fail_expr(gst);
   mut inner : ExprResult := fail_expr(gst);
@@ -3951,6 +4377,51 @@ function gen_expr(bufs: GBufs, gst: GState, node: uint64) : ExprResult {
   mut cur : GState := gst;
   mut reg : uint64 := 0;
 
+  if (kind == 16 || kind == 17) {
+    // `s.field` / `a[i]` as an rvalue: gen_lvalue does the actual GEP
+    // work (recursing through nested field/index access); a composite
+    // result's address is returned as-is (matching every composite
+    // ExprResult's own convention, see the struct's header), a scalar
+    // result is loaded once here to turn its address into an actual
+    // value.
+    inner := gen_lvalue(bufs, gst, node);
+    if (!inner.value_ok) {
+      result := fail_expr(gst);
+    } else {
+      if (inner.is_composite) {
+        result := inner;
+      } else {
+        cur := new_label(expr_state(inner));
+        reg := cur.next_label - 1;
+        p := emit_piece(bufs.out, cur.out_pos, 2);
+        p := append_uint(bufs.out, p, reg);
+        p := emit_piece(bufs.out, p, 45);
+        p := append_uint(bufs.out, p, inner.width);
+        p := emit_piece(bufs.out, p, 7);
+        p := append_uint(bufs.out, p, inner.reg);
+        p := emit_piece(bufs.out, p, 1);
+        cur := GState { out_pos := p, next_label := cur.next_label,
+                         sym_count := cur.sym_count, had_error := cur.had_error };
+        result := pack_expr(cur, inner.is_signed, inner.width, reg);
+      }
+    }
+  } else {
+  if (kind == 19) {
+    result := gen_struct_lit(bufs, gst, node);
+  } else {
+  if (kind == 20) {
+    // Unlike a struct literal (self-describing via its own type name),
+    // a bare array literal `{1, 2, 3}` has no type of its own -- v0
+    // infers it entirely from context (a decl's declared type, a
+    // struct/array literal's own field/element type). gen_expr has no
+    // such context to offer, so this is reachable only for a
+    // genuinely out-of-scope use (anywhere but a decl-init or a
+    // literal's own field/element value, this sub-pass) -- a clean
+    // codegen error, not a crash. gen_array_lit_typed is the real
+    // entry point, called directly by whichever context already knows
+    // the target element type/count.
+    result := fail_expr(gst);
+  } else {
   if (kind == 10) {
     // An untyped integer constant (v0 reference Sec 3.7): no declared
     // width of its own, so it defaults to i64 -- whichever consumer
@@ -3991,18 +4462,29 @@ function gen_expr(bufs: GBufs, gst: GState, node: uint64) : ExprResult {
     if (!sym.found) {
       result := fail_expr(gst);
     } else {
-      cur := new_label(gst);
-      reg := cur.next_label - 1;
-      p := emit_piece(bufs.out, cur.out_pos, 2);
-      p := append_uint(bufs.out, p, reg);
-      p := emit_piece(bufs.out, p, 45);
-      p := append_uint(bufs.out, p, sym.width);
-      p := emit_piece(bufs.out, p, 7);
-      p := append_uint(bufs.out, p, sym.reg);
-      p := emit_piece(bufs.out, p, 1);
-      cur := GState { out_pos := p, next_label := cur.next_label,
-                       sym_count := cur.sym_count, had_error := cur.had_error };
-      result := pack_expr(cur, sym.is_signed, sym.width, reg);
+      if (sym.is_composite) {
+        // A composite local's own alloca IS its address already --
+        // matches every composite ExprResult's "reg is an address"
+        // convention, so no load is needed here at all.
+        if (sym.is_array) {
+          result := pack_expr_array(gst, sym.elem_type, sym.elem_count, sym.reg);
+        } else {
+          result := pack_expr_composite(gst, sym.struct_node, sym.reg);
+        }
+      } else {
+        cur := new_label(gst);
+        reg := cur.next_label - 1;
+        p := emit_piece(bufs.out, cur.out_pos, 2);
+        p := append_uint(bufs.out, p, reg);
+        p := emit_piece(bufs.out, p, 45);
+        p := append_uint(bufs.out, p, sym.width);
+        p := emit_piece(bufs.out, p, 7);
+        p := append_uint(bufs.out, p, sym.reg);
+        p := emit_piece(bufs.out, p, 1);
+        cur := GState { out_pos := p, next_label := cur.next_label,
+                         sym_count := cur.sym_count, had_error := cur.had_error };
+        result := pack_expr(cur, sym.is_signed, sym.width, reg);
+      }
     }
   } else {
   if (kind == 14) {
@@ -4065,7 +4547,333 @@ function gen_expr(bufs: GBufs, gst: GState, node: uint64) : ExprResult {
     result := gen_call(bufs, gst, node);
   } else {
     result := fail_expr(gst);
-  }}}}}}
+  }}}}}}}}}
+  return result;
+}
+
+// Classifies an address `reg` by its declared type node into the
+// right lvalue-shaped ExprResult -- scalar, named struct, or array --
+// shared by every gen_lvalue case that just resolved a field's or
+// element's own type and needs to hand back a properly classified
+// result the same way gen_lvalue itself always does.
+function pack_lvalue_by_type(bufs: GBufs, gst: GState, type_node: uint64, reg: uint64) : ExprResult {
+  mut result : ExprResult := fail_expr(gst);
+  if (is_array_type_node(bufs, type_node)) {
+    result := pack_expr_array(gst, (*bufs.pool_a)[type_node], array_type_elem_count(bufs, type_node), reg);
+  } else {
+  if (is_struct_type_node(bufs, type_node)) {
+    result := pack_expr_composite(gst, struct_lookup(bufs, (*bufs.pool_b)[type_node], (*bufs.pool_c)[type_node]).node, reg);
+  } else {
+    result := pack_expr(gst, type_is_signed(bufs, type_node), type_width(bufs, type_node), reg);
+  }}
+  return result;
+}
+
+// Address-producing counterpart to gen_expr (v1.0.3's composite sub-
+// passes) -- never loads, `reg` is always the address of the named
+// location. AST_EX_IDENT reuses the symbol table directly (a local's
+// own alloca *is* its address, no GEP needed); AST_EX_FIELD recurses
+// into its own base first (which must itself resolve to a struct-
+// typed address), then GEP's one step to the named field, using the
+// field's declaration-order index (struct_field_lookup); AST_EX_INDEX
+// mirrors this for an array-typed base -- GEP's one step to a
+// *computed* (not constant) i64 index instead of a field's fixed i32
+// one. LLVM addresses both by index, not byte offset, so no manual
+// size/offset math is needed anywhere in this file. Pointer-deref
+// lvalues (`*p`) are still out of scope this sub-pass.
+function gen_lvalue(bufs: GBufs, gst: GState, node: uint64) : ExprResult {
+  mut kind : int32 := (*bufs.pool_kind)[node];
+  mut result : ExprResult := fail_expr(gst);
+  mut sym : SymInfo := SymInfo { found := false, reg := 0, is_composite := false, is_array := false,
+                                   is_signed := false, width := 64, struct_node := 0, elem_type := 0,
+                                   elem_count := 0 };
+  mut base : ExprResult := fail_expr(gst);
+  mut fi : FieldInfo := FieldInfo { found := false, index := 0, type_node := 0 };
+  mut idx : ExprResult := fail_expr(gst);
+  mut idxc : ExprResult := fail_expr(gst);
+  mut cur : GState := gst;
+  mut reg : uint64 := 0;
+  mut p : uint64 := 0;
+
+  if (kind == 13) {
+    sym := sym_find(bufs, (*bufs.pool_a)[node], (*bufs.pool_b)[node], gst.sym_count);
+    if (!sym.found) {
+      result := fail_expr(gst);
+    } else {
+      if (sym.is_composite) {
+        if (sym.is_array) {
+          result := pack_expr_array(gst, sym.elem_type, sym.elem_count, sym.reg);
+        } else {
+          result := pack_expr_composite(gst, sym.struct_node, sym.reg);
+        }
+      } else {
+        result := pack_expr(gst, sym.is_signed, sym.width, sym.reg);
+      }
+    }
+  } else {
+  if (kind == 17) {
+    base := gen_lvalue(bufs, gst, (*bufs.pool_a)[node]);
+    if (!base.value_ok || !base.is_composite || base.is_array) {
+      result := fail_expr(expr_state(base));
+    } else {
+      fi := struct_field_lookup(bufs, base.struct_node, (*bufs.pool_b)[node], (*bufs.pool_c)[node]);
+      if (!fi.found) {
+        result := fail_expr(expr_state(base));
+      } else {
+        cur := new_label(expr_state(base));
+        reg := cur.next_label - 1;
+        p := emit_piece(bufs.out, cur.out_pos, 2);
+        p := append_uint(bufs.out, p, reg);
+        p := emit_piece(bufs.out, p, 85);
+        p := emit_struct_type_ref(bufs, p, base.struct_node);
+        p := emit_piece(bufs.out, p, 7);
+        p := append_uint(bufs.out, p, base.reg);
+        p := emit_piece(bufs.out, p, 86);
+        p := append_uint(bufs.out, p, fi.index);
+        p := emit_piece(bufs.out, p, 1);
+        cur := GState { out_pos := p, next_label := cur.next_label,
+                         sym_count := cur.sym_count, had_error := cur.had_error };
+        result := pack_lvalue_by_type(bufs, cur, fi.type_node, reg);
+      }
+    }
+  } else {
+  if (kind == 16) {
+    base := gen_lvalue(bufs, gst, (*bufs.pool_a)[node]);
+    if (!base.value_ok || !base.is_composite || !base.is_array) {
+      result := fail_expr(expr_state(base));
+    } else {
+      idx := gen_expr(bufs, expr_state(base), (*bufs.pool_b)[node]);
+      if (!idx.value_ok) {
+        result := fail_expr(expr_state(idx));
+      } else {
+        idxc := coerce_width(bufs, expr_state(idx), idx.reg, idx.width, 64, idx.is_signed);
+        cur := new_label(expr_state(idxc));
+        reg := cur.next_label - 1;
+        p := emit_piece(bufs.out, cur.out_pos, 2);
+        p := append_uint(bufs.out, p, reg);
+        p := emit_piece(bufs.out, p, 85);
+        p := emit_composite_type(bufs, p, true, 0, base.elem_type, base.elem_count);
+        p := emit_piece(bufs.out, p, 7);
+        p := append_uint(bufs.out, p, base.reg);
+        p := emit_piece(bufs.out, p, 90);
+        p := append_uint(bufs.out, p, idxc.reg);
+        p := emit_piece(bufs.out, p, 1);
+        cur := GState { out_pos := p, next_label := cur.next_label,
+                         sym_count := cur.sym_count, had_error := cur.had_error };
+        result := pack_lvalue_by_type(bufs, cur, base.elem_type, reg);
+      }
+    }
+  } else {
+    result := fail_expr(gst);
+  }}}
+  return result;
+}
+
+// `Name { field := expr, ... }`: alloca a fresh temporary of the
+// struct's own type, then GEP + store each named field in turn
+// (recursing into gen_expr for the field's value, so a nested struct
+// literal as a field's own value works via the same whole-aggregate
+// load+store copy every other composite assignment uses). Every field
+// named in the literal must resolve against the struct's own
+// declaration; an unknown field name is a codegen error rather than
+// silently ignored (this file's "never silently wrong code" rule).
+function gen_struct_lit(bufs: GBufs, gst: GState, node: uint64) : ExprResult {
+  mut si : StructInfo := struct_lookup(bufs, (*bufs.pool_a)[node], (*bufs.pool_b)[node]);
+  mut result : ExprResult := fail_expr(gst);
+  mut fields_start : uint64 := (*bufs.pool_c)[node];
+  mut field_count : uint64 := (*bufs.pool_d)[node];
+  mut cur : GState := gst;
+  mut treg : uint64 := 0;
+  mut p : uint64 := 0;
+  mut ok : bool := true;
+  mut i : uint64 := 0;
+  mut fi_node : uint64 := 0;
+  mut fname_off : uint64 := 0;
+  mut fname_len : uint64 := 0;
+  mut fval_node : uint64 := 0;
+  mut ffi : FieldInfo := FieldInfo { found := false, index := 0, type_node := 0 };
+  mut fval : ExprResult := fail_expr(gst);
+  mut faddr : uint64 := 0;
+  mut fc : ExprResult := fail_expr(gst);
+  mut fwidth : uint64 := 64;
+
+  if (!si.found) {
+    result := fail_expr(gst);
+  } else {
+    cur := new_label(gst);
+    treg := cur.next_label - 1;
+    p := emit_piece(bufs.out, cur.out_pos, 2);
+    p := append_uint(bufs.out, p, treg);
+    p := emit_piece(bufs.out, p, 79);
+    p := emit_struct_type_ref(bufs, p, si.node);
+    p := emit_piece(bufs.out, p, 1);
+    cur := GState { out_pos := p, next_label := cur.next_label,
+                     sym_count := cur.sym_count, had_error := cur.had_error };
+
+    while (i < field_count && ok && !cur.had_error) {
+      fi_node := (*bufs.list_pool)[fields_start + i];
+      fname_off := (*bufs.pool_a)[fi_node];
+      fname_len := (*bufs.pool_b)[fi_node];
+      fval_node := (*bufs.pool_c)[fi_node];
+      ffi := struct_field_lookup(bufs, si.node, fname_off, fname_len);
+      if (!ffi.found) {
+        ok := false;
+      } else {
+        if ((*bufs.pool_kind)[fval_node] == 20 && is_array_type_node(bufs, ffi.type_node)) {
+          // A bare array literal as a field's own value: gen_expr can't
+          // infer its type (see its own kind==20 comment), but the
+          // field's declared type is already known here, so dispatch
+          // directly to the typed entry point instead.
+          fval := gen_array_lit_typed(bufs, cur, fval_node, (*bufs.pool_a)[ffi.type_node],
+                                       array_type_elem_count(bufs, ffi.type_node));
+        } else {
+          fval := gen_expr(bufs, cur, fval_node);
+        }
+        cur := expr_state(fval);
+        if (!fval.value_ok) {
+          ok := false;
+        } else {
+          cur := new_label(cur);
+          faddr := cur.next_label - 1;
+          p := emit_piece(bufs.out, cur.out_pos, 2);
+          p := append_uint(bufs.out, p, faddr);
+          p := emit_piece(bufs.out, p, 85);
+          p := emit_struct_type_ref(bufs, p, si.node);
+          p := emit_piece(bufs.out, p, 7);
+          p := append_uint(bufs.out, p, treg);
+          p := emit_piece(bufs.out, p, 86);
+          p := append_uint(bufs.out, p, ffi.index);
+          p := emit_piece(bufs.out, p, 1);
+          cur := GState { out_pos := p, next_label := cur.next_label,
+                           sym_count := cur.sym_count, had_error := cur.had_error };
+
+          if (fval.is_composite) {
+            cur := emit_composite_copy(bufs, cur, fval.is_array, fval.struct_node,
+                                        fval.elem_type, fval.elem_count, fval.reg, faddr);
+          } else {
+            fwidth := type_width(bufs, ffi.type_node);
+            fc := coerce_width(bufs, cur, fval.reg, fval.width, fwidth, fval.is_signed);
+            cur := expr_state(fc);
+            p := emit_piece(bufs.out, cur.out_pos, 44);
+            p := append_uint(bufs.out, p, fwidth);
+            p := emit_piece(bufs.out, p, 4);
+            p := append_uint(bufs.out, p, fc.reg);
+            p := emit_piece(bufs.out, p, 7);
+            p := append_uint(bufs.out, p, faddr);
+            p := emit_piece(bufs.out, p, 1);
+            cur := GState { out_pos := p, next_label := cur.next_label,
+                             sym_count := cur.sym_count, had_error := cur.had_error };
+          }
+        }
+      }
+      i := i + 1;
+    }
+    if (!ok) {
+      cur := GState { out_pos := cur.out_pos, next_label := cur.next_label,
+                       sym_count := cur.sym_count, had_error := true };
+      result := fail_expr(cur);
+    } else {
+      result := pack_expr_composite(cur, si.node, treg);
+    }
+  }
+  return result;
+}
+
+// `{ e0, e1, ... }` at a known element type/count (the caller already
+// resolved these -- see gen_expr's own kind==20 comment for why a bare
+// array literal can't infer its own type the way a struct literal
+// does). Alloca's a fresh temporary of `[elem_count x elem_type]`, then
+// GEP + store each positional element in turn. A nested array-literal
+// element recurses back into this same function (with *its own*
+// element type/count, read straight off `elem_type`, since that's the
+// array type one level down); any other element expression (a scalar,
+// a struct literal, an already-composite ident) goes through ordinary
+// gen_expr, exactly like a struct literal's own field values do.
+// `lit_count != elem_count` (too many/few elements for the declared
+// size) is a clean codegen error, not silently truncated or padded.
+function gen_array_lit_typed(bufs: GBufs, gst: GState, node: uint64, elem_type: uint64, elem_count: uint64) : ExprResult {
+  mut result : ExprResult := fail_expr(gst);
+  mut elems_start : uint64 := (*bufs.pool_a)[node];
+  mut lit_count : uint64 := (*bufs.pool_b)[node];
+  mut cur : GState := gst;
+  mut treg : uint64 := 0;
+  mut p : uint64 := 0;
+  mut ok : bool := true;
+  mut i : uint64 := 0;
+  mut elem_node : uint64 := 0;
+  mut eval : ExprResult := fail_expr(gst);
+  mut eaddr : uint64 := 0;
+  mut ec : ExprResult := fail_expr(gst);
+  mut ewidth : uint64 := 64;
+
+  if (lit_count != elem_count) {
+    result := fail_expr(gst);
+  } else {
+    cur := new_label(gst);
+    treg := cur.next_label - 1;
+    p := emit_piece(bufs.out, cur.out_pos, 2);
+    p := append_uint(bufs.out, p, treg);
+    p := emit_piece(bufs.out, p, 79);
+    p := emit_composite_type(bufs, p, true, 0, elem_type, elem_count);
+    p := emit_piece(bufs.out, p, 1);
+    cur := GState { out_pos := p, next_label := cur.next_label,
+                     sym_count := cur.sym_count, had_error := cur.had_error };
+
+    while (i < lit_count && ok && !cur.had_error) {
+      elem_node := (*bufs.list_pool)[elems_start + i];
+
+      cur := new_label(cur);
+      eaddr := cur.next_label - 1;
+      p := emit_piece(bufs.out, cur.out_pos, 2);
+      p := append_uint(bufs.out, p, eaddr);
+      p := emit_piece(bufs.out, p, 85);
+      p := emit_composite_type(bufs, p, true, 0, elem_type, elem_count);
+      p := emit_piece(bufs.out, p, 7);
+      p := append_uint(bufs.out, p, treg);
+      p := emit_piece(bufs.out, p, 91);
+      p := append_uint(bufs.out, p, i);
+      p := emit_piece(bufs.out, p, 1);
+      cur := GState { out_pos := p, next_label := cur.next_label,
+                       sym_count := cur.sym_count, had_error := cur.had_error };
+
+      if ((*bufs.pool_kind)[elem_node] == 20 && is_array_type_node(bufs, elem_type)) {
+        eval := gen_array_lit_typed(bufs, cur, elem_node, (*bufs.pool_a)[elem_type],
+                                     array_type_elem_count(bufs, elem_type));
+      } else {
+        eval := gen_expr(bufs, cur, elem_node);
+      }
+      cur := expr_state(eval);
+      if (!eval.value_ok) {
+        ok := false;
+      } else {
+        if (eval.is_composite) {
+          cur := emit_composite_copy(bufs, cur, eval.is_array, eval.struct_node,
+                                      eval.elem_type, eval.elem_count, eval.reg, eaddr);
+        } else {
+          ewidth := type_width(bufs, elem_type);
+          ec := coerce_width(bufs, cur, eval.reg, eval.width, ewidth, eval.is_signed);
+          cur := expr_state(ec);
+          p := emit_piece(bufs.out, cur.out_pos, 44);
+          p := append_uint(bufs.out, p, ewidth);
+          p := emit_piece(bufs.out, p, 4);
+          p := append_uint(bufs.out, p, ec.reg);
+          p := emit_piece(bufs.out, p, 7);
+          p := append_uint(bufs.out, p, eaddr);
+          p := emit_piece(bufs.out, p, 1);
+          cur := GState { out_pos := p, next_label := cur.next_label,
+                           sym_count := cur.sym_count, had_error := cur.had_error };
+        }
+      }
+      i := i + 1;
+    }
+    if (!ok) {
+      cur := GState { out_pos := cur.out_pos, next_label := cur.next_label,
+                       sym_count := cur.sym_count, had_error := true };
+      result := fail_expr(cur);
+    } else {
+      result := pack_expr_array(cur, elem_type, elem_count, treg);
+    }
+  }
   return result;
 }
 
@@ -4624,6 +5432,13 @@ function gen_stmts(bufs: GBufs, gst: GState, epilogue: uint64, ret_type_node: ui
 // pass 2 coerces each to its own lvalue's declared width and stores,
 // in plain forward order -- order no longer matters once every rhs is
 // already a captured SSA register.
+// Pass 1 evaluates every rhs into its own address-or-value register
+// (Dijkstra/Hoare simultaneous-assignment semantics), staged into local
+// arrays alongside its width/signedness/composite-ness; pass 2 resolves
+// each lvalue via gen_lvalue -- now IDENT *or* FIELD (v1.0.3's struct
+// sub-pass; INDEX/deref lvalues still aren't) -- and either coerces
+// +stores a scalar or does the one whole-aggregate load+store copy a
+// composite lvalue needs, matching gen_decls' own composite-copy shape.
 function gen_assign_stmt(bufs: GBufs, gst: GState, node: uint64) : GState {
   mut pairs_start : uint64 := (*bufs.pool_a)[node];
   mut pair_count : uint64 := (*bufs.pool_b)[node];
@@ -4635,10 +5450,12 @@ function gen_assign_stmt(bufs: GBufs, gst: GState, node: uint64) : GState {
   mut e : ExprResult := fail_expr(gst);
   mut ok : bool := true;
   mut p : uint64 := 0;
-  mut sym : SymInfo := SymInfo { found := false, reg := 0, is_signed := false, width := 64 };
+  mut lv : ExprResult := fail_expr(gst);
   mut rhs_regs : uint64[64] := 0;
   mut rhs_widths : uint64[64] := 0;
   mut rhs_signed : int32[64] := 0;
+  mut rhs_composite : int32[64] := 0;
+  mut rhs_is_array : int32[64] := 0;
 
   while (i < pair_count && ok) {
     pair_node := (*bufs.list_pool)[pairs_start + i];
@@ -4651,6 +5468,8 @@ function gen_assign_stmt(bufs: GBufs, gst: GState, node: uint64) : GState {
       rhs_regs[i] := e.reg;
       rhs_widths[i] := e.width;
       if (e.is_signed) { rhs_signed[i] := 1; }
+      if (e.is_composite) { rhs_composite[i] := 1; }
+      if (e.is_array) { rhs_is_array[i] := 1; }
     }
     i := i + 1;
   }
@@ -4660,21 +5479,27 @@ function gen_assign_stmt(bufs: GBufs, gst: GState, node: uint64) : GState {
     while (i < pair_count && ok) {
       pair_node := (*bufs.list_pool)[pairs_start + i];
       lv_node := (*bufs.pool_a)[pair_node];
-      if ((*bufs.pool_kind)[lv_node] != 13) {
+      lv := gen_lvalue(bufs, cur, lv_node);
+      if (!lv.value_ok) {
         ok := false;
       } else {
-        sym := sym_find(bufs, (*bufs.pool_a)[lv_node], (*bufs.pool_b)[lv_node], cur.sym_count);
-        if (!sym.found) {
-          ok := false;
+        cur := expr_state(lv);
+        if (lv.is_composite) {
+          if (rhs_composite[i] != 1 || (rhs_is_array[i] == 1) != lv.is_array) {
+            ok := false;
+          } else {
+            cur := emit_composite_copy(bufs, cur, lv.is_array, lv.struct_node,
+                                        lv.elem_type, lv.elem_count, rhs_regs[i], lv.reg);
+          }
         } else {
-          e := coerce_width(bufs, cur, rhs_regs[i], rhs_widths[i], sym.width, rhs_signed[i] == 1);
+          e := coerce_width(bufs, cur, rhs_regs[i], rhs_widths[i], lv.width, rhs_signed[i] == 1);
           cur := expr_state(e);
           p := emit_piece(bufs.out, cur.out_pos, 44);
-          p := append_uint(bufs.out, p, sym.width);
+          p := append_uint(bufs.out, p, lv.width);
           p := emit_piece(bufs.out, p, 4);
           p := append_uint(bufs.out, p, e.reg);
           p := emit_piece(bufs.out, p, 7);
-          p := append_uint(bufs.out, p, sym.reg);
+          p := append_uint(bufs.out, p, lv.reg);
           p := emit_piece(bufs.out, p, 1);
           cur := GState { out_pos := p, next_label := cur.next_label,
                            sym_count := cur.sym_count, had_error := cur.had_error };
@@ -4894,6 +5719,15 @@ function type_ok(bufs: GBufs, type_node: uint64) : bool {
 // func_block's own decls (mut/const) each get their own `alloca` at
 // their true declared width; an init expression is coerced to that
 // width before the store.
+// func_block's own decls (mut/const) each get their own `alloca` --
+// scalar decls at their true declared width (unchanged since
+// `v1.0.3`'s width-unification sub-pass), a struct-typed decl (this
+// sub-pass) at its own named LLVM type. A struct decl's init
+// expression must itself be composite-valued (an already-composite
+// gen_expr result -- a struct ident or a struct literal); the actual
+// copy is one whole-aggregate load (from the init's own address) plus
+// store (into the new local's alloca), same pattern used everywhere
+// else a composite value crosses from one address to another.
 function gen_decls(bufs: GBufs, gst: GState, start: uint64, count: uint64) : GState {
   mut cur : GState := gst;
   mut i : uint64 := 0;
@@ -4907,14 +5741,129 @@ function gen_decls(bufs: GBufs, gst: GState, start: uint64, count: uint64) : GSt
   mut p : uint64 := 0;
   mut new_count : uint64 := 0;
   mut dreg : uint64 := 0;
+  mut tok : TypeOkResult := TypeOkResult { ok := false, is_struct := false, is_array := false,
+                                             struct_node := 0, elem_type := 0, elem_count := 0 };
+  mut j : uint64 := 0;
+  mut ereg : uint64 := 0;
+  mut ec : ExprResult := fail_expr(gst);
 
   while (i < count && !cur.had_error) {
     decl_node := (*bufs.list_pool)[start + i];
     type_node := (*bufs.pool_c)[decl_node];
     init_node := (*bufs.pool_d)[decl_node];
-    if (!type_ok(bufs, type_node)) {
+    tok := type_ok_local(bufs, type_node);
+    if (!tok.ok) {
       cur := GState { out_pos := cur.out_pos, next_label := cur.next_label,
                        sym_count := cur.sym_count, had_error := true };
+    } else {
+    if (tok.is_struct) {
+      cur := new_label(cur);
+      dreg := cur.next_label - 1;
+      p := emit_piece(bufs.out, cur.out_pos, 2);
+      p := append_uint(bufs.out, p, dreg);
+      p := emit_piece(bufs.out, p, 79);
+      p := emit_struct_type_ref(bufs, p, tok.struct_node);
+      p := emit_piece(bufs.out, p, 1);
+      cur := GState { out_pos := p, next_label := cur.next_label,
+                       sym_count := cur.sym_count, had_error := cur.had_error };
+
+      new_count := sym_add(bufs, (*bufs.pool_a)[decl_node], (*bufs.pool_b)[decl_node],
+                            dreg, true, false, false, 0, tok.struct_node, 0, 0, cur.sym_count);
+      cur := GState { out_pos := cur.out_pos, next_label := cur.next_label,
+                       sym_count := new_count, had_error := cur.had_error };
+
+      if (init_node != 0) {
+        e := gen_expr(bufs, cur, init_node);
+        cur := expr_state(e);
+        if (!e.value_ok || !e.is_composite || e.is_array) {
+          cur := GState { out_pos := cur.out_pos, next_label := cur.next_label,
+                           sym_count := cur.sym_count, had_error := true };
+        } else {
+          cur := emit_composite_copy(bufs, cur, false, tok.struct_node, 0, 0, e.reg, dreg);
+        }
+      }
+    } else {
+    if (tok.is_array) {
+      cur := new_label(cur);
+      dreg := cur.next_label - 1;
+      p := emit_piece(bufs.out, cur.out_pos, 2);
+      p := append_uint(bufs.out, p, dreg);
+      p := emit_piece(bufs.out, p, 79);
+      p := emit_composite_type(bufs, p, true, 0, tok.elem_type, tok.elem_count);
+      p := emit_piece(bufs.out, p, 1);
+      cur := GState { out_pos := p, next_label := cur.next_label,
+                       sym_count := cur.sym_count, had_error := cur.had_error };
+
+      new_count := sym_add(bufs, (*bufs.pool_a)[decl_node], (*bufs.pool_b)[decl_node],
+                            dreg, true, true, false, 0, 0, tok.elem_type, tok.elem_count, cur.sym_count);
+      cur := GState { out_pos := cur.out_pos, next_label := cur.next_label,
+                       sym_count := new_count, had_error := cur.had_error };
+
+      if (init_node != 0) {
+        if ((*bufs.pool_kind)[init_node] == 20) {
+          // Bare array literal: gen_expr can't infer its type on its
+          // own (see its own kind==20 comment) -- the decl's declared
+          // element type/count are already known here, so dispatch
+          // directly, then copy the literal's own fresh temporary into
+          // this decl's alloca (same shape as any other composite
+          // decl-init, not specially folded into the decl's own slot --
+          // this file doesn't optimize, see its own header).
+          e := gen_array_lit_typed(bufs, cur, init_node, tok.elem_type, tok.elem_count);
+          cur := expr_state(e);
+          if (!e.value_ok) {
+            cur := GState { out_pos := cur.out_pos, next_label := cur.next_label,
+                             sym_count := cur.sym_count, had_error := true };
+          } else {
+            cur := emit_composite_copy(bufs, cur, true, 0, tok.elem_type, tok.elem_count, e.reg, dreg);
+          }
+        } else {
+          e := gen_expr(bufs, cur, init_node);
+          cur := expr_state(e);
+          if (!e.value_ok) {
+            cur := GState { out_pos := cur.out_pos, next_label := cur.next_label,
+                             sym_count := cur.sym_count, had_error := true };
+          } else {
+          if (e.is_composite) {
+            if (!e.is_array) {
+              cur := GState { out_pos := cur.out_pos, next_label := cur.next_label,
+                               sym_count := cur.sym_count, had_error := true };
+            } else {
+              cur := emit_composite_copy(bufs, cur, true, 0, tok.elem_type, tok.elem_count, e.reg, dreg);
+            }
+          } else {
+            // Array broadcast-init (v0 reference Sec 4.1): a single
+            // scalar source, coerced once, stored into every element --
+            // a composite broadcast source is not v0-valid and is
+            // rejected just above, not silently accepted.
+            ec := coerce_width(bufs, cur, e.reg, e.width, type_width(bufs, tok.elem_type), e.is_signed);
+            cur := expr_state(ec);
+            j := 0;
+            while (j < tok.elem_count && !cur.had_error) {
+              cur := new_label(cur);
+              ereg := cur.next_label - 1;
+              p := emit_piece(bufs.out, cur.out_pos, 2);
+              p := append_uint(bufs.out, p, ereg);
+              p := emit_piece(bufs.out, p, 85);
+              p := emit_composite_type(bufs, p, true, 0, tok.elem_type, tok.elem_count);
+              p := emit_piece(bufs.out, p, 7);
+              p := append_uint(bufs.out, p, dreg);
+              p := emit_piece(bufs.out, p, 91);
+              p := append_uint(bufs.out, p, j);
+              p := emit_piece(bufs.out, p, 1);
+              p := emit_piece(bufs.out, p, 44);
+              p := append_uint(bufs.out, p, type_width(bufs, tok.elem_type));
+              p := emit_piece(bufs.out, p, 4);
+              p := append_uint(bufs.out, p, ec.reg);
+              p := emit_piece(bufs.out, p, 7);
+              p := append_uint(bufs.out, p, ereg);
+              p := emit_piece(bufs.out, p, 1);
+              cur := GState { out_pos := p, next_label := cur.next_label,
+                               sym_count := cur.sym_count, had_error := cur.had_error };
+              j := j + 1;
+            }
+          }}
+        }
+      }
     } else {
       is_signed := type_is_signed(bufs, type_node);
       width := type_width(bufs, type_node);
@@ -4929,7 +5878,7 @@ function gen_decls(bufs: GBufs, gst: GState, start: uint64, count: uint64) : GSt
                        sym_count := cur.sym_count, had_error := cur.had_error };
 
       new_count := sym_add(bufs, (*bufs.pool_a)[decl_node], (*bufs.pool_b)[decl_node],
-                            dreg, is_signed, width, cur.sym_count);
+                            dreg, false, false, is_signed, width, 0, 0, 0, cur.sym_count);
       cur := GState { out_pos := cur.out_pos, next_label := cur.next_label,
                        sym_count := new_count, had_error := cur.had_error };
 
@@ -4953,7 +5902,7 @@ function gen_decls(bufs: GBufs, gst: GState, start: uint64, count: uint64) : GSt
                            sym_count := cur.sym_count, had_error := cur.had_error };
         }
       }
-    }
+    }}}
     i := i + 1;
   }
   return cur;
@@ -5048,7 +5997,7 @@ function gen_function(bufs: GBufs, gst: GState, func_node: uint64) : GState {
       p := emit_piece(bufs.out, p, 1);
 
       new_count := sym_add(bufs, (*bufs.pool_a)[param_node], (*bufs.pool_b)[param_node],
-                            preg, type_is_signed(bufs, ptype), pwidth, cur.sym_count);
+                            preg, false, false, type_is_signed(bufs, ptype), pwidth, 0, 0, 0, cur.sym_count);
       cur := GState { out_pos := p, next_label := cur.next_label,
                        sym_count := new_count, had_error := cur.had_error };
     }
@@ -5197,13 +6146,21 @@ function main() : int32 {
   mut sym_name_off : uint64[128] := 0;
   mut sym_name_len : uint64[128] := 0;
   mut sym_reg : uint64[128] := 0;
+  mut sym_composite : int32[128] := 0;
+  mut sym_is_array : int32[128] := 0;
   mut sym_signed : int32[128] := 0;
   mut sym_width : uint64[128] := 0;
+  mut sym_struct_node : uint64[128] := 0;
+  mut sym_elem_type : uint64[128] := 0;
+  mut sym_elem_count : uint64[128] := 0;
   mut func_name_off : uint64[64] := 0;
   mut func_name_len : uint64[64] := 0;
   mut func_node : uint64[64] := 0;
+  mut struct_name_off : uint64[32] := 0;
+  mut struct_name_len : uint64[32] := 0;
+  mut struct_node : uint64[32] := 0;
   mut pbufs : Buffers := Buffers { src := &src_buf, tok_kind := &tok_kind, tok_offset := &tok_offset, tok_length := &tok_length, pool_kind := &pool_kind, pool_a := &pool_a, pool_b := &pool_b, pool_c := &pool_c, pool_d := &pool_d, list_pool := &list_pool };
-  mut gbufs : GBufs := GBufs { src := &src_buf, pool_kind := &pool_kind, pool_a := &pool_a, pool_b := &pool_b, pool_c := &pool_c, pool_d := &pool_d, list_pool := &list_pool, out := &out_buf, sym_name_off := &sym_name_off, sym_name_len := &sym_name_len, sym_reg := &sym_reg, sym_signed := &sym_signed, sym_width := &sym_width, func_name_off := &func_name_off, func_name_len := &func_name_len, func_node := &func_node, func_count := 0 };
+  mut gbufs : GBufs := GBufs { src := &src_buf, pool_kind := &pool_kind, pool_a := &pool_a, pool_b := &pool_b, pool_c := &pool_c, pool_d := &pool_d, list_pool := &list_pool, out := &out_buf, sym_name_off := &sym_name_off, sym_name_len := &sym_name_len, sym_reg := &sym_reg, sym_composite := &sym_composite, sym_is_array := &sym_is_array, sym_signed := &sym_signed, sym_width := &sym_width, sym_struct_node := &sym_struct_node, sym_elem_type := &sym_elem_type, sym_elem_count := &sym_elem_count, func_name_off := &func_name_off, func_name_len := &func_name_len, func_node := &func_node, func_count := 0, struct_name_off := &struct_name_off, struct_name_len := &struct_name_len, struct_node := &struct_node, struct_count := 0 };
   mut tr : TokenizeResult := TokenizeResult { count := 0, had_error := false, err_kind := 0, err_offset := 0, err_length := 0 };
   mut pst : PState := PState { tok_idx := 0, pool_next := 1, list_next := 0, had_error := false, err_tok := 0 };
   mut prog : ParseResult := pack_result(0, pst);
@@ -5329,8 +6286,10 @@ function main() : int32 {
         main_ret_type := main_return_type(gbufs, prog.node);
         if (main_ret_type != 0) { main_ret_w := type_width(gbufs, main_ret_type); }
         gbufs := build_func_table(gbufs, prog.node);
+        gbufs := build_struct_table(gbufs, prog.node);
 
-        p := emit_piece(&out_buf, out_pos, 40);
+        p := emit_struct_types(gbufs, out_pos);
+        p := emit_piece(&out_buf, p, 40);
         if (main_ret_type != 0) {
           p := emit_piece(&out_buf, p, 71);
           p := append_uint(&out_buf, p, main_ret_w);
