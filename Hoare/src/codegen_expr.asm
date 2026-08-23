@@ -45,6 +45,7 @@ extern bytes_equal
 extern ast_alloc_node
 extern gen_init_push
 extern gen_init_pop_store
+extern emit_rep_movsb_copy
 
 global gen_rvalue
 global gen_lvalue
@@ -295,6 +296,10 @@ s_lea_rbx_rsp_plus: db "    lea     rbx, [rsp + "
 s_lea_rbx_rsp_plus_len equ $ - s_lea_rbx_rsp_plus
 s_lea_rdx_rsp_plus: db "    lea     rdx, [rsp + "
 s_lea_rdx_rsp_plus_len equ $ - s_lea_rdx_rsp_plus
+s_lea_rdi_rsp_plus: db "    lea     rdi, [rsp + "
+s_lea_rdi_rsp_plus_len equ $ - s_lea_rdi_rsp_plus
+s_mov_rsi_rbx: db "    mov     rsi, rbx"
+s_mov_rsi_rbx_len equ $ - s_mov_rsi_rbx
 
 section .text
 
@@ -913,6 +918,90 @@ lvalue_cleanup_size:
     call    type_size
     add     rax, 7
     and     rax, ~7
+    ret
+
+; ===========================================================================
+; composite_arg_offset: internal, used only by gen_user_call (see its own
+; header, "9b fix"). in rdi = params ptr, rsi = args ptr, rdx = up_to
+; (exclusive). out: rax = the sum, over argument indices 0..up_to-1, of
+; each one's own composite-temp reservation size (0 for a scalar param,
+; or a composite param sourced from an existing lvalue -- no reservation
+; of its own; type_size-rounded for a STRUCT_LIT/ARRAY_LIT source;
+; lvalue_cleanup_size(arg) for any other lvalue-shaped source, which
+; covers a CALL). This is a fixed, compile-time-known offset: called
+; with up_to = this argument's own index, it's exactly where that
+; argument's temp sits within gen_user_call's upfront-reserved combined
+; block (its own header); called with up_to = arg_count, it's that
+; block's total size. Pure query, mirrors gen_user_call's own pre-pass
+; dispatch exactly, emits nothing.
+; ===========================================================================
+composite_arg_offset:
+    mov     r10, rdi                    ; params ptr
+    mov     r13, rsi                    ; args ptr
+    mov     r14, rdx                    ; up_to
+    xor     r9, r9                      ; running total
+    xor     r11, r11                    ; index
+.coff_loop:
+    cmp     r11, r14
+    jae     .coff_done
+    mov     rax, [r10 + r11*8]          ; AST_PARAM ptr
+    mov     rdi, [rax + AST_C_OFF]      ; declared type
+    push    r10
+    push    r13
+    push    r14
+    push    r9
+    push    r11
+    call    is_scalar_loadable_type
+    pop     r11
+    pop     r9
+    pop     r14
+    pop     r13
+    pop     r10
+    cmp     rax, 0
+    jne     .coff_next
+    mov     rax, [r13 + r11*8]          ; this argument's expr node
+    mov     rax, [rax + AST_KIND_OFF]
+    cmp     rax, AST_EX_STRUCT_LIT
+    je      .coff_literal
+    cmp     rax, AST_EX_ARRAY_LIT
+    je      .coff_literal
+    mov     rax, [r13 + r11*8]
+    mov     rdi, rax
+    push    r10
+    push    r13
+    push    r14
+    push    r9
+    push    r11
+    call    lvalue_cleanup_size
+    pop     r11
+    pop     r9
+    pop     r14
+    pop     r13
+    pop     r10
+    add     r9, rax
+    jmp     .coff_next
+.coff_literal:
+    mov     rax, [r10 + r11*8]
+    mov     rdi, [rax + AST_C_OFF]
+    push    r10
+    push    r13
+    push    r14
+    push    r9
+    push    r11
+    call    type_size
+    pop     r11
+    pop     r9
+    pop     r14
+    pop     r13
+    pop     r10
+    add     rax, 7
+    and     rax, ~7
+    add     r9, rax
+.coff_next:
+    inc     r11
+    jmp     .coff_loop
+.coff_done:
+    mov     rax, r9
     ret
 
 ; ===========================================================================
@@ -2219,6 +2308,84 @@ gen_user_call:
     ; reserved by our caller, gen_lvalue's .call case, before we were
     ; ever entered, and sits entirely above/outside this region)
 
+    ; --- 9b fix: reserve every composite argument's own temp storage as
+    ; ONE combined block, upfront, entirely ABOVE where the N uniform
+    ; argument slots are about to be pushed -- never interposed between
+    ; two of them mid-loop the way each one's own floating `sub rsp`
+    ; used to be (see composite_arg_offset's header for the exact
+    ; mechanism this replaces and why that was wrong) ---
+    mov     rdi, r10
+    mov     rsi, r13
+    mov     rdx, r14
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r9
+    push    r10
+    call    composite_arg_offset
+    pop     r10
+    pop     r9
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     r8, rax                     ; combined_total
+    cmp     r8, 0
+    je      .no_composite_temps
+    mov     rsi, s_sub_rsp_
+    mov     rdx, s_sub_rsp__len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r9
+    push    r10
+    push    r8
+    call    emit_str
+    pop     r8
+    pop     r10
+    pop     r9
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rax, r8
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r9
+    push    r10
+    push    r8
+    call    emit_dec
+    pop     r8
+    pop     r10
+    pop     r9
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r9
+    push    r10
+    call    emit_nl                     ; combined composite-temp block
+                                         ; reserved -- every composite
+                                         ; argument's own fixed offset
+                                         ; into it is computed fresh, per
+                                         ; argument, via
+                                         ; composite_arg_offset(up_to=r15)
+    pop     r10
+    pop     r9
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+.no_composite_temps:
+
     mov     r15, r14                    ; loop index, counts arg_count..1
 .push_loop:
     cmp     r15, 0
@@ -2292,9 +2459,10 @@ gen_user_call:
 
 .arg_composite:
     mov     rax, [r12 + CTE_SIG_PTR]
-    mov     rax, [rax + AST_C_OFF]
-    mov     rax, [rax + r15*8]
-    mov     rdi, [rax + AST_C_OFF]      ; declared (composite) type
+    mov     rax, [rax + AST_C_OFF]      ; params ptr
+    mov     rdi, rax
+    mov     rsi, r13                    ; args ptr
+    mov     rdx, r15                    ; up_to = this argument's own index
     push    rbx
     push    r12
     push    r13
@@ -2304,16 +2472,32 @@ gen_user_call:
                                          ; every call for the rest of this
                                          ; function -- never trust a
                                          ; callee to leave it alone
-    call    type_size
+    call    composite_arg_offset        ; -> rax = this argument's own
+                                         ; offset within the upfront
+                                         ; combined composite-temp block
+                                         ; (9b fix, see composite_arg_
+                                         ; offset's own header)
     pop     r9
     pop     r15
     pop     r14
     pop     r13
     pop     r12
     pop     rbx
-    add     rax, 7
-    and     rax, ~7
-    mov     r8, rax                     ; size_rounded for this param
+    mov     r8, rax                     ; block-relative offset so far
+    mov     rax, r14
+    sub     rax, 1
+    sub     rax, r15
+    imul    rax, 8
+    add     r8, rax                     ; + bytes every later-index
+                                         ; argument's own uniform push
+                                         ; will already have consumed by
+                                         ; the time we reach this one's
+                                         ; turn -- r8 is now this
+                                         ; argument's fixed offset
+                                         ; relative to CURRENT rsp at
+                                         ; this exact point, not merely
+                                         ; relative to the combined
+                                         ; block's own base
     mov     rax, [r13 + r15*8]          ; this argument's expr node
     mov     rdx, [rax + AST_KIND_OFF]
     cmp     rdx, AST_EX_STRUCT_LIT
@@ -2321,9 +2505,12 @@ gen_user_call:
     cmp     rdx, AST_EX_ARRAY_LIT
     je      .arg_literal
 
-    ; --- lvalue-shaped composite argument: push its OWN address
-    ; directly, no caller-side copy at all -- the callee's own
-    ; emit_param_copy does the by-value copy on its side (see header) ---
+    ; --- lvalue-shaped composite argument (IDENT/INDEX/FIELD/UNARY(*)/
+    ; CALL). An existing-variable source needs nothing further -- push
+    ; its own address directly, the callee's own emit_param_copy does
+    ; the by-value copy on its side (see header). A CALL-sourced one
+    ; needs its result relocated into our own precomputed fixed offset
+    ; (r8) first -- see the 9b-fix block below for why. ---
     mov     rdi, rax                    ; the argument expr node
     push    rbx
     push    r12
@@ -2331,13 +2518,295 @@ gen_user_call:
     push    r14
     push    r15
     push    r9
-    call    gen_lvalue                  ; -> target rbx = its address
+    push    r8                          ; our own combined-block offset --
+                                         ; gen_lvalue's own r8 output
+                                         ; (cleanup size) would otherwise
+                                         ; clobber it
+    call    gen_lvalue                  ; -> target rbx = its address;
+                                         ; r8(ours) = cleanup size, 0 for
+                                         ; an existing lvalue
+    mov     r11, r8                     ; capture gen_lvalue's own output
+                                         ; before the pop below overwrites
+                                         ; it with our saved offset again
+    pop     r8
     pop     r9
     pop     r15
     pop     r14
     pop     r13
     pop     r12
     pop     rbx
+    cmp     r11, 0
+    je      .arg_lvalue_done
+
+    ; --- 9b fix: gen_lvalue's own reservation (size r11) is still active,
+    ; sitting wherever ITS OWN "sub rsp" happened to land -- copy the
+    ; composite value it holds into OUR fixed offset (r8) within the
+    ; upfront combined block, free gen_lvalue's own reservation, then
+    ; recompute rbx relative to the now-restored rsp. This is exactly
+    ; the bug this whole fix addresses: without relocating it, gen_
+    ; lvalue's reservation would stay permanently interposed between
+    ; this argument's own slot and whichever slot was pushed right
+    ; before it, silently shifting every later-declared parameter's real
+    ; offset away from what the callee's emit_param_copy reads (see
+    ; gen_user_call's own header and docs/postulate_stage0_codegen_
+    ; spec.md 9b).
+    mov     rsi, s_mov_rsi_rbx
+    mov     rdx, s_mov_rsi_rbx_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r9
+    push    r8
+    push    r11
+    call    emit_str                    ; target rsi = gen_lvalue's own
+                                         ; (about-to-be-freed) address
+    pop     r11
+    pop     r8
+    pop     r9
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r9
+    push    r8
+    push    r11
+    call    emit_nl
+    pop     r11
+    pop     r8
+    pop     r9
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rsi, s_lea_rdi_rsp_plus
+    mov     rdx, s_lea_rdi_rsp_plus_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r9
+    push    r8
+    push    r11
+    call    emit_str
+    pop     r11
+    pop     r8
+    pop     r9
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rax, r8
+    add     rax, r11                    ; still shifted down by r11 since
+                                         ; gen_lvalue's own reservation
+                                         ; hasn't been freed yet
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r9
+    push    r8
+    push    r11
+    call    emit_dec
+    pop     r11
+    pop     r8
+    pop     r9
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rsi, s_close_bracket
+    mov     rdx, s_close_bracket_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r9
+    push    r8
+    push    r11
+    call    emit_str                    ; target rdi = our own fixed
+                                         ; offset -- the copy's real
+                                         ; destination
+    pop     r11
+    pop     r8
+    pop     r9
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r9
+    push    r8
+    push    r11
+    call    emit_nl
+    pop     r11
+    pop     r8
+    pop     r9
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rdi, r11                    ; copy size = gen_lvalue's own
+                                         ; reservation size (emit_rep_
+                                         ; movsb_copy takes it in rdi, not
+                                         ; rax -- unlike emit_dec)
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r9
+    push    r8
+    push    r11
+    call    emit_rep_movsb_copy         ; mov rcx,<size> / cld / rep movsb
+    pop     r11
+    pop     r8
+    pop     r9
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rsi, s_add_rsp_
+    mov     rdx, s_add_rsp__len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r9
+    push    r8
+    push    r11
+    call    emit_str
+    pop     r11
+    pop     r8
+    pop     r9
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rax, r11
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r9
+    push    r8
+    call    emit_dec                    ; free gen_lvalue's own
+                                         ; reservation -- target rsp is
+                                         ; now back to this argument's
+                                         ; own starting position
+    pop     r8
+    pop     r9
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r9
+    push    r8
+    call    emit_nl
+    pop     r8
+    pop     r9
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rsi, s_lea_rbx_rsp_plus
+    mov     rdx, s_lea_rbx_rsp_plus_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r9
+    push    r8
+    call    emit_str
+    pop     r8
+    pop     r9
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rax, r8
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r9
+    push    r8
+    call    emit_dec
+    pop     r8
+    pop     r9
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rsi, s_close_bracket
+    mov     rdx, s_close_bracket_len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r9
+    push    r8
+    call    emit_str
+    pop     r8
+    pop     r9
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    r9
+    push    r8
+    call    emit_nl                     ; target rbx = our own fixed
+                                         ; offset, now permanent
+    pop     r8
+    pop     r9
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+
+.arg_lvalue_done:
     mov     rsi, s_push_rbx
     mov     rdx, s_push_rbx_len
     push    rbx
@@ -2369,58 +2838,16 @@ gen_user_call:
     jmp     .push_next
 
 .arg_literal:
-    ; r8 = size_rounded for this param -- protected throughout, nothing
-    ; above or below touches it until we're done with it here. r9
-    ; (running total) is likewise protected throughout, same rule.
-    mov     rsi, s_sub_rsp_
-    mov     rdx, s_sub_rsp__len
-    push    rbx
-    push    r12
-    push    r13
-    push    r14
-    push    r15
-    push    r8
-    push    r9
-    call    emit_str
-    pop     r9
-    pop     r8
-    pop     r15
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
-    mov     rax, r8
-    push    rbx
-    push    r12
-    push    r13
-    push    r14
-    push    r15
-    push    r8
-    push    r9
-    call    emit_dec
-    pop     r9
-    pop     r8
-    pop     r15
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
-    push    rbx
-    push    r12
-    push    r13
-    push    r14
-    push    r15
-    push    r8
-    push    r9
-    call    emit_nl                     ; reserved -- target rsp is now
-                                         ; this argument's own fresh temp
-    pop     r9
-    pop     r8
-    pop     r15
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
+    ; r8 = this argument's own fixed offset, relative to CURRENT rsp
+    ; (see .arg_composite's own tail, and composite_arg_offset) -- no
+    ; reservation of our own here at all any more (9b fix): the space
+    ; already exists, upfront, as part of gen_user_call's combined
+    ; composite-temp block. gen_init_push below just needs *some*
+    ; scratch area to grow into -- whatever is currently at the top of
+    ; the target stack works fine, since it nets back to zero the moment
+    ; gen_init_pop_store finishes (see that pair's own header) -- r8 and
+    ; r9 (running total) are protected throughout, nothing above or
+    ; below touches them until we're done with them here.
     mov     rax, [r13 + r15*8]          ; the STRUCT_LIT/ARRAY_LIT node
     mov     rdi, rax
     push    rbx
@@ -2461,6 +2888,10 @@ gen_user_call:
     pop     r12
     pop     rbx
     mov     rax, r10
+    add     rax, r8                     ; + this argument's own fixed
+                                         ; offset -- recovers OUR fixed
+                                         ; target, not merely "where
+                                         ; gen_init_push started" (9b fix)
     push    rbx
     push    r12
     push    r13
@@ -2501,9 +2932,9 @@ gen_user_call:
     push    r8
     push    r9
     call    emit_nl                     ; target rbx = this literal's
-                                         ; fresh temp address (recovered
-                                         ; via the known leaf_bytes
-                                         ; offset -- see gen_init_push)
+                                         ; fixed target address (recovered
+                                         ; via leaf_bytes + this
+                                         ; argument's own fixed offset)
     pop     r9
     pop     r8
     pop     r15
@@ -2532,34 +2963,8 @@ gen_user_call:
     pop     r13
     pop     r12
     pop     rbx
-    mov     rsi, s_push_rbx
-    mov     rdx, s_push_rbx_len
-    push    rbx
-    push    r12
-    push    r13
-    push    r14
-    push    r15
-    push    r9
-    call    emit_str
-    pop     r9
-    pop     r15
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
-    push    rbx
-    push    r12
-    push    r13
-    push    r14
-    push    r15
-    push    r9
-    call    emit_nl
-    pop     r9
-    pop     r15
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
+    jmp     .arg_lvalue_done             ; push rbx as this argument's
+                                         ; own uniform slot -- shared tail
 
 .push_next:
     jmp     .push_loop

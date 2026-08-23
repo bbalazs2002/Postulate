@@ -805,8 +805,8 @@ the one point it actually needs to be collapsed, rather than after the
 copy (too late — by then `pop rdi` already read the wrong address).
 Regression test: `tests/codegen_cases/30_composite_return_plain_assign.ptl`.
 
-### 9b. Found, not fixed: a non-last composite argument sourced from a
-call or literal corrupts every other argument's offset
+### 9b. Fixed: a non-last composite argument sourced from a call or
+literal corrupts every other argument's offset
 
 Also found while bootstrapping Stage 1 (the parser this time — see
 `Stage1/src/parser.ptl`'s own header comment, where this is worked
@@ -853,21 +853,54 @@ other position reproduces the corruption. An **existing-variable**
 composite argument is fine in *any* position (no reservation, just an
 address push, so there's nothing to interpose).
 
-**Not fixed here.** A real fix needs `gen_user_call`'s pre-pass to
-reserve one combined block for every composite argument's temporary
-*before* the argument-push loop starts (mirroring how `gen_lvalue`'s
-own `.call` case already reserves its return-value space up front),
-and thread fixed, pre-computed offsets into that block through the
-per-argument loop instead of letting each one `sub rsp` for itself —
-a multi-site change to `gen_user_call` and `gen_lvalue`'s calling
-convention between them, not a one-line reordering like §9a's fix.
-Given the size and risk of that change balanced against everything
-else Stage 1 still needed, it was judged better to document the exact
-mechanism precisely (above) and route around it at every call site in
-Stage 1's own source instead — see `parser.ptl`'s header comment for
-the specific pattern (bind the composite value to a named local first,
-never inline a `CALL`/literal as one of several arguments) — than to
-attempt it under time pressure. Worth revisiting properly later.
+**Fixed.** `gen_user_call`'s pre-pass now also computes, via a new
+internal helper `composite_arg_offset`, each composite argument's own
+fixed position within a *single, combined temp block* — reserved with
+one `sub rsp` immediately before the argument-push loop starts (the
+same upfront-reservation idea `gen_lvalue`'s own `.call` case already
+used for a composite *return* value, just generalized here to cover
+every composite *argument* at once). Every per-argument branch was
+changed to target that fixed, pre-computed offset instead of `sub rsp`-
+ing for itself in the middle of the loop:
+
+- A `STRUCT_LIT`/`ARRAY_LIT`-sourced argument (`.arg_literal`) no longer
+  reserves its own space at all — `gen_init_push`'s leaf-pushing still
+  uses whatever is currently at the top of the target stack as scratch
+  (net zero movement once `gen_init_pop_store` pops it back), but the
+  `lea` that recovers the write target now adds this argument's own
+  fixed offset, landing in the combined block instead of wherever the
+  scratch area happened to start.
+- A `CALL`-sourced argument (routed through `gen_lvalue`'s existing
+  `.call` case, unchanged) still gets its own transient reservation from
+  `gen_lvalue` — but `gen_user_call` now immediately `rep movsb`-copies
+  the result out of it into the fixed offset, frees `gen_lvalue`'s own
+  reservation (`add rsp`), and only *then* pushes the fixed address as
+  this argument's uniform slot — so nothing permanent is left behind at
+  the position `gen_lvalue`'s reservation happened to land at.
+- An existing-variable lvalue source is untouched (`gen_lvalue` already
+  returns cleanup size `0` for it, so the new copy-and-free step is
+  skipped entirely and its own address is pushed directly, exactly as
+  before) — this was never the buggy case.
+
+The combined block sits entirely *above* the N uniform argument slots
+(reserved before any of them are pushed), so — like the pre-existing
+composite-return-value destination it's modeled on — it never
+interposes between two slots the callee expects to be contiguous;
+`total_reserved_padded` (`r9`) already included every composite
+argument's reservation size in its sum (that part of the pre-pass was
+correct even before this fix), so the padding decision and the
+composite-return-value's own `[rsp + r9]` wiring both needed no changes
+at all. Verified against the exact repro above
+(`tests/codegen_cases/31_composite_arg_nonlast_call_sourced.ptl`) and a
+second fixture mixing a literal-sourced and a call-sourced composite
+argument, both non-last, in the same call
+(`32_composite_arg_two_nonlast_mixed_sources.ptl`) — both now produce
+the correct field values, full `docker build` green throughout.
+`parser.ptl`'s own documented workaround (bind the composite value to a
+named local before passing it alongside other arguments) is no longer
+strictly required, but was left in place — Stage 1's already-written
+source has no reason to change just because the constraint it was
+routing around is gone.
 
 ---
 

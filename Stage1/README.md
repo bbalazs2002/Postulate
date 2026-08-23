@@ -86,14 +86,18 @@ fixed it in `Hoare/src/codegen_stmt.asm` for the full story.
 
 Bootstrapping the parser found a second, broader one: a composite
 argument sourced from a call or a struct/array literal, in any
-parameter position except the last, corrupts every other argument the
-callee reads — see §9b of the same spec for the full mechanism and a
-minimal repro. This one was **documented, not fixed** — the real fix
-touches `gen_user_call`'s argument-reservation scheme in a few
-interconnected places, a bigger and riskier change than §9a's one-line
-reorder, and `parser.ptl` has a clean, verified-safe workaround (bind
+parameter position except the last, corrupted every other argument the
+callee read — see §9b of the same spec for the full mechanism, the fix
+(`gen_user_call` now reserves one combined temp block for every
+composite argument upfront, at fixed offsets, instead of each one
+`sub rsp`-ing for itself mid-loop), and its own regression fixtures
+(`Hoare/tests/codegen_cases/31`–`32`). Originally shipped as
+**documented, not fixed**, with `parser.ptl` routing around it (bind
 the composite value to a named local before passing it alongside other
-arguments) — see the file's own header comment for the exact rule.
+arguments — see the file's own header comment); that workaround is no
+longer strictly required now that the underlying bug is fixed, but was
+left in place since there was no reason to change already-working code
+just because the constraint it existed for is gone.
 Both are reminders that self-hosting is also a genuine correctness
 exercise for Stage 0, not just a milestone for Stage 1.
 

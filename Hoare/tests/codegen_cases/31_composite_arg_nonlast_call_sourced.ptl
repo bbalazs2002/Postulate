@@ -1,0 +1,23 @@
+// Regression for the "9b" bug (docs/postulate_stage0_codegen_spec.md):
+// a non-last composite argument sourced from a CALL used to corrupt
+// every later-declared parameter's offset, because its own return-
+// value reservation landed physically between two argument slots.
+struct St { s1: uint64; s2: uint64; }
+struct Res { node: uint64; s1: uint64; s2: uint64; }
+
+function bump(st: St) : St { return St { s1 := st.s1 + 1, s2 := st.s2 }; }
+function pack(st: St, kind: int32, a: uint64, b: uint64) : Res {
+  return Res { node := 1, s1 := a, s2 := b };
+}
+function main() : int32 {
+  mut st: St := St { s1 := 1, s2 := 2 };
+  mut r: Res := pack(bump(st), 5, 111, 222);
+  mut ok: bool := true;
+  if (r.node != 1) { ok := false; }
+  if (r.s1 != 111) { ok := false; }
+  if (r.s2 != 222) { ok := false; }
+  if (!ok) {
+    return 1;
+  }
+  return 77;
+}
