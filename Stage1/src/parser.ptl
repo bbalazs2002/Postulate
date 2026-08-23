@@ -890,20 +890,38 @@ function parse_paren_expr(bufs: Buffers, st: PState) : ParseResult {
 // arg_list ::= expr ("," expr)*  -- also reused for expr_list (array
 // literal elements): same shape, just a different caller-side count
 // check (array literals require >=1, chapter 3.8 of the v0 reference).
+// Every list-builder in this file (this one and the six below it)
+// follows the same two-phase shape: collect item ids into a small
+// *local* staging array while parsing, then bulk-append them to
+// list_pool in one final, uninterrupted loop -- never append item N
+// immediately after parsing it. Reason: appending immediately is only
+// contiguous if *nothing else* touches list_pool between one append
+// and the next, but parsing item N+1 (before *its* own append) can
+// itself trigger arbitrary nested list_appends of its own (a call's
+// args, a nested literal, a nested function's whole body) -- those
+// land *between* this list's own entries, silently splitting it into
+// pieces no longer at consecutive indices. `start`/`count` alone can't
+// describe that; only staging locally and appending as one final,
+// uninterrupted block guarantees the range list_pool[start..start+
+// count) is genuinely this list and nothing else. Found the hard way
+// bootstrapping the codegen phase on a real multi-function program
+// (Stage1/README.md).
 function parse_expr_list(bufs: Buffers, st: PState) : ListResult {
   mut cur_st : PState := st;
   mut first : ParseResult := pack_result(0, st);
   mut count : uint64 := 0;
-  mut start : uint64 := st.list_next;
+  mut start : uint64 := 0;
   mut looping : bool := true;
   mut item : ParseResult := pack_result(0, st);
+  mut ids : uint64[256] := 0;
+  mut i : uint64 := 0;
 
   first := parse_expr(bufs, cur_st);
   cur_st := result_state(first);
   if (first.had_error) {
     cur_st := fail_state(cur_st);
   } else {
-    cur_st := list_append(bufs, cur_st, first.node);
+    ids[0] := first.node;
     count := 1;
     looping := true;
     while (looping) {
@@ -915,11 +933,19 @@ function parse_expr_list(bufs: Buffers, st: PState) : ListResult {
           cur_st := fail_state(cur_st);
           looping := false;
         } else {
-          cur_st := list_append(bufs, cur_st, item.node);
+          ids[count] := item.node;
           count := count + 1;
         }
       } else {
         looping := false;
+      }
+    }
+    if (!cur_st.had_error) {
+      start := cur_st.list_next;
+      i := 0;
+      while (i < count) {
+        cur_st := list_append(bufs, cur_st, ids[i]);
+        i := i + 1;
       }
     }
   }
@@ -961,15 +987,16 @@ function parse_struct_literal(bufs: Buffers, st: PState) : ParseResult {
   mut looping : bool := true;
   mut fi : ParseResult := pack_result(0, cur_st);
   mut result : ParseResult := pack_result(0, cur_st);
+  mut ids : uint64[256] := 0;
+  mut i : uint64 := 0;
 
   cur_st := advance(cur_st);
-  start := cur_st.list_next;
   fi := parse_field_init(bufs, cur_st);
   cur_st := result_state(fi);
   if (fi.had_error) {
     cur_st := fail_state(cur_st);
   } else {
-    cur_st := list_append(bufs, cur_st, fi.node);
+    ids[0] := fi.node;
     count := 1;
     looping := true;
     while (looping) {
@@ -981,11 +1008,19 @@ function parse_struct_literal(bufs: Buffers, st: PState) : ParseResult {
           cur_st := fail_state(cur_st);
           looping := false;
         } else {
-          cur_st := list_append(bufs, cur_st, fi.node);
+          ids[count] := fi.node;
           count := count + 1;
         }
       } else {
         looping := false;
+      }
+    }
+    if (!cur_st.had_error) {
+      start := cur_st.list_next;
+      i := 0;
+      while (i < count) {
+        cur_st := list_append(bufs, cur_st, ids[i]);
+        i := i + 1;
       }
     }
   }
@@ -1117,13 +1152,20 @@ function parse_unary(bufs: Buffers, st: PState) : ParseResult {
   mut k : int32 := cur_kind(bufs, st);
   mut result : ParseResult := pack_result(0, st);
   mut inner : ParseResult := pack_result(0, st);
+  mut cur_st : PState := st;
 
   if (k == 69 || k == 70 || k == 71 || k == 72) {
     inner := parse_unary(bufs, advance(st));
     if (inner.had_error) {
       result := inner;
     } else {
-      result := alloc_node(bufs, result_state(inner), 14, kind_to_u64(k), inner.node, 0, 0);
+      // bound to `cur_st` first, not passed as `alloc_node(bufs,
+      // result_state(inner), ...)` inline -- see parse_primary's own
+      // header comment for why a call-sourced composite argument in a
+      // non-last position corrupts the other arguments (this exact
+      // spot was the one place that rule wasn't yet followed).
+      cur_st := result_state(inner);
+      result := alloc_node(bufs, cur_st, 14, kind_to_u64(k), inner.node, 0, 0);
     }
   } else {
     result := parse_postfix(bufs, st);
@@ -1598,6 +1640,8 @@ function parse_stmt(bufs: Buffers, st: PState) : ParseResult {
   mut start : uint64 := 0;
   mut count : uint64 := 0;
   mut looping : bool := true;
+  mut ids : uint64[256] := 0;
+  mut i : uint64 := 0;
 
   if (k == 15) {
     result := parse_if_stmt(bufs, st);
@@ -1619,8 +1663,9 @@ function parse_stmt(bufs: Buffers, st: PState) : ParseResult {
         if (pair1.had_error) {
           result := pack_result(0, fail_state(cur_st));
         } else {
-          start := cur_st.list_next;
-          cur_st := list_append(bufs, cur_st, pair1.node);
+          // staged locally, bulk-appended below -- see
+          // parse_expr_list's own comment on why.
+          ids[0] := pair1.node;
           count := 1;
           looping := true;
           while (looping) {
@@ -1632,7 +1677,7 @@ function parse_stmt(bufs: Buffers, st: PState) : ParseResult {
                 cur_st := fail_state(cur_st);
                 looping := false;
               } else {
-                cur_st := list_append(bufs, cur_st, pairN.node);
+                ids[count] := pairN.node;
                 count := count + 1;
               }
             } else {
@@ -1645,6 +1690,12 @@ function parse_stmt(bufs: Buffers, st: PState) : ParseResult {
             if (cur_kind(bufs, cur_st) != 41) {
               result := pack_result(0, fail_state(cur_st));
             } else {
+              start := cur_st.list_next;
+              i := 0;
+              while (i < count) {
+                cur_st := list_append(bufs, cur_st, ids[i]);
+                i := i + 1;
+              }
               cur_st := advance(cur_st);
               result := alloc_node(bufs, cur_st, 25, start, count, 0, 0);
             }
@@ -1763,12 +1814,13 @@ function parse_block(bufs: Buffers, st: PState) : ParseResult {
   mut count : uint64 := 0;
   mut looping : bool := true;
   mut s : ParseResult := pack_result(0, st);
+  mut ids : uint64[256] := 0;
+  mut i : uint64 := 0;
 
   if (cur_kind(bufs, st) != 46) {
     result := pack_result(0, fail_state(st));
   } else {
     cur_st := advance(st);
-    start := cur_st.list_next;
     looping := true;
     while (looping) {
       if (cur_kind(bufs, cur_st) == 47) {
@@ -1784,7 +1836,12 @@ function parse_block(bufs: Buffers, st: PState) : ParseResult {
             cur_st := fail_state(cur_st);
             looping := false;
           } else {
-            cur_st := list_append(bufs, cur_st, s.node);
+            // staged locally, not appended to list_pool yet -- see
+            // parse_expr_list's own comment: a statement can itself
+            // contain a nested list (e.g. a call's args), which would
+            // land between this list's own entries if we appended as
+            // we went.
+            ids[count] := s.node;
             count := count + 1;
           }
         }
@@ -1793,6 +1850,12 @@ function parse_block(bufs: Buffers, st: PState) : ParseResult {
     if (cur_st.had_error) {
       result := pack_result(0, cur_st);
     } else {
+      start := cur_st.list_next;
+      i := 0;
+      while (i < count) {
+        cur_st := list_append(bufs, cur_st, ids[i]);
+        i := i + 1;
+      }
       cur_st := advance(cur_st);
       result := alloc_node(bufs, cur_st, 30, start, count, 0, 0);
     }
@@ -1869,12 +1932,14 @@ function parse_func_block(bufs: Buffers, st: PState) : ParseResult {
   mut s : ParseResult := pack_result(0, st);
   mut result : ParseResult := pack_result(0, st);
   mut k : int32 := 0;
+  mut dids : uint64[256] := 0;
+  mut sids : uint64[256] := 0;
+  mut i : uint64 := 0;
 
   if (cur_kind(bufs, st) != 46) {
     result := pack_result(0, fail_state(st));
   } else {
     cur_st := advance(st);
-    dstart := cur_st.list_next;
     looping := true;
     while (looping) {
       k := cur_kind(bufs, cur_st);
@@ -1885,7 +1950,9 @@ function parse_func_block(bufs: Buffers, st: PState) : ParseResult {
           cur_st := fail_state(cur_st);
           looping := false;
         } else {
-          cur_st := list_append(bufs, cur_st, d.node);
+          // staged locally -- see parse_block's own comment on why
+          // (a decl's own type/init can touch list_pool internally).
+          dids[dcount] := d.node;
           dcount := dcount + 1;
         }
       } else {
@@ -1893,7 +1960,12 @@ function parse_func_block(bufs: Buffers, st: PState) : ParseResult {
       }
     }
     if (!cur_st.had_error) {
-      sstart := cur_st.list_next;
+      dstart := cur_st.list_next;
+      i := 0;
+      while (i < dcount) {
+        cur_st := list_append(bufs, cur_st, dids[i]);
+        i := i + 1;
+      }
       looping := true;
       while (looping) {
         if (cur_kind(bufs, cur_st) == 47) {
@@ -1909,7 +1981,7 @@ function parse_func_block(bufs: Buffers, st: PState) : ParseResult {
               cur_st := fail_state(cur_st);
               looping := false;
             } else {
-              cur_st := list_append(bufs, cur_st, s.node);
+              sids[scount] := s.node;
               scount := scount + 1;
             }
           }
@@ -1919,6 +1991,12 @@ function parse_func_block(bufs: Buffers, st: PState) : ParseResult {
     if (cur_st.had_error) {
       result := pack_result(0, cur_st);
     } else {
+      sstart := cur_st.list_next;
+      i := 0;
+      while (i < scount) {
+        cur_st := list_append(bufs, cur_st, sids[i]);
+        i := i + 1;
+      }
       cur_st := advance(cur_st);
       result := alloc_node(bufs, cur_st, 31, dstart, dcount, sstart, scount);
     }
@@ -1967,10 +2045,12 @@ function parse_param(bufs: Buffers, st: PState) : ParseResult {
 // identifier) is success, not a parse error, unlike parse_expr_list.
 function parse_params(bufs: Buffers, st: PState) : ListResult {
   mut cur_st : PState := st;
-  mut start : uint64 := st.list_next;
+  mut start : uint64 := 0;
   mut count : uint64 := 0;
   mut p : ParseResult := pack_result(0, st);
   mut looping : bool := true;
+  mut ids : uint64[256] := 0;
+  mut i : uint64 := 0;
 
   if (cur_kind(bufs, st) == 1) {
     p := parse_param(bufs, st);
@@ -1978,7 +2058,11 @@ function parse_params(bufs: Buffers, st: PState) : ListResult {
     if (p.had_error) {
       cur_st := fail_state(cur_st);
     } else {
-      cur_st := list_append(bufs, cur_st, p.node);
+      // staged locally, then bulk-appended below -- see
+      // parse_expr_list's own comment for why (a param's type could
+      // in principle touch list_pool internally, and staying
+      // consistent with every other list-builder here costs nothing).
+      ids[0] := p.node;
       count := 1;
       looping := true;
       while (looping) {
@@ -1990,11 +2074,19 @@ function parse_params(bufs: Buffers, st: PState) : ListResult {
             cur_st := fail_state(cur_st);
             looping := false;
           } else {
-            cur_st := list_append(bufs, cur_st, p.node);
+            ids[count] := p.node;
             count := count + 1;
           }
         } else {
           looping := false;
+        }
+      }
+      if (!cur_st.had_error) {
+        start := cur_st.list_next;
+        i := 0;
+        while (i < count) {
+          cur_st := list_append(bufs, cur_st, ids[i]);
+          i := i + 1;
         }
       }
     }
@@ -2097,6 +2189,8 @@ function parse_struct_decl(bufs: Buffers, st: PState) : ParseResult {
   mut fd : ParseResult := pack_result(0, cur_st);
   mut looping : bool := true;
   mut result : ParseResult := pack_result(0, cur_st);
+  mut ids : uint64[256] := 0;
+  mut i : uint64 := 0;
 
   if (cur_kind(bufs, cur_st) != 1) {
     result := pack_result(0, fail_state(cur_st));
@@ -2108,13 +2202,14 @@ function parse_struct_decl(bufs: Buffers, st: PState) : ParseResult {
       result := pack_result(0, fail_state(cur_st));
     } else {
       cur_st := advance(cur_st);
-      start := cur_st.list_next;
       fd := parse_field_decl(bufs, cur_st);
       cur_st := result_state(fd);
       if (fd.had_error) {
         cur_st := fail_state(cur_st);
       } else {
-        cur_st := list_append(bufs, cur_st, fd.node);
+        // staged locally, bulk-appended below -- see parse_expr_
+        // list's own comment on why.
+        ids[0] := fd.node;
         count := 1;
         looping := true;
         while (looping) {
@@ -2127,9 +2222,17 @@ function parse_struct_decl(bufs: Buffers, st: PState) : ParseResult {
               cur_st := fail_state(cur_st);
               looping := false;
             } else {
-              cur_st := list_append(bufs, cur_st, fd.node);
+              ids[count] := fd.node;
               count := count + 1;
             }
+          }
+        }
+        if (!cur_st.had_error) {
+          start := cur_st.list_next;
+          i := 0;
+          while (i < count) {
+            cur_st := list_append(bufs, cur_st, ids[i]);
+            i := i + 1;
           }
         }
       }
@@ -2229,18 +2332,32 @@ function parse_top_level_decl(bufs: Buffers, st: PState) : ParseResult {
 // program ::= top_level_decl+
 function parse_program(bufs: Buffers, st: PState) : ParseResult {
   mut cur_st : PState := st;
-  mut start : uint64 := st.list_next;
+  mut start : uint64 := 0;
   mut count : uint64 := 0;
   mut d : ParseResult := pack_result(0, st);
   mut looping : bool := true;
   mut result : ParseResult := pack_result(0, st);
+  mut ids : uint64[256] := 0;
+  mut i : uint64 := 0;
 
   d := parse_top_level_decl(bufs, cur_st);
   cur_st := result_state(d);
   if (d.had_error) {
     result := pack_result(0, cur_st);
   } else {
-    cur_st := list_append(bufs, cur_st, d.node);
+    // THE bug this comment style is guarding against everywhere else
+    // in this file, found here first: appending each top-level decl's
+    // id right after parsing it looked harmless -- until a program had
+    // *two or more* top-level decls, since parsing decl N+1 (before its
+    // own append) triggers that decl's own internal list_append calls
+    // (its params/decls/statements/expressions), which land in
+    // list_pool between decl 0's entry and decl 1's entry. A two-
+    // function program's second function's own node id ended up
+    // nowhere near `list_pool[start+1]` as a result -- see
+    // Stage1/README.md. Fixed the same way as every other list here:
+    // stage ids in a local array while parsing, bulk-append once all
+    // items are known.
+    ids[0] := d.node;
     count := 1;
     looping := true;
     while (looping) {
@@ -2253,7 +2370,7 @@ function parse_program(bufs: Buffers, st: PState) : ParseResult {
           cur_st := fail_state(cur_st);
           looping := false;
         } else {
-          cur_st := list_append(bufs, cur_st, d.node);
+          ids[count] := d.node;
           count := count + 1;
         }
       }
@@ -2261,6 +2378,12 @@ function parse_program(bufs: Buffers, st: PState) : ParseResult {
     if (cur_st.had_error) {
       result := pack_result(0, cur_st);
     } else {
+      start := cur_st.list_next;
+      i := 0;
+      while (i < count) {
+        cur_st := list_append(bufs, cur_st, ids[i]);
+        i := i + 1;
+      }
       result := alloc_node(bufs, cur_st, 38, start, count, 0, 0);
     }
   }
