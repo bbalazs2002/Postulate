@@ -805,6 +805,70 @@ the one point it actually needs to be collapsed, rather than after the
 copy (too late — by then `pop rdi` already read the wrong address).
 Regression test: `tests/codegen_cases/30_composite_return_plain_assign.ptl`.
 
+### 9b. Found, not fixed: a non-last composite argument sourced from a
+call or literal corrupts every other argument's offset
+
+Also found while bootstrapping Stage 1 (the parser this time — see
+`Stage1/src/parser.ptl`'s own header comment, where this is worked
+around rather than fixed here). Minimal repro:
+
+```postulate
+struct St { s1: uint64; s2: uint64; }
+struct Res { node: uint64; s1: uint64; s2: uint64; }
+
+function bump(st: St) : St { return St { s1 := st.s1 + 1, s2 := st.s2 }; }
+function pack(st: St, kind: int32, a: uint64, b: uint64) : Res {
+  return Res { node := 1, s1 := a, s2 := b };
+}
+function main() : int32 {
+  mut st: St := St { s1 := 1, s2 := 2 };
+  mut r: Res := pack(bump(st), 5, 111, 222);   // r.s1/r.s2 come out wrong
+  return 0;
+}
+```
+
+Every argument slot in `gen_user_call`'s own convention is a uniform 8
+bytes — including a composite argument's slot, which always holds an
+*address*, never inline data (§6.6). That much is fine on its own. The
+bug is that when a composite argument's address comes from something
+needing its own fresh stack reservation first (a `CALL`, §9a, or a
+`STRUCT_LIT`/`ARRAY_LIT`, §6.6) — as opposed to an existing lvalue,
+whose address is simply pushed with no reservation at all — that
+reservation's bytes physically land *between* two argument slots on
+the target's stack, at whatever point right-to-left evaluation happens
+to reach that argument. The callee's own `emit_param_copy`
+(`codegen_program.asm`) has no way to know this happened: it reads
+parameter *i* at a fixed `[rdi + i*8]`, computed once at the callee's
+own definition site, with no visibility into what any particular
+*caller* needed to do to produce that argument. A reservation
+interposed anywhere in the block silently shifts every later-declared
+parameter's real stack position away from the offset the callee reads.
+
+Confirmed empirically (not just reasoned through) that the failure is
+exactly this positional: a call/literal-sourced composite argument in
+the **last** parameter position is fine (right-to-left evaluation
+reaches it *first*, before anything else is pushed, so its reservation
+ends up outside the argument block rather than inside it) — every
+other position reproduces the corruption. An **existing-variable**
+composite argument is fine in *any* position (no reservation, just an
+address push, so there's nothing to interpose).
+
+**Not fixed here.** A real fix needs `gen_user_call`'s pre-pass to
+reserve one combined block for every composite argument's temporary
+*before* the argument-push loop starts (mirroring how `gen_lvalue`'s
+own `.call` case already reserves its return-value space up front),
+and thread fixed, pre-computed offsets into that block through the
+per-argument loop instead of letting each one `sub rsp` for itself —
+a multi-site change to `gen_user_call` and `gen_lvalue`'s calling
+convention between them, not a one-line reordering like §9a's fix.
+Given the size and risk of that change balanced against everything
+else Stage 1 still needed, it was judged better to document the exact
+mechanism precisely (above) and route around it at every call site in
+Stage 1's own source instead — see `parser.ptl`'s header comment for
+the specific pattern (bind the composite value to a named local first,
+never inline a `CALL`/literal as one of several arguments) — than to
+attempt it under time pressure. Worth revisiting properly later.
+
 ---
 
 ## 10. Known Items Deliberately Not Implemented in This Phase
