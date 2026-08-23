@@ -210,7 +210,7 @@ concept) stays nameless — scaffolding that did its job.
 |---|---|---|
 | `v1.0.1` | `#include` (§6.2): relative-path resolution, recursive splice before lexing, include-once, cycle detection. Detailed design: [`postulate_stage1_v1_0_1_include_design.md`](postulate_stage1_v1_0_1_include_design.md). | Cheapest possible increment, zero dependency on anything else — see §1. |
 | `v1.0.2` | Codegen backend switch: emit LLVM IR instead of x86 NASM text; `llc` replaces `nasm` for producing object code. Same scalar-only feature set as today — a backend swap, not a feature addition. | Foundation for the next three steps — see §2. Verified against the exact fixture suite the NASM backend already passes, proving the swap changes nothing observable yet. |
-| `v1.0.3` | Composite (struct/array) parameters and return values in Stage 1's own codegen — v0 parity, not a v1 feature. | Implemented directly against LLVM IR's native aggregate types and per-target ABI lowering (§2) — done once, not once in NASM and then redone for LLVM. |
+| `v1.0.3` | Composite (struct/array) parameters and return values in Stage 1's own codegen — v0 parity, not a v1 feature. Landed in two internally-ordered sub-passes: width unification (every scalar value, not just future composite fields, switches from `v1.0.2`'s uniform `i64` to its true declared LLVM width — **done**) then composites themselves (struct/array types, literals, field/index access, the calling convention — not yet done). Design: [`postulate_stage1_v1_0_3_composites_design.md`](postulate_stage1_v1_0_3_composites_design.md). | Implemented directly against LLVM IR's native aggregate types and per-target ABI lowering (§2) — done once, not once in NASM and then redone for LLVM. |
 | `v1.0.4` | True separate compilation: each translation unit independently lexed/parsed/checked/compiled to its own LLVM IR module and object file, cached, linked together. | Reference §11 item 2, brought forward — see §2 for why this is now mostly LLVM's linker's job rather than a from-scratch design. |
 | `v1.0.5` | Optimization turned on: each unit's LLVM IR routed through `opt` (an existing, off-the-shelf tool) at a chosen level before `llc`. | The other half of §2 — no bespoke optimizer needed; verified by re-running the full fixture suite and confirming behavior is unchanged under optimization. |
 | **`v1.0.6`** | **Rewrite. Compiler renamed Edsger.** Same language surface as `v1.0.5` (v0 + `#include`); source reorganized into real, separately-compiled modules; AST rebuilt as a real struct/pointer tree. No new syntax. | The point marked in §3 — modularity, a real backend, separate compilation, and optimization all already exist, so the rewrite only has to *use* them, not anticipate them. |
@@ -225,6 +225,19 @@ concept) stays nameless — scaffolding that did its job.
 | `v1.0.15` | Verification contracts, part 2: the opt-in checked-build codegen mode (§7.3–§7.5) — runtime assertions at every specified checkpoint, halt-with-diagnostic on failure. | Split from `v1.0.14` deliberately: parsing/checking a contract correctly and *emitting code* for one are separably testable, and this is the riskier of the two. |
 | `v1.0.16` | Bounds-checking diagnostic build (§2.7b) — array indexing checked against `lengthof` in an opt-in build. | Same opt-in-diagnostic-build mechanism `v1.0.15` just built; reuses it rather than inventing a second one. |
 | `v1.0.17` | Self-hosting closure: Edsger compiles itself (Hoare → Edsger₁ from source; Edsger₁ → Edsger₂ from the same source; Edsger₂'s output agrees with Edsger₁'s). | The actual bootstrap goal (`Stage1/README.md`'s opening line) — only meaningful once the full v1.0 surface exists, since Edsger's own source will by then use most of it. |
+
+### Tracked checkpoint: struct-field layout, before `v1.0.6`
+
+`v1.0.3`'s composite sub-pass represents struct fields packed, with
+zero padding between them — matching v0's own language-level layout
+guarantee exactly (`postulate_v0_language_reference.md` §2.6) via
+LLVM's native packed struct type. Whether that guarantee itself should
+ever change (e.g. toward natural/ABI alignment, for raw-memory-access
+performance or a future FFI's sake) is **explicitly not decided now** —
+deliberately deferred, not silently carried forward as permanent. This
+is a placeholder to make sure it gets a real look before `v1.0.6`
+(the Edsger rewrite) closes out the still-single-file proof-of-concept
+era, rather than being forgotten between now and then.
 
 ## 5. What's deliberately not in this plan
 

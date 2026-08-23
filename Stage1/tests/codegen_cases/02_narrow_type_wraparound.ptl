@@ -1,0 +1,19 @@
+// Proves v1.0.3 sub-pass 1's width-unification behavior change: narrow
+// integer types now wrap correctly (true 8-bit two's complement),
+// where v1.0.2 and earlier silently treated every value as a uniform
+// i64 with no truncation on overflow -- see the "Every value is at its
+// true declared width" section of Stage1/src/codegen.ptl's own header
+// comment, and docs/postulate_stage1_v1_0_3_composites_design.md.
+//
+// 127 is int8's maximum; +1 wraps to -128 (the minimum), which is
+// < 0 -- only detectable if `a` is genuinely stored/computed at 8
+// bits, not silently widened to i64 (where 128 would remain positive).
+
+function main() : int32 {
+  mut a : int8 := 127;
+  a := a + 1;
+  if (a < 0) {
+    return 1;
+  }
+  return 0;
+}
