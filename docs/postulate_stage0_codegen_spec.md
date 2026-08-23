@@ -769,6 +769,44 @@ fired at runtime:
 
 ---
 
+### 9a. Fixed bug: composite-returning call as a plain assignment's rhs
+
+Found while bootstrapping Stage 1 (a lexer written in Postulate v0
+itself, compiled by Hoare — see `Stage1/`), whose token-producing
+routine calls a struct-returning helper and stores the result via a
+plain assignment, `tok := lex_next(...);`, not a decl-initializer.
+That shape had never been exercised before: every Phase 3 composite-
+return test used `mut x: T := f();`, and `gen_decl`'s own composite
+path reaches `gen_lvalue`'s `.call` case directly, with the
+destination address computed and used entirely in a register — it
+never puts the destination address on the *target program's* own
+stack at all.
+
+`AST_STMT_ASSIGN`'s pass 1/pass 2 scheme does, for its own reason
+(uniform handling across a simultaneous-assignment statement's
+several pairs, §6): the destination address is pushed onto the
+target's stack in pass 1, *before* the rhs is evaluated — including
+before `gen_lvalue`'s `.call` case gets to reserve stack space for the
+callee's return value. That reservation ends up sitting, on the
+target's stack, *between* the already-pushed destination address and
+the later-pushed source address — so `[src addr][reservation bytes]
+[dest addr]`, not the adjacent `[src addr][dest addr]` pass 2's
+`pop rsi` / `pop rdi` pair assumed. The second `pop` read the still-
+live reservation contents (the callee's just-returned field values)
+instead of the destination address underneath them — a live, always-
+succeeding pointer read of the *wrong* address, so the failure mode at
+runtime was silent corruption or (as first observed) a segfault,
+never a clean, obviously-related error.
+
+Fixed in `codegen_stmt.asm`'s `.p2_copy`: the reservation-cleanup
+emission (`add rsp, cleanup` in the target's own generated code) moved
+to right after `pop rsi` and before `pop rdi`, collapsing the gap at
+the one point it actually needs to be collapsed, rather than after the
+copy (too late — by then `pop rdi` already read the wrong address).
+Regression test: `tests/codegen_cases/30_composite_return_plain_assign.ptl`.
+
+---
+
 ## 10. Known Items Deliberately Not Implemented in This Phase
 
 Phase 1's list has effectively been covered by Phase 2, and Phase 3

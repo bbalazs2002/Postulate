@@ -1312,6 +1312,25 @@ gen_stmt:
     pop     rbx
     jmp     .assign_pass2
 
+; BUG FIX (found while bootstrapping Stage 1, a v0-hosted lexer that
+; exercises `p := f();`-shaped composite assignment for the first time
+; -- gen_decl's own composite path never goes through this two-push
+; scheme, so it never hit this): when the rhs is a CALL, pass 1 pushed
+; the dest address BEFORE gen_lvalue(rhs) ran, and gen_lvalue's own
+; .call case then reserved `cleanup` bytes for the return value ON TOP
+; of that dest address before pushing the src address -- so the target
+; stack, top to bottom, is [src addr][cleanup bytes][dest addr], NOT
+; the adjacent [src addr][dest addr] this pass assumed. Popping rsi
+; then immediately rdi (the original order) read `rdi` out of the
+; still-live cleanup region instead of the dest address underneath it
+; -- a live pointer bug, not a missing check: `rdi` always contained
+; *some* address, just the wrong one, so the corrupted copy free the
+; segfault (or a silent wrong write) only from wherever else the
+; corrupted `rdi` value happened to point in each caller. Fix: collapse
+; the cleanup gap (when the rhs is CALL-sourced, `cleanup` != 0) right
+; after popping rsi and before popping rdi, so the two addresses are
+; adjacent on the target stack exactly when the second pop expects them
+; to be -- not after the copy, which is too late for `pop rdi` itself.
 .p2_copy:
     mov     rsi, s_pop_rsi
     mov     rdx, s_pop_rsi_len
@@ -1341,6 +1360,46 @@ gen_stmt:
     pop     r13
     pop     r12
     pop     rbx
+    cmp     r8, 0
+    je      .p2_copy_no_gap
+    ; a CALL-sourced rhs left `cleanup` (r8) bytes of its own return-
+    ; value reservation between the just-popped src address and the
+    ; dest address pushed back in pass 1 -- collapse it now, before the
+    ; dest address is itself popped, not after the copy (too late: the
+    ; wrong value would already be in rdi by then).
+    mov     rsi, s_add_rsp_
+    mov     rdx, s_add_rsp__len
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r8
+    call    emit_str
+    pop     r8
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rax, r8
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    call    emit_dec
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    call    emit_nl
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+.p2_copy_no_gap:
     mov     rsi, s_pop_rdi
     mov     rdx, s_pop_rdi_len
     push    rbx
@@ -1393,41 +1452,6 @@ gen_stmt:
     pop     r13
     pop     r12
     pop     rbx
-    cmp     r8, 0
-    je      .p2_copy_done
-    mov     rsi, s_add_rsp_             ; free the temp the src came from,
-    mov     rdx, s_add_rsp__len         ; now that we're done reading it
-    push    rbx
-    push    r12
-    push    r13
-    push    r14
-    push    r8
-    call    emit_str
-    pop     r8
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
-    mov     rax, r8
-    push    rbx
-    push    r12
-    push    r13
-    push    r14
-    call    emit_dec
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
-    push    rbx
-    push    r12
-    push    r13
-    push    r14
-    call    emit_nl
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
-.p2_copy_done:
     jmp     .assign_pass2
 
 .assign_done:

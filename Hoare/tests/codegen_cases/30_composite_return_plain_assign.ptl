@@ -1,0 +1,26 @@
+// Regression test: a composite-returning call as the rhs of a plain
+// assignment to an already-declared local (`p := make_pair();`), not
+// just a decl-initializer (`mut p: Pair := make_pair();`, already
+// covered by 24_composite_return). These two call gen_lvalue's .call
+// case (codegen_expr.asm) from different places in codegen_stmt.asm --
+// gen_decl's own composite path (never hit this) versus
+// AST_STMT_ASSIGN's pass1/pass2 copy handling (did: pass 1 pushed the
+// dest address before evaluating the call, so gen_lvalue's own
+// reservation for the return value ended up sitting between the
+// pushed dest address and the later-pushed src address on the
+// target's stack; pass 2 popped src then immediately dest, never
+// collapsing that gap, so `dest` came out of the still-live return-
+// value reservation instead -- silent stack corruption, observed as a
+// segfault here and in Stage1/src/lexer.ptl, whose lex_next-calling
+// pattern is exactly this shape).
+struct Pair { a: int32; b: int32; }
+
+function make_pair() : Pair {
+  return Pair { a := 7, b := 8 };
+}
+
+function main() : int32 {
+  mut p: Pair := Pair { a := 100, b := 200 };
+  p := make_pair();
+  return p.a + p.b;
+}
