@@ -74,12 +74,14 @@ identifier ::= ("a".."z" | "A".."Z") ("a".."z" | "A".."Z" | "0".."9" | "_")*
 Unchanged from v0: must start with a letter, no hyphens.
 
 Identifiers for structs, functions, and `extern function`s all share
-**one global namespace** per translation unit (§6.2 defines what "per
-translation unit" means once `#include` exists) — you cannot declare a
-`struct Point` and a `function Point(...)` anywhere in the same
-compiled program. Local names (parameters and `decl`s) share one
-**per-function** namespace with each other, but are entirely separate
-from the global namespace.
+**one namespace within whatever a single file can see** — you cannot
+declare a `struct Point` and a `function Point(...)` such that any one
+file has both in scope at once, whether declared directly in that file
+or brought into view by `#include` (§6.2 defines exactly what a file
+can see once `#include` exists, and why this is checked per file rather
+than across the whole program). Local names (parameters and `decl`s)
+share one **per-function** namespace with each other, but are entirely
+separate from this namespace.
 
 **Namespaces** (qualified names, `ns.symbol`-style, to properly scope
 names pulled in via `#include`) are explicitly **not** part of v1 — see
@@ -1435,25 +1437,218 @@ and `<...>`), should one ever be designed. That mode is not designed,
 not implemented, and not given any meaning here — `#include <anything>`
 is simply not valid v1 syntax today, reserved rather than spent.
 
-`#include` is a **preprocessing** step — a textual splice performed
-before lexing begins, not part of the token/AST grammar proper, and
-`;`-termination (above) doesn't change that: it makes the directive
-*read* consistently with the rest of the language, not *behave* like an
-ordinary parsed statement. One real consequence follows from no longer
-being anchored to "alone on its own line": the preprocessing scan has to
-recognize v1's comment syntax (§1.2) well enough to skip over `//` and
-`/* */` content without mistaking `#include`-looking text inside a
-comment for a real directive — a small, bounded amount of lexical
-awareness
-(comment-skipping only, nothing about identifiers, literals, or any
-other token shape), not a step toward `#include` becoming a real grammar
-production. The compiler builds one merged source (the top-level file,
-with each `#include`d file's contents substituted in at that point,
-recursively) and then lexes/parses/checks that **as a single `program`**,
-exactly as v0 already does for one file. This is why §1.3's "one global namespace"
-note says "per translation unit" now: everything reachable through a
-chain of `#include`s shares that one flat namespace, same as if it had
-all been pasted into one file by hand — because, mechanically, it has.
+`#include` is a **preprocessing** step, resolved before the rest of the
+grammar is even relevant, and `;`-termination (above) doesn't change
+that: it makes the directive *read* consistently with the rest of the
+language, not *behave* like an ordinary parsed statement. One real
+consequence follows from no longer being anchored to "alone on its own
+line": the preprocessing scan has to recognize v1's comment syntax
+(§1.2) well enough to skip over `//` and `/* */` content without
+mistaking `#include`-looking text inside a comment for a real directive
+— a small, bounded amount of lexical awareness (comment-skipping only,
+nothing about identifiers, literals, or any other token shape), not a
+step toward `#include` becoming a real grammar production.
+
+**What a `#include` actually grants: everything the named file declares
+at its own top level — its `function`s, `extern function`s, and
+`struct`s — usable directly, as if declared in your own file.** This
+holds fully and unconditionally for any file you name in a `#include`
+of your own: nothing about it is partial or requires a further
+qualifier.
+
+**What it does not grant, by default: anything reachable only through a
+file you did not yourself `#include`.** `#include` is **not transitive
+for functions and `extern function`s**: if your file `#include`s
+`b.ptl`, and `b.ptl` itself `#include`s `c.ptl`, your file does not
+thereby gain the ability to call a function declared in `c.ptl`. Each
+file's own `#include` list is a complete, exact statement of which
+other files' functions it can use — reading one file tells you
+everything it depends on directly, with no need to also chase through
+what *that* file depends on in turn.
+
+```postulate
+// c.ptl
+function helper() : int32 { return 1; }
+```
+
+```postulate
+// b.ptl
+#include "./c.ptl";
+function wrapper() : int32 { return helper() + 1; }   // fine: b.ptl includes c.ptl directly
+```
+
+```postulate
+// a.ptl
+#include "./b.ptl";
+
+function main() : int32 {
+  return wrapper();   // fine: a.ptl includes b.ptl directly
+}
+
+function broken() : int32 {
+  return helper();    // compile error: a.ptl never included c.ptl
+}
+```
+
+`a.ptl` including `b.ptl` gets it `wrapper` (declared directly in
+`b.ptl`) but never `helper` (declared in `c.ptl`, which `a.ptl` itself
+never named) — even though `helper` is, transitively, part of what
+makes `b.ptl` compile at all. If `a.ptl` genuinely needs `helper` too,
+it says so itself, the same way `b.ptl` did: its own `#include
+"./c.ptl";`.
+
+**One deliberate exception, and only one: a `struct` type mentioned in
+something you can already see is visible too, however many files away
+it was originally declared.** Unlike a function, a struct has no notion
+of an opaque or incomplete form (§5.1) — there is no way to use a value
+of a struct type correctly at all without knowing its full field
+layout, so making struct visibility follow the same strict,
+direct-`#include`-only rule functions follow would force every file to
+separately re-`#include` every struct any function it uses happens to
+mention, purely to restate something already implied by being able to
+call that function in the first place. Extending the example above:
+
+```postulate
+// c.ptl
+struct Pair { first : int32; second : int32; }
+function make_pair() : Pair { return Pair { first := 1, second := 2 }; }
+```
+
+```postulate
+// b.ptl
+#include "./c.ptl";
+function wrap_pair() : Pair { return make_pair(); }
+```
+
+```postulate
+// a.ptl
+#include "./b.ptl";
+
+function main() : int32 {
+  mut p : Pair := wrap_pair();   // fine: Pair is visible -- wrap_pair,
+                                  // which a.ptl does have (b.ptl is its
+                                  // own, direct #include), is declared
+                                  // to return one
+  return p.first;
+}
+
+function broken() : Pair {
+  return make_pair();   // still a compile error: make_pair itself was
+                         // never granted to a.ptl -- only Pair, its
+                         // *type*, followed wrap_pair into view
+}
+```
+
+`Pair` reaches `a.ptl` because `wrap_pair` — a function `a.ptl` does
+have — is declared to return one; `make_pair` itself, the function that
+actually produces one in `c.ptl`, does not reach `a.ptl`, for the same
+reason `helper` didn't above: functions never travel further than the
+file that directly `#include`s them. This closure is **recursive**: a
+struct field whose own type is itself another struct declared in a
+third, still more distant file follows the same rule one hop further
+out, however many `#include`s away the chain started.
+
+**A struct that only reached you this way may be *consumed*, but never
+*authored or re-exposed*.** Consuming covers everything that only needs
+to know the type's shape, which propagation already provides: naming
+`Pair` in a *local's* type annotation, reading a field off a value you
+already have, passing one along as an argument, assigning one whole
+value to another (`p2 := p1;`). Two things are different in kind, and
+both still require `a.ptl` to `#include "./c.ptl";` itself:
+
+1. **Constructing one.** A struct literal (`Pair { first := ..., second
+   := ... }`, §3.8) doesn't consume an existing `Pair`, it *authors* a
+   new one, field by field — exactly the kind of dependency `#include`
+   exists to make you state yourself.
+2. **Putting it in a signature or a field list of your own.** A
+   function `a.ptl` itself declares, or a struct `a.ptl` itself
+   declares, is something *other* files may in turn `#include` `a.ptl`
+   to reach — if `a.ptl` could mention `Pair` there without owning the
+   dependency, `a.ptl` would silently become a further, undeclared
+   carrier of it, and whoever includes `a.ptl` would inherit `Pair`
+   (per the propagation rule) with no `#include "./c.ptl";` anywhere in
+   the chain to explain why. This is the same laundering the direct-
+   `#include`-only rule for functions was written to prevent in the
+   first place, just one level removed — closing it here is what keeps
+   that guarantee actually true two hops out, not just one.
+
+```postulate
+// a.ptl
+#include "./b.ptl";
+
+function also_broken() : int32 {
+  mut p : Pair := Pair { first := 5, second := 6 };   // compile error
+                                                        // (construction): a.ptl
+                                                        // never included c.ptl
+  return p.first;
+}
+
+function still_broken(p : Pair) : void { }   // compile error (own signature):
+                                              // same reason -- a.ptl would
+                                              // become a further, silent
+                                              // source of Pair for anyone
+                                              // who includes a.ptl next
+
+struct Wrapper { inner : Pair; }             // compile error (own field list):
+                                              // the same rule, for structs
+                                              // instead of functions
+```
+
+Only a *local* — never part of anything `a.ptl` exposes to whoever
+includes `a.ptl` in turn — may hold a `Pair` on propagated visibility
+alone:
+
+```postulate
+function fine() : int32 {
+  mut p : Pair := wrap_pair();   // fine -- a purely local use, not
+                                  // part of a.ptl's own exposed surface
+  return p.first;
+}
+```
+
+`a.ptl` can hold, inspect, and pass along a `Pair`, but authoring one,
+or writing it into its own function/struct declarations, is treated
+the same as calling `make_pair` directly would have been — a real
+dependency on `c.ptl` that has to be declared, not one `a.ptl` gets for
+free because `b.ptl` happened to need it too. Struct **layout**
+propagation itself stays fully automatic and unrestricted underneath
+all of this — a struct's field that is itself another struct from a
+third file always has its full layout available wherever the outer
+struct is used, regardless of ownership, because the compiler needs
+that layout to generate correct code no matter what; what's restricted
+above is only which type *names* `a.ptl`'s own source text may write in
+a constructing or exposing position, never what layout information the
+compiler itself is allowed to know.
+
+**This is a deliberately narrower rule than "everything `#include`-
+reachable, however indirectly, shares one namespace,"** which an
+earlier draft of this section specified. Two things motivate the
+tightening: reading any one file now tells you the *whole* truth about
+what it can call, with no need to also read everything its own
+`#include`s reach, transitively, just to know whether some name is in
+scope — and it is what makes independently compiling and caching each
+file practical for an implementation (the work item this unlocks is
+`postulate_stage1_bootstrap_plan.md`'s `v1.0.4`; see also §11 item 2,
+which this doesn't retract — v1 still doesn't *mandate* any particular
+compilation strategy, this rule just stops accidentally ruling the
+scalable one out).
+
+**A consequence worth stating plainly: name-collision checking is only
+as wide as visibility itself.** Two files that never `#include` each
+other, directly or through struct-type propagation, may declare the
+same name without either file — or a compiler checking either one on
+its own — ever noticing; nothing in the language requires a
+whole-program pass that would catch it. If both nonetheless end up
+compiled into the same final program (through some third file
+`#include`ing both, without either seeing the other), that's exactly
+the position two unrelated C translation units defining a same-named
+external symbol are in: whether it actually matters depends on whether
+an implementation's own link step happens to notice a genuine symbol
+clash, not on anything either file's own compilation checked. This is a
+deliberate, accepted trade — the alternative (checking name uniqueness
+across the whole reachable set, which the earlier, untightened rule got
+for free) would reintroduce exactly the whole-program pass this section
+exists to make unnecessary.
 
 Two built-in safety properties, both automatic (no manual include-guard
 boilerplate needed):
@@ -1474,23 +1669,28 @@ solving the "split a program across files" problem. Further
 preprocessor directives beyond `#include` are a plausible later
 addition (§11), not part of v1.
 
-**This is textual splicing, not separate compilation.** Worth being
-explicit about, since it's easy to conflate the two: every
-`#include`-reachable file still gets parsed, checked, and code-generated
-as **one** `program`, in one pass — there is no notion of independently
-compiling one file into an object file and linking it against another
-compiled separately, the way `Hoare/scripts/build.sh` links multiple
-`.o` files today, or the way most real-world languages let you build a
-library once and reuse the *compiled* result. For v1's scale (small
-programs, one compiled artifact) this is a fine, deliberately minimal
-starting point — but it would stop scaling long before namespaces
-(§11) become the limiting factor: recompiling every included file's
-full text on every build, with no separately built/cached units, is
-recognized here as a real, known limitation of `#include`'s current
-design, not something v1 claims to have solved for good. Genuine
-separate compilation is a bigger undertaking than namespaces (it
-touches linking, not just name resolution) and is noted in §11
-alongside it, as a distinct, likely later, piece of work.
+**This section defines what a program is allowed to reference, not how
+a compiler must build it.** An implementation is free to satisfy the
+visibility rule above by literally splicing every reachable file's text
+into one buffer and compiling it as a single pass — checking the
+narrower per-file visibility rule during name resolution instead of
+letting anything anywhere in the merge see everything else — or by
+compiling each file independently against just the declarations the
+rule grants it, caching each result, and linking the pieces together
+the way `Hoare/scripts/build.sh` already links multiple `.o` files
+today. Both are conformant; they only have to agree on which programs
+are valid and what they compute. §11 item 2 still doesn't make either
+strategy a requirement of v1 itself — but the visibility rule above was
+deliberately shaped so the scalable strategy is actually achievable by
+an implementation that wants it, which the wider, whole-program-flat
+version of this rule (an earlier draft) made needlessly hard:
+recompiling every reachable file's full text on every build, with no
+way to cache a file's own compiled result independently of who else
+happens to reach it, is a real, known limitation the wider rule
+couldn't avoid. Genuine separate compilation remains a bigger
+undertaking than just this naming rule (§11 item 2's own note about
+linking, not just name resolution) — this section resolves the
+*naming* half, not the whole thing.
 
 ### 6.3 `main`
 
@@ -2379,6 +2579,9 @@ Explicitly discussed and intentionally **not** part of v1:
    resolution), needed for the same underlying reason (`#include`
    re-parsing everything from source on every build doesn't scale
    indefinitely), but tracked as its own, likely-later piece of work.
+   §6.2's file-scoped visibility rule was chosen specifically to make
+   this practical for an implementation that wants it; v1 itself still
+   doesn't mandate it.
 3. **Static verification** (proving a `requires`/`ensures`/`invariant`/
    `decreases` clause true for *all* inputs, e.g. via an SMT solver) —
    v1's contracts are runtime-checked only (§7.5), by deliberate choice,
