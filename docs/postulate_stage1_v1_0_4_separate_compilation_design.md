@@ -50,9 +50,11 @@ short restatement so the rest of this document reads on its own.)
   declares.
 - **Struct types are the one deliberate exception**, and only as far as
   actually needed: a struct mentioned in the signature of something you
-  can already see is visible too, however many files away it was
-  originally declared. A struct never in scope this way still requires
-  its own direct `#include`.
+  can already see is visible too — but only **one `#include` hop**,
+  never further, because a direct dependency may only expose a struct
+  it owns itself (declared locally, or from *its own* direct
+  `#include`), never one it merely received the same way. A struct
+  never in scope this way still requires its own direct `#include`.
 - That exception covers **consuming** a propagated struct type only — a
   *local's* type annotation, reading a field, passing a value along,
   whole-value assignment — never **authoring or re-exposing** one.
@@ -479,9 +481,9 @@ AST dump as their own bounded, phase-specific output formats.
   useful for inspecting a fully-spliced program as a diagnostic aid, not
   part of the build-a-running-binary path. Only `codegen.ptl`'s
   pipeline, and the new external driver, are in scope here.
-- **User-facing forward-declaration syntax** — deliberately not
-  introduced; see "This mechanism is deliberately Stage-1-internal"
-  above.
+- **User-facing forward-declaration or `extern struct` syntax** —
+  deliberately not introduced for either; see "This mechanism is
+  deliberately Stage-1-internal" (addition #1) and addition #3 above.
 - **Parallel compilation of independent units** — the dependency graph
   would permit it (no unit's compile reads another unit's *body*, only
   its already-extracted interface), but this design compiles
@@ -527,42 +529,73 @@ work.
    function directly — must be a clean compile-time diagnostic ("name
    not visible" or equivalent), not a codegen-time crash, and not a
    silent success.
-4. **Struct closure propagates; the function that produced it does
-   not** — the §6.2 "`Pair`/`make_pair`/`wrap_pair`" example: `a.ptl`
-   using `Pair` (returned by `wrap_pair`, which `a.ptl` can see) must
-   compile and run correctly; `a.ptl` calling `make_pair` directly must
-   still be rejected, confirming struct propagation and function
-   non-propagation are checked independently, not that one accidentally
-   grants the other.
-5. **Multi-hop struct closure.** A struct field itself typed as another
-   struct declared in a third, more distant file (two propagation hops)
-   resolves and round-trips correctly.
-6. **`main` in a non-entry file**, and the two-level check: a unit
+4. **Struct closure propagates for consumption; the function that
+   produced it does not** — the §6.2 "`Pair`/`make_pair`/`wrap_pair`"
+   example: `a.ptl` *consuming* `Pair` (declaring a local from
+   `wrap_pair`'s result, reading `.first`) must compile and run
+   correctly; `a.ptl` calling `make_pair` directly must still be
+   rejected, confirming struct propagation and function non-propagation
+   are checked independently, not that one accidentally grants the
+   other.
+5. **Construction and own-signature/own-field re-exposure are both
+   rejected on propagated-only visibility** — the §6.2
+   `also_broken`/`still_broken`/`Wrapper` examples: `a.ptl` writing a
+   `Pair { ... }` literal, declaring a function with a `Pair` parameter,
+   or declaring a struct with a `Pair`-typed field, are each their own
+   compile-time diagnostic, none of them a codegen-time crash or a
+   silent success — including the case where the literal sits inside a
+   function *body*, not a top-level signature, exercising addition #3's
+   `extern struct` check specifically (interface extraction alone can't
+   catch that case, only the real per-unit compile can).
+6. **Struct closure is exactly one `#include` hop, never more, for a
+   valid program** — confirms this design's own "provably one hop"
+   claim: a file three `#include` levels away from a struct's true home
+   cannot itself expose that struct (attempting to would already be
+   rejected by fixture 5, one level up); a file that legitimately wants
+   it must `#include` the true home file directly, however many
+   intermediate files also happen to depend on it.
+7. **Layout propagation stays unrestricted underneath all of the
+   above.** A struct field itself typed as another struct declared in a
+   third, more distant file — the deep-nesting case addition #3's
+   "layout propagation is separate and unrestricted" paragraph
+   describes — still compiles and round-trips correctly for a file that
+   only *consumes* the outer struct (never names the inner one), and
+   the resulting object's memory layout is correct, confirming codegen
+   gets the bytes it needs without that file gaining any naming/
+   construction rights over the inner type.
+8. **`main` in a non-entry file**, and the two-level check: a unit
    defining `main` links correctly regardless of which file it's in;
    zero units defining `main` across the program produces `ld`'s
    undefined-reference diagnostic; two units each defining a real
    `main` produces `ld`'s multiple-definition diagnostic.
-7. **Same-named, mutually-invisible declarations don't collide.** Two
+9. **Same-named, mutually-invisible declarations don't collide.** Two
    files, neither `#include`ing (or struct-propagating from) the other,
    both declaring a function with the same name, both used (via their
    own, separate includers) elsewhere in the same overall program —
    compiles and runs correctly, confirming collision-checking really is
    scoped to visibility per §6.2's own "consequence worth stating
    plainly," not silently still whole-program.
-8. **Cache hit skips real work.** Build once; build again with no
-   source changes; confirm (via the driver's own accounting) no unit is
-   re-parsed/re-codegen'd/re-`llc`'d, and the linked binary is
-   byte-identical.
-9. **Body-only edit invalidates exactly the one edited unit** — edit a
-   function body without changing any signature; rebuild; confirm only
-   that file's object regenerates.
-10. **A dependency's signature edit invalidates only its actual
+10. **Cache hit skips real work.** Build once; build again with no
+    source changes; confirm (via the driver's own accounting) no unit is
+    re-parsed/re-codegen'd/re-`llc`'d, and the linked binary is
+    byte-identical.
+11. **Body-only edit invalidates exactly the one edited unit** — edit a
+    function body without changing any signature; rebuild; confirm only
+    that file's object regenerates.
+12. **A dependency's signature edit invalidates only its actual
     dependents, not the whole program.** In a graph with at least one
     file that does **not** depend, directly or transitively, on the
     changed file, confirm that unrelated file's cache entry is
     untouched after the edit and rebuild — the direct test of this
     revision's whole reason for existing.
-11. **A foreign function's forward declaration never leaks as a
+13. **A foreign function's forward declaration never leaks as a
     callable name beyond the unit it was synthesized for** — confirms
     the internal-only synthesis mechanism doesn't accidentally widen
     visibility beyond what interface extraction actually computed.
+14. **An `extern struct`-marked type is fully usable but never
+    constructible, in every position that mechanism can appear** —
+    a local declared from it, a field read off it, passing it to a
+    function that already accepts it, and whole-value assignment
+    (`p2 := p1;`) all succeed; only a literal for it fails, confirming
+    addition #3's tagging doesn't accidentally over-restrict ordinary
+    consumption while enforcing the construction ban.

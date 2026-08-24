@@ -1498,8 +1498,7 @@ it says so itself, the same way `b.ptl` did: its own `#include
 "./c.ptl";`.
 
 **One deliberate exception, and only one: a `struct` type mentioned in
-something you can already see is visible too, however many files away
-it was originally declared.** Unlike a function, a struct has no notion
+something you can already see is visible too.** Unlike a function, a struct has no notion
 of an opaque or incomplete form (§5.1) — there is no way to use a value
 of a struct type correctly at all without knowing its full field
 layout, so making struct visibility follow the same strict,
@@ -1543,10 +1542,27 @@ function broken() : Pair {
 have — is declared to return one; `make_pair` itself, the function that
 actually produces one in `c.ptl`, does not reach `a.ptl`, for the same
 reason `helper` didn't above: functions never travel further than the
-file that directly `#include`s them. This closure is **recursive**: a
-struct field whose own type is itself another struct declared in a
-third, still more distant file follows the same rule one hop further
-out, however many `#include`s away the chain started.
+file that directly `#include`s them.
+
+This does **not** mean struct visibility can chain across several files
+the way the rejected, program-wide draft of this rule would have
+allowed — `Pair` reaches `a.ptl` because `b.ptl` itself `#include`s
+`c.ptl` (owns the dependency directly, not merely received it from
+somewhere else); if `b.ptl` had only *consumed* `Pair` through some
+other file's own signature, without `#include`ing `c.ptl` itself,
+`b.ptl` could not expose `Pair` onward to `a.ptl` at all (the next
+paragraph covers exactly why). Struct visibility propagates exactly
+**one** `#include` hop past wherever a type is actually owned — never
+further, and never by accident of how many files happen to sit between
+the true owner and you.
+
+What *does* recurse, independently of the paragraph above, is a
+struct's own **field layout** — nothing about naming: a struct field
+whose own type is itself another struct, declared in a third, more
+distant file, always has its full layout available wherever the outer
+struct is used, however many files away that inner declaration lives,
+because the compiler needs the actual bytes to generate correct code
+regardless of who's allowed to write the inner type's name.
 
 **A struct that only reached you this way may be *consumed*, but never
 *authored or re-exposed*.** Consuming covers everything that only needs
