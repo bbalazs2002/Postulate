@@ -2,12 +2,13 @@
 # Runs Edsger/src/lexer.ptl (v1.0.6, Module 1) against every fixture in
 # lexer_cases/, comparing stdout/stderr/exit code against the recorded
 # .expected.* files -- same convention Hoare/Stage1's own test scripts
-# already use. Run from inside the Docker image (or an equivalent Linux
-# toolchain with nasm/ld/llvm), from the repository root:
+# already use. Run from inside Edsger/Dockerfile's own image (see
+# docker-compose.yml's "edsger-dev" service -- `hoare` is already built
+# and on PATH there, Hoare/ itself is not mounted at all), or on any
+# host with `hoare` on PATH or checked out at Hoare/hoare next to this
+# repo, with nasm/ld already installed:
 #
 #   Edsger/tests/run_lexer_tests.sh
-#
-# Requires Hoare already built (Hoare/hoare, Hoare/build/codegen).
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,7 +16,16 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CASES_DIR="$SCRIPT_DIR/lexer_cases"
 BIN="$(mktemp)"
 
-"$REPO_ROOT/Hoare/hoare" "$REPO_ROOT/Edsger/src/lexer.ptl" -o "$BIN"
+if command -v hoare > /dev/null 2>&1; then
+    HOARE_CMD="hoare"
+elif [ -x "$REPO_ROOT/Hoare/hoare" ]; then
+    HOARE_CMD="$REPO_ROOT/Hoare/hoare"
+else
+    echo "run_lexer_tests.sh: no 'hoare' on PATH and $REPO_ROOT/Hoare/hoare not found -- see Edsger/Dockerfile" >&2
+    exit 64
+fi
+
+"$HOARE_CMD" "$REPO_ROOT/Edsger/src/lexer.ptl" -o "$BIN"
 
 pass=0
 fail=0

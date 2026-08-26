@@ -1,12 +1,13 @@
 services:
-  lexer-dev:
+  edsger-dev:
     build:
       context: .
-      dockerfile: Dockerfile
-    image: postulate-env
-    container_name: postulate-lexer-dev
+      dockerfile: Edsger/Dockerfile
+    image: postulate-edsger
+    container_name: postulate-edsger-dev
     stdin_open: true  # -i opció (interaktív bemenet)
     tty: true         # -t opció (pszeudo-TTY a terminálhoz)
     entrypoint: ["/bin/bash"]
     volumes:
       - ./Edsger:/workspace/Edsger
+      - ./Hoare:/workspace/Hoare
