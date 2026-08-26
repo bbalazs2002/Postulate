@@ -217,26 +217,54 @@ documented v1 exception `v1.0.1` (`#include` itself) and `v1.0.2`
 `Stage1/README.md`'s "One narrow, deliberate exception" list, not a
 precedent for grabbing more of v1 early.
 
-**This mechanism is deliberately Stage-1-internal, never user-facing.**
-A `.ptl` file's author never writes a standalone forward declaration for
-a function defined elsewhere — the *only* sanctioned way to declare "I
-depend on this" is `#include`ing the file that defines it, per the
-language-level rule above. Exposing bare forward declarations as
-ordinary user syntax was considered and deliberately rejected: it would
-let a file reference a symbol with no traceable `#include` naming where
-that symbol actually lives, resolved only by whatever else happens to
-land on the same final link line — precisely the kind of non-local,
-unverifiable coupling this whole redesign exists to rule out. Forward
-declarations exist here purely as the mechanism the *driver* uses to
-hand a unit's compile the signature of something it's allowed to call
-without also handing it that thing's body — real, load-bearing work
-(it's what makes a unit's own compile independent of its dependencies'
-implementations at all), just not a piece of surface syntax.
+**Cross-file use of this mechanism is Stage-1-internal, never
+user-facing — but the bodyless form itself is real, pre-existing v1
+grammar (§5.2), and its ordinary, same-file use stays fully legal.**
+v1 §5.2 already allows one function to have both a forward declaration
+and a definition — the example given there (`multiply`) is nothing
+more than a signature written once, with `;`, and its body written
+separately, matched by name and signature. Nothing about that pairing
+involves `#include`, another file, or this design's own driver at
+all — it is an ordinary, single-file readability/documentation
+convention (and the natural home for a contract clause set ahead of a
+body, once `v1.0.14` lands), and `v1.0.4` doesn't touch it.
+
+**What must never be user-facing is a *dangling* forward
+declaration** — one with no matching, same-file, with-body definition.
+That specific shape is the only thing a `.ptl` author could actually
+use to reference another file's function without `#include`ing it — a
+symbol resolved only by whatever else happens to land on the same
+final link line, precisely the non-local, unverifiable coupling this
+whole redesign exists to rule out. A driver-synthesized forward
+declaration for a foreign function is always, by construction, exactly
+this shape from the compiling unit's own point of view (its matching
+real definition lives in a different file, never the one being
+compiled) — which is what makes "dangling" the right, precise
+condition to check, rather than "bodyless" on its own.
 
 A synthesized forward declaration for a foreign function is therefore
 just that function's recorded signature span (from the interface record
 above), with `;` appended in place of the `{ ... }` the real declaration
-actually has.
+actually has — placed in the synthesized preamble, never inside file
+`i`'s own body.
+
+**Enforced, not just conventionally avoided by the driver**: interface
+extraction, walking file `i`'s own real body — `source_pool[
+file_body_off[i] .. file_content_off[i]+file_content_len[i])`,
+`v1.0.1`'s untouched, pre-synthesis span, in complete isolation before
+the driver assembles anything — checks every bodyless `function_decl`
+it finds there against `i`'s **own** other top-level declarations for a
+matching, with-body definition (same name, same parameter/return
+types). Found: an ordinary, legal same-file forward declaration,
+accepted exactly as `v1.0.2`'s existing pipeline already would. Not
+found: a dangling forward declaration, rejected right there, before a
+synthesized input is even assembled for anyone who might `#include`
+`i` — diagnostic: a forward declaration must be paired with a
+same-file definition; if you meant to expose another file's function,
+`#include` that file instead. `extern struct` (addition #3 below) has
+no equivalent legitimate case — structs have no forward-declared/full
+split anywhere in v0 or v1 (§5.1) — so it stays rejected unconditionally,
+with no matching-definition exception to check for.
 
 #### 2. Relaxing "exactly one `main`" to a two-level check
 
@@ -298,6 +326,19 @@ it is a compile error, with the same diagnostic §6.2's own examples
 describe (`also_broken`/`still_broken`/`Wrapper`); if it came from an
 ordinary `struct` entry (owned, whether declared locally or spliced
 from a direct dependency's `own_structs`), construction is fine.
+
+**Enforced the same way, and for the same reason, as the bodyless-
+function case above**: `extern struct` can only ever legitimately
+appear in the driver-synthesized preamble, never in file `i`'s own real
+body — struct declarations, like function declarations, only ever
+appear at the top level (§6.1), so interface extraction's own
+top-level walk over `i`'s untouched source is again sufficient to catch
+a hand-written occurrence, before any synthesized input exists. A
+`.ptl` file whose own source contains `extern struct` is rejected at
+that point, with a diagnostic to the same effect (reserved for internal
+use; `#include` the file that defines the struct instead) — not
+silently accepted and not deferred to some later, harder-to-diagnose
+stage of compilation.
 
 ### Duplicate names and `main`-count move to the linker, not a whole-program pass
 
@@ -481,9 +522,11 @@ AST dump as their own bounded, phase-specific output formats.
   useful for inspecting a fully-spliced program as a diagnostic aid, not
   part of the build-a-running-binary path. Only `codegen.ptl`'s
   pipeline, and the new external driver, are in scope here.
-- **User-facing forward-declaration or `extern struct` syntax** —
-  deliberately not introduced for either; see "This mechanism is
-  deliberately Stage-1-internal" (addition #1) and addition #3 above.
+- **User-facing *dangling* forward declarations, and `extern struct`
+  in any form** — deliberately rejected for both; a same-file, paired
+  forward-declaration-then-definition is ordinary v1 §5.2 syntax and
+  stays fully legal, unaffected by this design (see addition #1's
+  "Cross-file use of this mechanism..." and addition #3 above).
 - **Parallel compilation of independent units** — the dependency graph
   would permit it (no unit's compile reads another unit's *body*, only
   its already-extracted interface), but this design compiles
@@ -599,3 +642,25 @@ work.
     (`p2 := p1;`) all succeed; only a literal for it fails, confirming
     addition #3's tagging doesn't accidentally over-restrict ordinary
     consumption while enforcing the construction ban.
+15. **A same-file forward declaration paired with its own definition
+    is ordinary, legal syntax, unaffected by any of this.** A single
+    `.ptl` file (no `#include` at all) declaring `function f(...) :
+    T;` and, elsewhere in the same file, `function f(...) : T { ... }`
+    compiles and runs correctly — confirming `v1.0.4`'s restriction
+    targets *dangling* forward declarations specifically, not the
+    bodyless form itself.
+16. **A dangling forward declaration is rejected, on its own, with no
+    other file involved.** A single `.ptl` file declaring `function
+    f(...) : T;` with **no** matching same-file definition anywhere —
+    compiled by itself, no `#include`, nothing else in the build — is a
+    compile error at interface-extraction time, with the "must be
+    paired with a same-file definition" diagnostic. A mismatched
+    same-file "definition" (same name, different parameter or return
+    types) counts as no match and must fail the same way.
+17. **A hand-written `extern struct` is rejected unconditionally.** A
+    single `.ptl` file whose own source contains `extern struct S {
+    ... }`, with or without an unrelated ordinary `struct S { ... }`
+    elsewhere, is a compile error at interface-extraction time — unlike
+    forward-declared functions, there is no legitimate pairing that
+    makes this form acceptable, confirming addition #3 really has no
+    exception to check for.

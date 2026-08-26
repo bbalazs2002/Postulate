@@ -1,0 +1,6 @@
+function g(p : *int32, n : uint64) : int64 {
+  mut q : *int32 := p + 1;
+  mut diff : int64 := q - p;
+  mut v : uint64 := diff as uint64;
+  return diff;
+}

@@ -1,0 +1,12 @@
+KW function
+IDENT f
+LPAREN
+RPAREN
+COLON
+KW void
+LBRACE
+KW mut
+IDENT a
+COLON
+KW int32
+OP :=

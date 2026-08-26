@@ -1,0 +1,70 @@
+KW function
+IDENT f
+LPAREN
+RPAREN
+COLON
+KW char
+LBRACE
+KW mut
+IDENT a
+COLON
+KW char
+OP :=
+CHAR 'a'
+SEMI
+KW mut
+IDENT nl
+COLON
+KW char
+OP :=
+CHAR '\n'
+SEMI
+KW mut
+IDENT tab
+COLON
+KW char
+OP :=
+CHAR '\t'
+SEMI
+KW mut
+IDENT cr
+COLON
+KW char
+OP :=
+CHAR '\r'
+SEMI
+KW mut
+IDENT zero
+COLON
+KW char
+OP :=
+CHAR '\0'
+SEMI
+KW mut
+IDENT bs
+COLON
+KW char
+OP :=
+CHAR '\\'
+SEMI
+KW mut
+IDENT q
+COLON
+KW char
+OP :=
+CHAR '\''
+SEMI
+KW mut
+IDENT p
+COLON
+OP *
+KW char
+OP :=
+OP &
+IDENT a
+SEMI
+KW return
+IDENT a
+SEMI
+RBRACE
+EOF

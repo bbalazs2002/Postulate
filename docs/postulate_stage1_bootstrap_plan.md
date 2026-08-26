@@ -9,222 +9,344 @@ compiler for the [v1 language](postulate_v1_language_reference.md). It
 answers a question the language reference itself deliberately doesn't:
 not *what* v1 is, but in what *order* to build it, and why that order.
 
-**Versioning.** Every step below is a version `v1.0.n`:
+**Versioning — `v{language}.{generation}.{step}`:**
 
-- The first `1` names the **stage** — Stage 1, the self-hosted
-  successor to Hoare (Stage 0) — not a language-feature count.
-- The `0` names the **language generation** — this is Stage 1's first
-  target language, the one specified in `postulate_v1_language_
-  reference.md`. A later, larger language change would be `v1.1.n`, a
-  new document, not a renumbering of this one (see "Beyond this plan"
-  at the end).
-- `n` is the step number in this plan, incrementing by one per shipped,
-  verified increment. `n` is a build order, not a language-reference
-  section number — steps are grouped by dependency and risk, not by
-  the order §1–§11 happen to appear in the reference manual.
+- The **first** number names the **target language** — `1` for the
+  language specified in `postulate_v1_language_reference.md`. This is
+  a *direction*, not a completeness claim: Edsger `v1.0.n`/`v1.1.n`
+  targets v1 without yet implementing all of it (floating point, for
+  instance, is part of the v1 reference but doesn't land until
+  `v1.1.4`, well after this scheme starts calling the compiler
+  "`v1`-something") — the digit says which language the compiler is
+  progressing toward, not how much of it already works. A genuinely new
+  *language* generation (whatever eventually accumulates toward
+  reference §11's remaining deferred items, with its own reference
+  document) would be `v2`, not a bump to the second number — see
+  "Beyond this plan."
+- The **second** number is the compiler's own **generation** — `0` for
+  everything up through and including the architectural rewrite
+  (`v1.0.6`, §3): the original proof of concept, plus every step that
+  still modified it rather than a real, modular compiler. `1` begins
+  the moment the rewrite is done — the real, modular **Edsger** and
+  everything built on top of it, unconditionally, however many further
+  internal rewrites Edsger itself might someday need (a hypothetical
+  later one would be `2`, and so on). This is the number that changed
+  today: an earlier draft of this document used the second position for
+  "language generation" instead, which put a future `v1.1` (a new
+  *language*) and "Edsger's own next batch of work" (still targeting
+  the same v1 language) in direct naming conflict. Splitting language
+  (first number) from compiler generation (second number) removes that
+  conflict entirely.
+- The **third** number is the step count *within* that generation,
+  restarting at `1` each time the middle number increments — `v1.0.1`
+  through `v1.0.6` (generation 0), then `v1.1.1` onward (generation 1),
+  not a single ever-growing counter across both.
+- `v1.0.1` and `v1.0.4` are **retired** (§4) — never renumbered, kept
+  as marked historical gaps rather than reused slots, since both are
+  already cited by name in existing commits, fixtures, and design docs.
 
-**Naming.** The lexer/parser/codegen trio already built this session is
+**Naming.** The lexer/parser/codegen trio built early in this project is
 a **proof of concept only** and stays unnamed — it exists to prove
 Hoare can bootstrap *something*, not to be anyone's long-term Stage 1
-compiler. §3 below marks the exact point where it gets rewritten into a
-real, modular compiler; from that point on, the compiler is named
-**Edsger** (Stage 0's `Hoare` honors C.A.R. Hoare; Stage 1's `Edsger`
-honors Edsger W. Dijkstra — the same relational/predicate-transformer
-tradition §7 of the v1 reference draws its verification vocabulary
-from). Every version from that rewrite onward is "Edsger `v1.0.n`."
+compiler. `v1.0.6` (§3) is the exact point where it gets rewritten into
+a real, modular compiler; from that point on — generation `1`, in the
+scheme above — the compiler is named **Edsger** (Stage 0's `Hoare`
+honors C.A.R. Hoare; Stage 1's `Edsger` honors Edsger W. Dijkstra — the
+same relational/predicate-transformer tradition §7 of the v1 reference
+draws its verification vocabulary from). Every version from the rewrite
+onward is "Edsger `v1.1.n`."
 
-**Verification discipline, unchanged from this session's work**: every
-step below ships only once assembled/compiled, linked, and actually
-**run** against real fixtures with checked exit codes/output — not just
-"it parses" or "it compiles." Steps that touch the compiler's own
-source additionally get a full regression pass across everything the
-previous step already verified, exactly as this session's codegen work
-did.
+**Verification discipline.** Every step ships only once actually
+**run** against real fixtures with checked exit codes/output, not just
+"it parses" or "it compiles" — unchanged from how `v1.0.2`/`v1.0.3`
+were verified. Starting at `v1.0.6`, this is refined into a
+**module-by-module** discipline, not just an end-to-end one — see §3.
 
 ---
 
-## 1. Why modularity comes first
+## Revision note: why this plan looks different now
 
-The proof of concept is a single self-contained `.ptl` file per phase
-(`lexer.ptl`, `parser.ptl`, `codegen.ptl`), each duplicating whatever it
-needs from earlier phases — v0 has no `#include`, so there was no other
-option (`Stage1/README.md`'s "why everything here looks the way it
-does" explains this in full). That duplication is fine for three
-~4000-line files; it stops being fine the moment the compiler grows to
-cover all of v1 — contracts alone (§7 of the reference) are a
-substantial, mostly self-contained subsystem that has no business being
-copy-pasted into three places.
+This plan originally had `#include` (`v1.0.1`) as its cheapest,
+independent first step, with true separate compilation and real
+optimization bundled together as `v1.0.4`/`v1.0.5` immediately before a
+`v1.0.6` rewrite that was scoped to introduce **no new language work at
+all**. All three of those decisions were reconsidered, in order, after
+a language-design pass replaced `#include` with a real namespace/`use`/
+`@autoload` module system (`postulate_v1_language_reference.md` §6.2)
+and added an optional Why3-based static verification path (§7.8) — and
+then again after a decision to change *how* Stage 1 gets built, not
+just what it builds next:
 
-`#include` (§6.2) is also, conveniently, almost entirely **independent**
-of the rest of v1: it's a preprocessing-time textual splice — path
-resolution, recursive substitution, include-once, cycle detection — with
-no interaction with the type system, the checker, or codegen at all. It
-does not need `char`, floats, pointer arithmetic, `ref`, contracts, or
-anything else in the reference to be useful; the *only* thing it needs
-is a working lexer/parser, which the proof of concept already is. That
-makes it the cheapest possible increment with the largest structural
-payoff, which is why it is step one, not buried somewhere in the
-middle once "enough of the language" exists to bother.
+- **`#include` (`v1.0.1`) is retired.** Its entire mechanism — textual
+  splicing, per-file include lists, the propagation rules that grew up
+  around trying to keep that model both explicit and scalable — no
+  longer exists in the language it was implementing. What replaces it
+  (namespace/`use`/`@autoload`) is not a small patch to the existing
+  lexer/parser; it needs new grammar, new resolution logic, and a
+  different file-discovery model, so it is folded into `v1.0.6` rather
+  than patched into the retired proof of concept.
+- **True separate compilation (`v1.0.4`) is retired outright**, not
+  reworked. The whole reason it existed — making `#include` scale past
+  one-big-splice-per-build — is now the namespace system's own job by
+  design (§6.2c): resolving a `use` never requires reading another
+  module's body, only its interface, which is what `v1.0.4` was trying
+  to engineer around `#include`'s textual-splice limitation in the
+  first place. What's left of it — **incrementally** skipping
+  recompilation of unchanged modules — is real, separable work, moved
+  to its own later step (`v1.1.1`, below) rather than attempted
+  alongside everything else `v1.0.6` already has to get right.
+- **Real optimization (old `v1.0.5`) moves to after the rewrite.**
+  Nothing about `opt` integration depends on anything `v1.0.6` adds —
+  it was only ever grouped with the rewrite because both rode on the
+  same LLVM IR switch (§2 still explains that shared mechanism) — but
+  it competes for attention with the rewrite for no real benefit, and
+  is genuinely lower-priority than making the intermediate compiler
+  pleasant to write Edsger's own later stages in. It becomes `v1.1.2`.
+- **Everything after the rewrite is numbered `v1.1.n`, not a continued
+  `v1.0.n`.** The versioning scheme itself changed alongside all of the
+  above: the second number now names the *compiler's own generation*
+  (`0` through the rewrite, `1` for the real, modular Edsger and
+  everything built on it) rather than "language generation" — freeing
+  a future genuine new *language* generation to be `v2` without
+  colliding with Edsger's own next batch of work, which still targets
+  v1. See "Versioning," above, for the full reasoning.
+- **`v1.0.6` itself grew, deliberately.** It no longer aims for "same
+  language surface, new shape, no new syntax." It now front-loads
+  three feature areas that were previously spread across `v1.0.6`,
+  `v1.0.8`, and `v1.0.10` — namespaces/`use`/`@autoload`, `char` +
+  `as`, and pointer arithmetic/`*void`/`uintptr`/`sizeof`/`lengthof` —
+  into the rewrite itself, so that the *intermediate* compiler this
+  step produces is already comfortable to keep developing Edsger's own
+  later stages in, rather than staying scalar-and-`#include`-only for
+  several more steps after the rewrite. Statement sugar, floats, and
+  `main(argv, argc)` were all considered for the same treatment and
+  deliberately left out — see §3's own note on why the line was drawn
+  where it was.
+- **The build/verification methodology itself changed.** Every step
+  before this revision shipped as one, small, end-to-end-verified
+  increment (lex → parse → check → codegen → run, for one feature, then
+  the next). `v1.0.6`'s much larger scope makes that impractical to do
+  feature-by-feature without constant rework across all four phases for
+  every single addition; instead, `v1.0.6` is built and verified
+  **module by module** — lexer, then parser, then semantic
+  analyzer/type checker, then codegen — each covering the *entire*
+  feature batch before the next module starts, each checked by hand
+  against its own intermediate output before moving on. §3 spells this
+  out in full.
 
-## 2. Why the backend changes before the rewrite
+---
 
-Three more things land before the architectural rewrite (§3), all
-pulled forward from what the language reference's §11 originally
-deferred, and all bundled together deliberately because they share one
-underlying mechanism:
+## 1. Why the rewrite is front-loaded now
 
-- **True separate compilation** (reference §11 item 2 — previously
-  deferred beyond v1, now brought forward): independently compiled,
-  cached, linkable units, instead of `#include` always re-splicing and
-  re-compiling full source text on every build.
-- **Real optimization**, using an existing, mature tool rather than a
-  hand-written one.
-- **Composite (struct/array) values across function calls, in Stage 1's
-  own codegen** — v0 parity, not a new v1 feature. Hoare (Stage 0) has
-  fully supported struct/array parameters and return values since early
-  in its own development; the proof-of-concept Stage 1 codegen built
-  this session deliberately left this out (`Stage1/README.md`'s scope
-  note) to keep the first working slice small.
+The original ordering put the cheapest, most self-contained thing
+first (`#include`, having zero interaction with the type system or
+codegen) and pushed the rewrite itself out to the point where
+everything it needed to reorganize already existed. That reasoning
+doesn't transfer cleanly to the current plan, because what `v1.0.6` now
+has to reorganize *and* extend is no longer separable the same way:
+namespaces/`use`/`@autoload` **is** the file-discovery and
+module-boundary mechanism the new, modular Edsger architecture (§3) is
+built around from day one — there's no version of "build the new
+module structure first, add the module system that defines what a
+module even is second" that makes sense. Front-loading `char`/`as`/
+pointer arithmetic alongside it is a separate, practical call: writing
+a real, multi-thousand-line compiler's later stages (semantic
+analysis, contract checking, eventually Why3 translation) is
+significantly more pleasant with byte-level text handling and
+pointer-based data structures already available, and paying that cost
+once, inside the rewrite, is cheaper than paying it in three more
+separate steps immediately after.
 
-**The mechanism all three ride on: Stage 1's codegen stops emitting x86
-NASM text directly and emits LLVM IR instead.** This is not a new
-direction — it's the one already named as the project's intended path
-(`Stage 0 asm → Stage 1 LLVM IR`) — just sequenced explicitly now. Four
-consequences follow from that one change, which is why they're grouped
-here as one arc rather than a handful of unrelated features:
+## 2. Why LLVM IR came before the rewrite
 
-1. **Optimization stops being something we'd have to build.** There is
-   no mature, widely-used tool that takes already-generated x86 assembly
-   *text* and applies real optimizations (constant folding, dead-code
-   elimination, register allocation, instruction scheduling) as a
-   standalone pass — NASM's own `-Ox` only optimizes instruction
-   *encoding size*, not semantics; LLVM's BOLT is a post-link,
-   profile-guided binary-layout optimizer aimed at large real-world
-   binaries, not a match for this project's scale or need. What *does*
-   exist, is mature, and is exactly the standard tool for this job is
-   **`opt`** — LLVM's own optimizer — run over the IR before it's
-   lowered to machine code by **`llc`**. Once codegen's output is LLVM
-   IR, "add optimization" becomes routing that IR through `opt` at a
-   chosen level before `llc` — no bespoke optimizer needed, satisfying
-   the "not our own tool, at least for the first round" requirement
-   directly.
-2. **True separate compilation stops being a from-scratch design
-   problem.** Each `.ptl` translation unit compiles to its own LLVM IR
-   module, independently lowered by `llc` to its own object file,
-   cached, and linked with the others — mechanically the same shape
-   `Hoare/scripts/build.sh` already proves works today (multiple `.o`
-   files linked with `ld`), just with `llc` producing each `.o` instead
-   of `nasm`. `#include`'s forward-declaration convention (already in
-   the grammar, §5.2, specifically for this use case) is what lets one
-   unit type-check a call into another without needing that unit's full
-   body — the piece §11 item 2 of the reference calls out as the harder,
-   "touches linking" half of the problem is now mostly LLVM's linker's
-   job, not ours.
-3. **Composite values across calls stop needing a hand-rolled ABI.**
-   This session's proof-of-concept codegen deliberately avoided any
-   System-V-style struct-passing convention, inventing its own
-   simplified one instead (`Stage1/README.md`'s codegen section) — doing
-   struct-by-value parameter/return passing correctly by hand in raw
-   x86-64 is exactly the fiddly, error-prone part real backends spend
-   the most effort on. LLVM IR has aggregate (struct/array) types as a
+*(Historical — `v1.0.2`/`v1.0.3` already shipped under this reasoning;
+kept for context, not as forward-looking guidance.)*
+
+Two things landed before the rewrite, sharing one underlying mechanism:
+**Stage 1's codegen stopped emitting x86 NASM text directly and started
+emitting LLVM IR instead.** This was not a new direction — it's the
+path already named as the project's intended one (`Stage 0 asm → Stage
+1 LLVM IR`) — just sequenced explicitly. Two consequences followed:
+
+1. **Composite values across calls stopped needing a hand-rolled ABI**
+   (`v1.0.3`) — LLVM IR has aggregate (struct/array) types as a
    first-class concept, and `llc` already knows how to lower them
-   per-target — this is precisely the class of problem an existing
-   backend is best at, and precisely the class of problem worth *not*
-   re-solving by hand a second time. This is also why it's sequenced
-   **after** the LLVM IR switch rather than before: doing it once,
-   directly against LLVM's own aggregate handling, is strictly less work
-   than building a NASM-based version first and then redoing it for
-   LLVM immediately after.
-4. **Platform independence stops being a from-scratch design problem
-   too.** Hoare's own x86-64-only reality already had to be corrected
-   once at the language-design level — v1 §2.5 explicitly calls out
-   pointer size as *platform-dependent*, not fixed at 8 bytes, "for a
-   language whose stated goal is to eventually target more than one
-   architecture." Emitting hand-rolled x86 NASM text keeps that goal
-   permanently out of reach without a second, parallel backend for every
-   new target; emitting LLVM IR gets it close to free, because the IR
-   itself is already target-independent — the same `.ll` module `llc`
-   lowers to x86-64 today lowers to AArch64, RISC-V, or anything else
-   LLVM supports by changing `llc`'s target triple, with no change to
-   codegen's own logic at all. This doesn't make Stage 1 multi-platform
-   by itself (calling conventions, the raw-syscall `extern function`
-   whitelist, and `_start`-style trampolines — §2's earlier note — are
-   still per-target, hand-written pieces), but it removes the single
-   biggest structural obstacle to ever attempting it, as a direct
-   side effect of solving the optimization/separate-compilation problem
-   this section is already about, not a separate effort.
+   per-target, exactly the class of problem worth not re-solving by
+   hand.
+2. **Optimization and true separate compilation both stopped being
+   from-scratch design problems** — `opt` (now `v1.1.2`) and per-module
+   compilation (now folded into `v1.0.6`/`v1.1.1`) both ride on LLVM IR
+   existing at all; neither needed designing before this switch, and
+   neither would have been cheaper to build against a NASM-text
+   backend first and then redo for LLVM immediately after.
 
-Two implementation notes worth being explicit about, since they de-risk
-what could otherwise look like a large rewrite of codegen's own logic:
-
-- **Adopting LLVM IR does not require Stage 1's codegen to reason about
-  SSA form.** The straightforward, standard technique (what `clang`
-  itself does at `-O0`) is to keep exactly the structure codegen already
-  has today — one stack slot (`alloca`) per local, a load before every
-  read, a store after every write — and let `opt`'s `mem2reg` pass (part
-  of any real optimization level) promote those to registers
-  automatically. Codegen's own control-flow logic (`if`/`while`
-  lowering, the statement-by-statement emission this session's
-  `gen_stmt`/`gen_expr` already do) carries over structurally; what
-  changes is which fixed-template text `emit_piece`-style dispatch
-  produces — LLVM IR instructions instead of x86 mnemonics — not the
-  shape of the code that decides *what* to emit.
-- **This only changes Stage 1's own output.** Hoare (Stage 0) stays
-  exactly what it is — a hand-written x86-64 NASM compiler — unaffected
-  by anything in this plan. The toolchain Stage 1/Edsger depends on
-  changes from `nasm`+`ld` to `llc`+`opt`+`ld` (or `clang` as a linker
-  driver) starting at the step that makes this switch, below.
+**Adopting LLVM IR did not require reasoning about SSA form.** The
+straightforward, standard technique (what `clang` itself does at `-O0`)
+is one stack slot (`alloca`) per local, a load before every read, a
+store after every write — letting `opt`'s `mem2reg` pass promote those
+to registers automatically once optimization is actually turned on
+(`v1.1.2`). This changes only which fixed-template text codegen
+produces, not the shape of the logic deciding what to emit. This also
+only ever changed Stage 1's own output — Hoare (Stage 0) stays exactly
+what it is, a hand-written x86-64 NASM compiler, unaffected by anything
+in this plan.
 
 ## 3. The rewrite point: where Edsger begins
 
-**`v1.0.6` is the rewrite.** By this point, `#include` (`v1.0.1`), the
-LLVM IR backend (`v1.0.2`), composite-call support (`v1.0.3`), true
-separate compilation (`v1.0.4`), and real optimization (`v1.0.5`) all
-already exist — in the still-single-file proof of concept, deliberately,
-so the rewrite doesn't have to anticipate any of them, only use what's
-already there.
+**`v1.0.6` is the rewrite**, and now the largest single step in this
+plan. By this point `#include` (retired) and the LLVM IR backend
+(`v1.0.2`)/composite-call support (`v1.0.3`) already exist — the latter
+two, unlike `#include`, don't need reworking, only reusing.
 
-`v1.0.6` itself does **no new language work at all** — it is a pure
-architecture milestone, and deliberately scoped that way so its
-correctness is easy to check (identical behavior, new shape): split the
-lexer/parser/codegen trio into real, separately-compiled modules (a
-lexer module, an AST/node module, a parser module, a codegen module, and
-thin per-phase driver files), and replace the index-arena AST workaround
-with a real pointer-linked struct tree — the workaround this session's
-own design notes call out repeatedly as exactly that, a workaround
-forced by v0 having no pointer-linked-tree story, not "Stage 1 form" in
-any real sense. Verification is a full re-run of every fixture the proof
-of concept already passed (Hoare's `cases`/`codegen_cases`/
-`checker_cases`/`blackbox_cases`, plus this session's own multi-function/
-operator correctness suite, plus whatever `v1.0.1`–`v1.0.5` each added
-their own fixtures for), expecting identical, correct results — the
-rewrite is not allowed to also be where new bugs sneak in.
+### What `v1.0.6` adds
+
+- **Namespaces, `use`, and `@autoload`** (`postulate_v1_language_
+  reference.md` §6.2/§6.2a/§6.2b) — full replacement for the retired
+  `#include`. Dependency resolution only (§6.2c's caching is explicitly
+  **not** attempted here — every build recompiles everything, always;
+  that's `v1.1.1`). Path resolution for the default 1:1 mapping and
+  `@autoload` patterns is relative to the compiler process's **current
+  working directory** (`sys_openat(AT_FDCWD, ...)`, exactly the
+  mechanism `#include` already used) — no command-line argument support
+  is added for this; the entry (`\Main`) file's own text still arrives
+  on stdin exactly as today, and everything it `use`s is resolved from
+  there. Whether Edsger ever needs real `argv`/`argc` input of its own
+  is left for whenever `main(argv, argc)` (`v1.1.5`) actually gets
+  built into what Edsger itself can express — not decided now.
+- **`char`, its literals and escapes, and `as` explicit conversion**
+  (reference §1.5/§2.3/§3.7a) — pulled forward from the old `v1.0.8`.
+- **Pointer arithmetic, `*void`, `uintptr`, cross-type pointer
+  comparison, `sizeof`/`lengthof`** (reference §2.5–§2.7a) — pulled
+  forward from the old `v1.0.10`.
+- **The architecture rewrite itself**: the lexer/parser/codegen trio
+  becomes real, separately-compiled modules — a lexer module, an AST
+  module, a parser module, a **semantic analyzer / type checker
+  module** (new — the proof of concept folded checking into codegen;
+  Edsger does not), a codegen module, and thin per-phase driver
+  files — and the index-arena AST workaround is replaced by a real,
+  pointer-linked struct tree (`ASTNode` with `first_child`/
+  `next_sibling` generic child-linking plus dedicated `left`/`right`/
+  `extra` slots for common fixed-arity shapes, `Token` embedded by
+  value, per the `Edsger-spec.md` sketch this design was worked out
+  from). The workaround wasn't a permanent property of the language
+  Edsger's own source is written in — v0 already supports
+  self-referential struct pointers natively (`postulate_v0_language_
+  reference.md` §2.6's own `struct Node { next : *Node; }` example);
+  what actually blocked it before was reaching for heap allocation
+  (`sys_mmap` returns `*uint8`, and v0 has no cast to reinterpret it,
+  §2.8) as the way to get individually-allocated node pointers. A large,
+  fixed-capacity local array of `ASTNode` plus `&pool[i]` (address-of an
+  array element, already an ordinary v0 lvalue operation) produces real,
+  individually-addressable `*ASTNode` values with no cast and no heap
+  involved at all — the same bump-allocator-over-a-big-array shape the
+  proof of concept's parallel arrays already used, just now yielding
+  actual pointers instead of indices. **Two concrete adjustments** from
+  the `Edsger-spec.md` sketch, since it was drafted against v1 syntax,
+  not v0, and Edsger's own source can only use what v0 (plus this
+  step's own additions) actually provides: `Token.lexeme` is `*uint8`,
+  not `*char` (`char` is new *to the language Edsger compiles*, but
+  isn't needed for Edsger's *own* source to represent raw source
+  bytes — the proof of concept never used it either); and no field
+  needs a float type yet (`ASTExpr`/`Symbol`-style float-literal storage
+  waits for `v1.1.4`, since Edsger's own source has no float type to
+  store one in before then).
+
+### What `v1.0.6` deliberately still leaves out
+
+**Statement sugar** (`elseif`/`break`/`continue`/compound assignment/
+`++`/`--`), **floating point**, and **`main(argv, argc)`** were each
+considered for pulling forward alongside the three feature areas above,
+for the same "make the intermediate compiler comfortable to write in"
+reason — and each was deliberately left where it already was:
+statement sugar is real, separable work with no dependency relationship
+to anything else in this step, floats have no use inside a compiler
+that never computes with them, and `@autoload`'s own file resolution
+(above) already removes the practical need for real command-line
+arguments this step might otherwise have created. Pulling all three
+forward "since we're already doing a big batch" would have made an
+already-large step larger for no load-bearing reason.
+
+### Module-by-module construction and verification
+
+This is the methodology change: instead of one small, fully
+end-to-end-verified increment per feature, `v1.0.6`'s entire feature
+batch is built **one whole module at a time**, each covering every
+feature this step adds before the next module starts:
+
+1. **Lexer.** Extended for every new token this step needs (`namespace`,
+   `use`, `@autoload`, `verified`/`unverified`, `\`, `@`, `char`
+   literals and escape sequences, `as`, the pointer-arithmetic-related
+   operators already in the grammar). Verified by dumping the token
+   stream for a battery of test files that between them exercise every
+   new token shape, checked **by hand** before moving on — not run,
+   since a token stream isn't a program.
+2. **Parser.** Extended grammar for `namespace_decl`/`use_decl`/
+   `autoload_decl`, `char` literals, `as`-casts, and pointer-arithmetic
+   expressions, built directly against the new pointer-linked `ASTNode`
+   representation rather than the old arena. Verified by dumping the
+   resulting tree (walking `first_child`/`next_sibling` and the
+   dedicated slots) for the same test files, checked by hand.
+3. **Semantic analyzer / type checker.** The new, previously-nonexistent
+   module: builds the symbol table, resolves every `use`/`@autoload`
+   reference to a concrete file and, transitively, a concrete
+   declaration, and decorates the AST (inferred types, symbol
+   references, constant-ness) — including the type rules `char`/`as`/
+   pointer arithmetic add. Verified by dumping the decorated tree/symbol
+   table, checked by hand.
+4. **Codegen.** Emits LLVM IR from the decorated tree, reusing and
+   extending `v1.0.2`/`v1.0.3`'s existing emission logic. This is the
+   one module still verified the original way: assembled with `llc`,
+   linked with `ld`, and actually **run**, against real fixtures with
+   checked exit codes — the end-to-end discipline every step before
+   this one already used, now applied once, at the end of the whole
+   batch, rather than once per feature.
+
+Each of the first three checkpoints is a genuine gate — the user
+reviews that module's own output by hand before the next module is
+started — not a formality. This trades "every single feature is
+independently, fully proven correct before the next begins" (the old
+discipline) for "every module is independently, fully built and
+manually checked for the whole batch before the next module begins" —
+a different, not weaker, decomposition of the same verification goal,
+chosen because it matches how the new architecture (§3's own module
+split) actually separates concerns, and because rebuilding all four
+modules from scratch for each of ~six features one at a time would
+mean touching the same four files six times over for no benefit once
+they're being written fresh anyway.
+
+Full regression, at the end: every fixture the proof of concept already
+passed (Hoare's `cases`/`codegen_cases`/`checker_cases`/`blackbox_cases`,
+plus `v1.0.2`/`v1.0.3`'s own suites), expecting identical, correct
+results — the rewrite is not allowed to also be where old behavior
+quietly breaks.
 
 From `v1.0.6` onward, the compiler is called **Edsger**. Everything
-before it (`v1.0.1`–`v1.0.5`, and the original, unversioned proof of
-concept) stays nameless — scaffolding that did its job.
+before it (`v1.0.1`–`v1.0.5`, retired or not, and the original,
+unversioned proof of concept) stays nameless — scaffolding that did
+its job.
 
 ## 4. Full step list
 
 | Version | Adds | Why here |
 |---|---|---|
-| `v1.0.1` | `#include` (§6.2): relative-path resolution, recursive splice before lexing, include-once, cycle detection. Detailed design: [`postulate_stage1_v1_0_1_include_design.md`](postulate_stage1_v1_0_1_include_design.md). | Cheapest possible increment, zero dependency on anything else — see §1. |
-| `v1.0.2` | Codegen backend switch: emit LLVM IR instead of x86 NASM text; `llc` replaces `nasm` for producing object code. Same scalar-only feature set as today — a backend swap, not a feature addition. | Foundation for the next three steps — see §2. Verified against the exact fixture suite the NASM backend already passes, proving the swap changes nothing observable yet. |
-| `v1.0.3` | **Done.** Composite (struct/array) parameters and return values in Stage 1's own codegen — v0 parity, not a v1 feature. Landed in internally-ordered sub-passes, all now complete: width unification; structs — locals, field read/write, literals, struct-to-struct copy; arrays — locals, index read/write, literals (including array-of-struct), broadcast-init (scalar *or* struct source, at decl-init *and* assignment — extended past the original scalar-only/decl-init-only scope after checking Hoare's own `check_array_broadcast_compatible`), array-to-array copy; pointers with a scalar pointee — `&`/`*`, `null`, pointer-typed locals/parameters/return values, `==`/`!=` comparison (scoped to `*int32`-style pointees first, split out from the original combined "pointers and the calling convention" plan the same way structs/arrays were split earlier); the calling convention itself — struct/array-typed parameters and return values, by value, full independent-copy semantics (`type_ok`'s scalar-only restriction removed for parameters/return values, reusing `type_ok_local`'s existing struct/array/pointer classification instead of a separate check); and finally composite pointees — `*Point`, `*int32[3]`, `*(int32[3])`, including self-referential struct fields (`next: *Node`, the linked-list shape), via `type_ok_local`'s pointer branch classifying the pointee recursively instead of requiring it scalar. `**T` (pointer-to-pointer) remains the one deliberately out-of-scope case. Design: [`postulate_stage1_v1_0_3_composites_design.md`](postulate_stage1_v1_0_3_composites_design.md). | Implemented directly against LLVM IR's native aggregate types and per-target ABI lowering (§2) — done once, not once in NASM and then redone for LLVM. |
-| `v1.0.4` | True separate compilation: each translation unit independently lexed/parsed/checked/compiled to its own LLVM IR module and object file, cached, linked together. Design: [`postulate_stage1_v1_0_4_separate_compilation_design.md`](postulate_stage1_v1_0_4_separate_compilation_design.md). | Reference §11 item 2, brought forward — see §2 for why this is now mostly LLVM's linker's job rather than a from-scratch design. |
-| `v1.0.5` | Optimization turned on: each unit's LLVM IR routed through `opt` (an existing, off-the-shelf tool) at a chosen level before `llc`. | The other half of §2 — no bespoke optimizer needed; verified by re-running the full fixture suite and confirming behavior is unchanged under optimization. |
-| **`v1.0.6`** | **Rewrite. Compiler renamed Edsger.** Same language surface as `v1.0.5` (v0 + `#include`); source reorganized into real, separately-compiled modules; AST rebuilt as a real struct/pointer tree. No new syntax. | The point marked in §3 — modularity, a real backend, separate compilation, and optimization all already exist, so the rewrite only has to *use* them, not anticipate them. |
-| `v1.0.7` | Statement sugar: `elseif` (§4.3), `break`/`continue` (§4.6), compound assignment `:+ :- :* :/` (§4.2), `++`/`--` (§4.2a). | Pure desugaring, no new types — a low-risk first feature batch on the new modular codebase, exercising the rewrite before anything riskier lands on top of it. |
-| `v1.0.8` | `as` explicit cast (§3.7a); `char` type, literals, escapes (§2.3). | `char` is unusable without `as` (its own arithmetic-by-casting example, §2.3); every later float/pointer step also needs `as`, so it lands once, here, not repeatedly. |
-| `v1.0.9` | Floating point: `float32/64`, `ufloat32/64`, literals, `+ - * /`, comparisons incl. NaN, `**` (exponent), `_/` (root, desugars to `**`) (§2.4, §3.2). | Self-contained type family; reuses `as` from `v1.0.8` for every float conversion row in §3.7a's table. |
-| `v1.0.10` | Pointer arithmetic, `*void`, `uintptr`, cross-type pointer comparison, `sizeof`/`lengthof` (§2.5–§2.7a). | Extends v0's already-working raw pointers; independent of floats/`char`, ordered after them only because it's needed for `v1.0.11` next. |
-| `v1.0.11` | `main(argv, argc)` two-parameter form; atomic-only `main` return type, compiler-enforced (§6.3). | Needs `**char`/pointer-array understanding from `v1.0.10`; small and mostly checker-level, a good breather after `v1.0.10`'s codegen work. |
-| `v1.0.12` | `ref` parameters (§5.3a). | Independent of the above; a calling-convention addition, not a type addition. |
-| `v1.0.13` | Operator overloading (§5.4). | Needs nothing new beyond ordinary function-checking machinery; deliberately last of the "small features," since it's the least load-bearing for anything else in this list. |
-| `v1.0.14` | Verification contracts, part 1: grammar, all seven contextual keywords (`requires`/`ensures`/`invariant`/`decreases`/`old`/`result`/`last`), full semantic validation (§7.1–§7.2, §7.6–§7.6b, §8.1). Zero runtime cost — a normally-compiled program emits no contract code at all. | The bulk of the contract system's genuine complexity (contextual-keyword parsing, purity checking, the no-self-reference rule) isolated from codegen risk; everything from `v1.0.7`–`v1.0.13` needs to exist first since contract expressions can mention any of it. |
-| `v1.0.15` | Verification contracts, part 2: the opt-in checked-build codegen mode (§7.3–§7.5) — runtime assertions at every specified checkpoint, halt-with-diagnostic on failure. | Split from `v1.0.14` deliberately: parsing/checking a contract correctly and *emitting code* for one are separably testable, and this is the riskier of the two. |
-| `v1.0.16` | Bounds-checking diagnostic build (§2.7b) — array indexing checked against `lengthof` in an opt-in build. | Same opt-in-diagnostic-build mechanism `v1.0.15` just built; reuses it rather than inventing a second one. |
-| `v1.0.17` | Self-hosting closure: Edsger compiles itself (Hoare → Edsger₁ from source; Edsger₁ → Edsger₂ from the same source; Edsger₂'s output agrees with Edsger₁'s). | The actual bootstrap goal (`Stage1/README.md`'s opening line) — only meaningful once the full v1.0 surface exists, since Edsger's own source will by then use most of it. |
+| `v1.0.1` | **Retired.** Was `#include` (relative-path resolution, recursive splice, include-once, cycle detection). Superseded in full by namespaces/`use`/`@autoload` (§6.2), built as part of `v1.0.6`. Historical design doc: [`postulate_stage1_v1_0_1_include_design.md`](postulate_stage1_v1_0_1_include_design.md) (describes a mechanism no longer part of the language). | See "Revision note" above. |
+| `v1.0.2` | **Done.** Codegen backend switch: emit LLVM IR instead of x86 NASM text; `llc` replaces `nasm`. Same scalar-only feature set as before — a backend swap, not a feature addition. | Foundation for composites, optimization, and per-module compilation alike — §2. |
+| `v1.0.3` | **Done.** Composite (struct/array) parameters and return values in Stage 1's own codegen — v0 parity. Structs, arrays, broadcast-init, pointers (scalar and composite pointees, including self-referential struct fields), and the by-value calling convention. Design: [`postulate_stage1_v1_0_3_composites_design.md`](postulate_stage1_v1_0_3_composites_design.md). | Implemented directly against LLVM IR's native aggregate types — §2. |
+| `v1.0.4` | **Retired.** Was true separate compilation, designed against `#include`'s textual-splice model. Never implemented. What it was trying to achieve is now the namespace system's own design property (§6.2c), not a separate mechanism to build. Superseded design doc: [`postulate_stage1_v1_0_4_separate_compilation_design.md`](postulate_stage1_v1_0_4_separate_compilation_design.md) (describes a mechanism the current language design doesn't need). | See "Revision note" above. |
+| **`v1.0.5`** *(placeholder — see `v1.1.2`)* | *(retired slot — optimization moved to `v1.1.2`; kept blank rather than reused, so no future step is ever ambiguously "the same number as something else.")* | — |
+| **`v1.0.6`** | **The Edsger rewrite. Generation `0` ends here.** Namespaces/`use`/`@autoload` (dependency resolution only, no caching); `char` + `as`; pointer arithmetic/`*void`/`uintptr`/`sizeof`/`lengthof`; full modular architecture (lexer/AST/parser/semantic-analyzer-and-type-checker/codegen as real, separate modules; pointer-linked `ASTNode` tree replacing the index arena). Built and verified **module by module**, each module covering the whole feature batch, each checked by hand before the next starts (§3). Design: [`postulate_stage1_v1_0_6_edsger_design.md`](postulate_stage1_v1_0_6_edsger_design.md). | §1/§3 — the module system is the architecture's own foundation, not an add-on to it; `char`/`as`/pointer arithmetic front-loaded so Edsger's own later stages are comfortable to write. |
+| **`v1.1.1`** *(generation `1` begins — Edsger proper)* | Incremental compilation: skip recompiling a module whose own source is unchanged **and** whose `use`d dependencies' own *interfaces* — not merely their compiled bodies — are unchanged since its last successful compile (§6.2c's caching half, deliberately deferred out of `v1.0.6`). Cache-key scope is deliberately narrow: a module's own source hash, plus, per direct `use`d dependency, that dependency's *interface* hash as of this module's last compile — never a dependency's full body hash, and never anything from further down the transitive chain. This is what keeps a body-only edit in one module from cascading into recompiling everything that (even indirectly) depends on it. | Genuinely separable from `v1.0.6`'s dependency-*resolution* work; not worth the risk of getting both right at once. |
+| `v1.1.2` | Optimization turned on: each module's LLVM IR routed through `opt` at a chosen level before `llc`. | Moved here from the old `v1.0.5` — rides on the same LLVM IR switch (§2), but no longer competes with the rewrite for priority; verified by re-running the full fixture suite under optimization. |
+| `v1.1.3` | Statement sugar: `elseif` (§4.3), `break`/`continue` (§4.6), compound assignment `:+ :- :* :/` (§4.2), `++`/`--` (§4.2a). | Pure desugaring, no new types — deliberately left out of `v1.0.6` (its own note) since it has no dependency relationship to that batch. |
+| `v1.1.4` | Floating point: `float32/64`, `ufloat32/64`, literals, `+ - * /`, comparisons incl. NaN, `**` (exponent), `_/` (root, desugars to `**`) (§2.4, §3.2). | Self-contained type family; reuses `as` from `v1.0.6`. |
+| `v1.1.5` | `main(argv, argc)` two-parameter form; atomic-only `main` return type, compiler-enforced (§6.3). | Needs `**char`/pointer-array understanding from `v1.0.6`'s pointer arithmetic; deliberately not pulled into `v1.0.6` itself (its own note) since `@autoload` already covers Edsger's own near-term file-resolution needs. |
+| `v1.1.6` | `ref` parameters (§5.3a). | Independent of the above; a calling-convention addition, not a type addition. |
+| `v1.1.7` | Operator overloading (§5.4). | Needs nothing new beyond ordinary function-checking machinery; deliberately last of the "small features," least load-bearing for anything else in this list. |
+| `v1.1.8` | Verification contracts, part 1: grammar, all seven contextual keywords (`requires`/`ensures`/`invariant`/`decreases`/`old`/`result`/`last`), full semantic validation (§7.1–§7.2, §7.6–§7.6b, §8.1). Zero runtime cost — a normally-compiled program emits no contract code at all. | The bulk of the contract system's complexity (contextual-keyword parsing, purity checking, the no-self-reference rule) isolated from codegen risk; everything from `v1.1.3`–`v1.1.7` needs to exist first since contract expressions can mention any of it. |
+| `v1.1.9` | Verification contracts, part 2: the opt-in checked-build codegen mode (§7.3–§7.5) — runtime assertions at every specified checkpoint, halt-with-diagnostic on failure. | Split from `v1.1.8` deliberately: parsing/checking a contract correctly and *emitting code* for one are separably testable, and this is the riskier of the two. |
+| `v1.1.10` | Static verification: the Why3/WhyML translation path and `postulate verify` tool (§7.8) — modular, axiom-per-`use`d-contract, `verified`-prefix-aware, incremental per `v1.1.1`'s own cache. Also where the cache's own remaining open questions (`.proof` validity relative to `unverified`-trusted axioms; a compiler-generation/build-identity component in the cache key, so an Edsger upgrade can't silently serve stale `.pto`/`.proof` entries) get resolved. | Needs `v1.1.8`'s contract grammar/semantics and `v1.1.1`'s incremental-compilation machinery (reused, not reinvented, for verification caching); entirely optional and separate from the default build (§7.5/§7.8), so it can land after everything the default pipeline needs. |
+| `v1.1.11` | Bounds-checking diagnostic build (§2.7b) — array indexing checked against `lengthof` in an opt-in build. | Same opt-in-diagnostic-build mechanism `v1.1.9` already built; reuses it rather than inventing a second one. |
+| `v1.1.12` | Self-hosting closure: Edsger compiles itself (Hoare → Edsger₁ from source; Edsger₁ → Edsger₂ from the same source; Edsger₂'s output agrees with Edsger₁'s). | The actual bootstrap goal (`Stage1/README.md`'s opening line) — only meaningful once the full v1.0 surface exists, since Edsger's own source will by then use most of it. |
 
 ### Tracked checkpoint: struct-field layout, before `v1.0.6`
 
@@ -236,27 +358,31 @@ ever change (e.g. toward natural/ABI alignment, for raw-memory-access
 performance or a future FFI's sake) is **explicitly not decided now** —
 deliberately deferred, not silently carried forward as permanent. This
 is a placeholder to make sure it gets a real look before `v1.0.6`
-(the Edsger rewrite) closes out the still-single-file proof-of-concept
-era, rather than being forgotten between now and then.
+closes out the still-single-file proof-of-concept era, rather than
+being forgotten between now and then.
 
 ## 5. What's deliberately not in this plan
 
-Everything reference §11 lists as **explicitly deferred beyond v1**
-stays deferred here too, for the same reasons given there, **except**
-true separate compilation (§11 item 2), which §2/§4 above bring forward
-as `v1.0.4`. Still out of scope for this plan: namespaces, static
-(SMT-backed) verification, the `string`/console-I/O/threading standard
-libraries, struct reflection, a general FFI, further preprocessor
-directives, and any language-level data-race protection. None of them
-are scheduled as a `v1.0.n` step; the first of them (namespaces) is
-already earmarked as "v1.1" by the reference itself — a new document and
-a new plan, once this one is finished, not a step folded into it.
+Everything the reference's §11 lists as **deferred beyond v1** stays
+deferred here too: static verification's whole-project completeness
+guarantee beyond the per-module, opt-out-able coverage `v1.1.10`
+provides; a `string`/console-I/O/threading standard library; struct
+field reflection; a general FFI; polymorphism/generics; and any
+language-level data-race protection. None of them are scheduled as a
+step in this plan. Namespaces are **not** on this list anymore — they
+are core v1 (§6.2), built as part of `v1.0.6` above, not a future
+language generation.
 
 ## Beyond this plan
 
-Once `v1.0.17` closes the self-hosting loop, Hoare (Stage 0) becomes
+Once `v1.1.12` closes the self-hosting loop, Hoare (Stage 0) becomes
 historical — every future change targets Edsger's own source, compiled
-by itself. The next language generation (namespaces and whatever else
-accumulates toward it, §11 item 1) becomes `v1.1`, with its own
-reference document and its own version of this plan (`v1.1.n`) once
-that design work happens — not a continuation of the numbers above.
+by itself, and further Edsger work continues as `v1.2.n`, `v1.3.n`, and
+so on — new compiler generations, still targeting v1, numbered exactly
+as this plan's own "Versioning" section describes. Whatever eventually
+accumulates toward a genuinely new *language* generation (reference
+§11's remaining deferred items) becomes `v2`, with its own reference
+document and its own version of this plan (`v2.0.n`) once that design
+work happens — not a continuation of the numbers above, and not `v1.1`
+(already spoken for by Edsger's own first post-rewrite generation,
+above).

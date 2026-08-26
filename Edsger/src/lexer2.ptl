@@ -1,0 +1,274 @@
+extern function sys_read(fd: int64, buf: *uint8, count: uint64) : int64;
+extern function sys_write(fd: int64, buf: *uint8, count: uint64) : int64;
+extern function sys_exit(code: int64) : void;
+extern function sys_mmap(addr: uint64, length: uint64, prot: int64, flags: int64, fd: int64, offset: int64) : *uint8;
+
+struct SourceReader {
+  buffer : *(uint8[65536]); // 64KiB
+  length : uint64;
+  cursor : uint64;
+}
+
+struct Token {
+    type    : uint32;
+    lexeme  : *uint8;
+    length  : uint32;
+    pos     : LineCol;
+}
+
+struct LineCol {
+  line : uint64;
+  col : uint64;
+}
+
+struct ASCIINumber {
+  digits : uint8[20]; // max 20 digits for int64
+  length : uint64;
+}
+
+// ---------------------------------------------------------------------
+// Byte classification
+// ---------------------------------------------------------------------
+
+function is_digit(b: uint8) : bool {
+  return b >= 48 && b <= 57; // 0-9
+}
+
+function is_hex_digit(b: uint8) : bool {
+  return (b >= 48 && b <= 57) ||        // 0-9
+         (b >= 97 && b <= 102) ||       // a-f
+         (b >= 65 && b <= 70);          // A-F
+}
+
+function is_alpha(b: uint8) : bool {
+  return (b >= 97 && b <= 122) ||   // a-z
+         (b >= 65 && b <= 90);      // A-Z
+}
+
+function is_underline(b: uint8) : bool {
+  return b == 95; // _
+}
+
+function is_alnum(b: uint8) : bool {
+  return is_alpha(b) || is_digit(b);
+}
+
+function is_ws(b: uint8) : bool {
+  return b == 32 || b == 9 || b == 13 || b == 10; // space, tab, CR, LF
+}
+
+// ---------------------------------------------------------------------
+// SourceReader operations
+// ---------------------------------------------------------------------
+function reader_is_eof(r : *SourceReader) : bool {
+  return (*r).cursor >= (*r).length;
+}
+
+function reader_peek(r : *SourceReader) : uint8 {
+  if (reader_is_eof(r)) {
+    return 0;   // NULL
+  }
+  return (*(*r).buffer)[(*r).cursor];
+}
+
+function reader_advance(r : *SourceReader) : void {
+  if (reader_is_eof(r) == false) {
+    (*r).cursor := (*r).cursor + 1;
+  }
+}
+
+// ---------------------------------------------------------------------
+// Match a specific byte and advance the cursor if it matches
+// ---------------------------------------------------------------------
+function reader_match(r : *SourceReader, expected : uint8) : bool {
+  if (reader_peek(r) == expected) {
+    reader_advance(r);
+    return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------
+// Print
+// ---------------------------------------------------------------------
+function print_string(s: *uint8, length: uint64, newline: bool) : void {
+  const lf : uint8[1] := {10}; // LF
+  sys_write(1, s, length);
+  if (newline) {
+    sys_write(1, &lf[0], 1);
+  }
+}
+
+// ---------------------------------------------------------------------
+// Consume whitespace characters (space, tab, CR, LF) until
+// a non-whitespace character is found
+// ---------------------------------------------------------------------
+function consume_whitespace(r : *SourceReader) : void {
+  while (is_ws(reader_peek(r))) {
+    reader_advance(r);
+  }
+}
+
+function consume_line_comment(r : *SourceReader) : void {
+  while (!reader_is_eof(r) && reader_peek(r) != 10) { // LF
+    reader_advance(r);
+  }
+}
+
+function consume_block_comment(r : *SourceReader) : void {
+  while (!reader_is_eof(r)) {
+    if (reader_match(r, 42)) { // '*'
+      if (reader_match(r, 47)) { // '/'
+        return;
+      }
+    } else {
+      reader_advance(r);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------
+// Converters
+// ---------------------------------------------------------------------
+function int64_to_uint64(n: int64) : uint64 {
+  mut result : uint64 := 0;
+  mut steps : int64 := n;
+  
+  while (steps > 0) {
+    result := result + 1;
+    steps := steps - 1;
+  }
+  return result;
+}
+
+function uint64_to_int64(n: uint64) : int64 {
+  mut result : int64 := 0;
+  mut steps : uint64 := n;
+  
+  while (steps > 0) {
+    result := result + 1;
+    steps := steps - 1;
+  }
+  return result;
+}
+
+function int64_to_ascii(n: int64) : ASCIINumber {
+  mut buf : uint8[20];
+  mut i   : uint64 := 20;
+  mut is_negative : bool := false;
+  mut value       : int64 := 0;
+  mut j : uint64 := 0;
+  mut digit : int64;
+  mut retVal : ASCIINumber;
+
+  // 1. Speciális eset: ha a szám 0
+  if (n == 0) {
+    retVal.digits[0] := 48; // '0'
+    retVal.length := 1;
+    return retVal;
+  }
+
+  // 2. Előjel kezelése (negatív számok)
+  if (n < 0) {
+    is_negative := true;
+    value := -n;
+  } else {
+    value := n;
+  }
+
+  // 3. Számjegyek kinyerése hátulról előre
+  i := 20;
+  while (value > 0) {
+    i := i - 1;
+    digit := (value % 10);
+    if (digit == 0) {
+      buf[i] := 48; // '0'
+    } else { if (digit == 1) {
+      buf[i] := 49; // '1'
+    } else { if (digit == 2) {
+      buf[i] := 50; // '2'
+    } else { if (digit == 3) {
+      buf[i] := 51; // '3'
+    } else { if (digit == 4) {
+      buf[i] := 52; // '4'
+    } else { if (digit == 5) {
+      buf[i] := 53; // '5'
+    } else { if (digit == 6) {
+      buf[i] := 54; // '6'
+    } else { if (digit == 7) {
+      buf[i] := 55; // '7'
+    } else { if (digit == 8) {
+      buf[i] := 56; // '8'
+    } else { if (digit == 9) {
+      buf[i] := 57; // '9'
+    }}}}}}}}}}
+    value := value / 10;
+  }
+
+  // 5. Mínusz jel kitétele, ha negatív volt
+  if (is_negative) {
+    i := i - 1;
+    buf[i] := 45; // '-'
+  }
+
+  // 6. Számjegyek előre hozása
+  j := 0;
+  while (i < 20) {
+    buf[j] := buf[i];
+    j := j + 1;
+    i := i + 1;
+  }
+
+  retVal.digits := buf;
+  retVal.length := j;
+  return retVal;
+}
+
+// ---------------------------------------------------------------------
+// Main function
+// ---------------------------------------------------------------------
+function main() : int32 {
+  const buf_capacity : uint64 := 65536; // 64KiB
+  const hello_buff : uint8[13] := {72, 101, 108, 108, 111, 44, 32, 87, 111, 114, 108, 100, 33}; // "Hello, World!"
+
+  mut length_str : ASCIINumber;
+
+  // Linux sys_mmap params:
+  // addr=0, length=65536, prot=3 (PROT_READ | PROT_WRITE),
+  // flags=34 (MAP_PRIVATE | MAP_ANONYMOUS), fd=-1, offset=0
+  mut input_buffer   : uint8[65536];
+
+  // read stdin (fd = 0)
+  mut read_bytes     : int64  := sys_read(0, &input_buffer[0], buf_capacity);
+
+  mut stream_len     : uint64 := 0;
+  mut reader         : SourceReader;
+  mut char_buf       : uint8[1];
+
+  if (read_bytes > 0) {
+    stream_len := int64_to_uint64(read_bytes);
+  }
+
+  // init SourceReader
+  reader := SourceReader {
+    buffer := &input_buffer,
+    length := stream_len,
+    cursor := 0
+  };
+
+  // write "Hello, World!" to stdout (fd = 1)
+  print_string(&hello_buff[0], 13, true);
+
+  // write length of file to stdout
+  length_str := int64_to_ascii(uint64_to_int64(stream_len));
+  print_string(&length_str.digits[0], length_str.length, true);
+
+  // process buffer
+  while (reader_is_eof(&reader) == false) {
+    char_buf[0] := reader_peek(&reader);
+    print_string(&char_buf[0], 1, false);
+    reader_advance(&reader);
+  }
+
+  return 0;
+}

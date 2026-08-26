@@ -23,18 +23,19 @@ Postulate's two founding goals are unchanged from v0: **mathematically
 precise correctness proofs** (Hoare logic, in the relational-model
 tradition of Ákos Fóthi's *Introduction to Programming*) first, and
 **systems/kernel programming** (no garbage collector, no hidden runtime
-cost, explicit memory management) second. v1's biggest addition —
-verification contracts (§7) — is the language's first real step toward
-the first of those two goals; everything else in v1 is either a
-practical ergonomic gap v0 left open (pointer arithmetic, casts, early
-exit, a module mechanism) or a small, deliberately scoped extension
+cost, explicit memory management) second. v1's two biggest additions —
+verification contracts (§7, including the optional static path via Why3,
+§7.8) and the namespace/`use`/autoload module system (§6.2) — are the
+language's first real steps toward the first of those two goals and
+toward a real multi-file program structure, respectively; everything
+else in v1 is either a practical ergonomic gap v0 left open (pointer
+arithmetic, casts, early exit) or a small, deliberately scoped extension
 (`char`, floating point).
 
 Section 11 collects everything **explicitly deferred beyond v1** —
 features that were discussed and intentionally not included, most
-notably namespaces (planned for v1.1) and any form of *static*
-verification (SMT-backed or otherwise — v1's contracts are runtime-only,
-see §7.5).
+notably compile-time struct field reflection, polymorphism/generics,
+and a general foreign-function interface.
 
 ---
 
@@ -74,18 +75,20 @@ identifier ::= ("a".."z" | "A".."Z") ("a".."z" | "A".."Z" | "0".."9" | "_")*
 Unchanged from v0: must start with a letter, no hyphens.
 
 Identifiers for structs, functions, and `extern function`s all share
-**one namespace within whatever a single file can see** — you cannot
-declare a `struct Point` and a `function Point(...)` such that any one
-file has both in scope at once, whether declared directly in that file
-or brought into view by `#include` (§6.2 defines exactly what a file
-can see once `#include` exists, and why this is checked per file rather
-than across the whole program). Local names (parameters and `decl`s)
-share one **per-function** namespace with each other, but are entirely
-separate from this namespace.
+**one flat namespace per `namespace` declaration** (§6.2) — you cannot
+declare a `struct Point` and a `function Point(...)` in the same
+namespace, whether or not they sit in the same physical file (§6.2's
+"one namespace may span several files"). Two *different* namespaces may
+freely reuse the same name for unrelated things — `\Core\Math\Point`
+and `\Graphics\Point` coexist without conflict, distinguished by their
+fully-qualified names, and a file that needs both simply `use`s each
+under a distinct local name (§6.2a's `as`). Local names (parameters and
+`decl`s) share one **per-function** namespace with each other, but are
+entirely separate from this namespace.
 
-**Namespaces** (qualified names, `ns.symbol`-style, to properly scope
-names pulled in via `#include`) are explicitly **not** part of v1 — see
-§6.2 and §11.
+**There is no global namespace.** Every declaration lives in exactly
+one, explicitly named `namespace` (§6.2) — unlike v0's single-file
+model, where "the namespace" was simply whatever one file contained.
 
 ### 1.4 Keywords
 
@@ -93,6 +96,7 @@ names pulled in via `#include`) are explicitly **not** part of v1 — see
 
 ```
 function struct extern mut const pure ref operator
+namespace use verified unverified
 if else elseif while return break continue
 as sizeof lengthof
 true false null
@@ -100,9 +104,14 @@ int8 int16 int int32 int64 uint8 uint16 uint uint32 uint64 uintptr
 bool void char float32 float64 float ufloat32 ufloat64 ufloat
 ```
 
-(Additions over v0: `pure`, `ref`, `operator`, `elseif`, `break`,
-`continue`, `as`, `sizeof`, `lengthof`, `uintptr`, `char`, `float32`,
-`float64`, `float`, `ufloat32`, `ufloat64`, `ufloat`.)
+(Additions over v0: `pure`, `ref`, `operator`, `namespace`, `use`,
+`verified`, `unverified`, `elseif`, `break`, `continue`, `as`, `sizeof`,
+`lengthof`, `uintptr`, `char`, `float32`, `float64`, `float`,
+`ufloat32`, `ufloat64`, `ufloat`. `@autoload` (§6.2b) is not itself a
+reserved word — `@` isn't a valid identifier-start character (§1.3) at
+all, so the token `@autoload` can never be confused with an identifier
+in the first place; `autoload` alone remains a completely ordinary,
+freely usable name.)
 
 **Contextual keywords** — reserved *only* in the one specific grammar
 position each is meaningful in; everywhere else, ordinary identifiers.
@@ -165,6 +174,47 @@ escape_seq   ::= "\" ("n" | "t" | "r" | "0" | "\" | "'")
 literals, a character literal has a **fixed** type: `char`, always —
 it is not an untyped constant (§3.7 explains why).
 
+**String literals** — new in v1, and deliberately narrow: the *only*
+place one may appear is a `pattern_string`/`path_string` operand of
+`@autoload` (§6.2b) — there is still no general string type (§2.9), and
+this is not one either, just a lexical form those two operands need.
+**Two forms are named, only one of which is actually used by anything
+in v1**:
+
+```ebnf
+pure_string_literal ::= '"' raw_char* '"'
+string_literal       ::= '"' (char_body | escape_seq)* '"'
+raw_char             ::= any byte except '"' and a raw newline
+```
+
+`pattern_string`/`path_string` (§6.2b/§9) are `pure_string_literal`s —
+**no escape processing of any kind**. A filesystem path or an
+`@autoload` pattern has no legitimate use for a tab, a newline, or any
+other character an escape sequence exists to spell — so there is
+nothing to gain, and real everyday friction to cause, by making `\`
+special there. A literal `\` (needed for every namespace-path separator
+a pattern/path string contains) is written exactly as typed, singly —
+`"\Vendor\Math\"`, not `"\\Vendor\\Math\\"` — because `raw_char` simply
+copies every byte through unchanged; there is no escape mechanism to
+collide with.
+
+`string_literal` — the one *with* `char_literal`'s own escape support
+(`char_body | escape_seq`, §1.5, repeated instead of taken exactly
+once) — is defined here **only so the name and shape exist**, ready for
+whenever a real, general string type is designed (§2.9, §11); nothing
+in v1 actually accepts one anywhere yet. It is a genuinely separate
+production from `pure_string_literal`, not a special case of it — a
+raw, unescaped `\` (legal in `pure_string_literal`, via `raw_char`) is
+*not* legal `string_literal` content on its own, only as the start of
+one of `escape_seq`'s exact six forms — so the two are named next to
+each other for contrast and shared vocabulary, not because one
+subsumes the other. Which of the two governs a given quoted span is
+entirely a property of the **grammar position** it appears in, checked
+by whatever eventually parses that position — never something the
+lexer itself decides token-by-token, since recognizing "a quoted span"
+at all doesn't require knowing yet which of the two rules will end up
+applying to it.
+
 **Boolean literals**: `true`, `false`. **The null literal**: `null` —
 unchanged from v0.
 
@@ -176,7 +226,7 @@ takes its place.
 ```
 :=  ==  !=  <  >  <=  >=  &&  ||  !  &  |  ^  <<  >>  + - * /  %  **  _/  as
 ++  --  :+  :-  :*  :/
-(  )  {  }  [  ]  :  ;  ,  .  #
+(  )  {  }  [  ]  :  ;  ,  .  \  @
 ```
 
 New over v0: `**` (exponentiation, §3.2), `_/` (root, §3.2 — an ASCII
@@ -185,9 +235,13 @@ digraph; an earlier draft tried `√` and was reverted, see §3.2), `as`
 statement-only, never usable as part of a larger expression), `:+`/
 `:-`/`:*`/`:/` (compound assignment, §4.2 — `:*` in particular looks
 like it collides with a pointer type's leading `*`, resolved by
-context-sensitive lexing, see §4.2's own note), `#` (only meaningful as
-the start of an `#include` directive, §6.2 — not a general-purpose
-token).
+context-sensitive lexing, see §4.2's own note), `\` (the namespace/`use`
+path separator, §6.2/§6.2a — distinct from the escape-sequence backslash
+inside a `char` literal, §1.5, which never appears outside quotes), `@`
+(only meaningful as the start of an `@autoload` directive, §6.2b — not a
+general-purpose token). An earlier v1 draft reserved `#` for a
+now-abandoned `#include` preprocessor directive; nothing in v1 uses `#`
+at all.
 
 ---
 
@@ -1061,12 +1115,13 @@ Unchanged from v0 (§5.1 there).
 
 ### 5.2 `function` — unified signature grammar
 
-**Changed from v0**: every function-shaped declaration now uses the
-`function` keyword uniformly, whether or not it has a body:
+**Changed from v0**: every function-shaped declaration now carries a
+**mandatory** contract block (§7.1), and always has a body — there is
+no bodyless, forward-declared form:
 
 ```ebnf
 function_decl   ::= ("pure")? "function" identifier "(" params? ")" ":" return_type
-                     contract_block? (func_block | ";")
+                     contract_block func_block
 contract_block  ::= "[" contract_clause+ "]"
 extern_decl     ::= "extern" "function" identifier "(" params? ")" ":" return_type ";"
 contract_clause ::= requires_clause | ensures_clause | decreases_clause
@@ -1082,47 +1137,37 @@ mirroring a `param`'s own `identifier: type`, and a mandatory `;` on
 every clause, including the last one before the closing `]`) — see
 §7.1 for the clause grammar itself.
 
-`contract_block?` stays optional *at the grammar level* — a function
-with both a forward declaration and a definition needs the freedom to
-put its one contract block on only one of the two, below. Whether
-enough clauses exist *somewhere* for a given function is a semantic
-rule, checked once per function rather than once per production — see
-§7.1.
-
-Three shapes fall out of this one rule:
+**There is no forward-declared form, and no split between a signature
+and its definition — a function is written once, in one file, with its
+body and its one contract block together.** An earlier v1 draft allowed
+a bodyless `function_decl` (terminated by `;`, contract block optional
+at the grammar level) specifically so a signature could live in one
+`#include`d file and its definition in another; that entire mechanism
+was removed along with `#include` itself (§6.2) — the namespace/`use`
+system's whole point is that a symbol has exactly one home, resolved by
+its fully-qualified name (§6.2b), so there is no longer a second file
+for a split declaration to usefully live in, and no ordering problem
+for it to solve (recursion and forward reference within one file
+already work without one, below). `contract_block` is therefore
+**mandatory**, not `?`, at the grammar level too — matching §7.1's
+semantic requirement ("at least one `requires`, at least one `ensures`")
+directly, with no second location to check.
 
 ```postulate
-function add(a: int32, b: int32) : int32 [        // definition (has a body)
+function add(a: int32, b: int32) : int32 [
   requires: true;
   ensures: result == a + b;
 ] {
   return a + b;
 }
 
-function multiply(a: int32, b: int32) : int32 [   // forward declaration (no body) --
-  requires: true;                                   // clauses go here, NOT repeated
-  ensures: result == a * b;                         // on the eventual definition
-];
-
-pure function square(x: int32) : int32 [             // pure definition
+pure function square(x: int32) : int32 [
   requires: true;
   ensures: result >= 0;
 ] {
   return x * x;
 }
 ```
-
-A **forward declaration** (no body, terminated by `;` instead of a
-`func_block` — note the resulting `];` right after the closing bracket
-in `multiply` above: the `]` closes the contract block, the `;` is the
-`function_decl` production's own terminator, same as any other
-`func_block`-less declaration) may carry a contract block itself —
-useful once `#include` (§6.2) lets a signature live in one file and its
-definition in another. If a function has both a forward declaration and
-a definition, **the contract block is written on exactly one of the
-two** (whichever came first) — repeating it on the other, even
-identically, is a compile error, to avoid the two copies silently
-drifting apart.
 
 `extern function` keeps v0's shape (§5.2 there) — always a
 `;`-terminated signature, no body, no contract clauses (there is
@@ -1150,20 +1195,18 @@ type-erased memory:
 (`sys_read`/`sys_write` keep `*uint8` — raw bytes, not necessarily
 text; a future `char`-based I/O layer would cast at the boundary, §3.7a.)
 
-`sys_openat`/`sys_close` are also new — added by `v1.0.1`
-(docs/postulate_stage1_bootstrap_plan.md) specifically to unblock
-`#include` (§6.2): none of the syscalls above can open a file by path,
-only read one already-open descriptor (`sys_read`), which is fine for
-today's single stdin-fed compiler but not for a preprocessor that has
-to open an unbounded, recursively-discovered set of included files
-itself. `path` is written `*char` here to match the type this table
-will eventually use everywhere once `char` exists — until then, Stage
-1's own use of these two externs (still v0 code, no `char` yet) reads
-and writes paths as `*uint8`, exactly like `sys_read`/`sys_write`'s own
-`buf` parameter above. `openat`, not the older `open`, is deliberate:
-`dirfd` is always passed as `AT_FDCWD` (`-100`) since path resolution
-itself is done by the caller's own string logic, never left to the
-kernel — see the include design doc for the full rationale.
+`sys_openat`/`sys_close` are also new — added to unblock the
+namespace/autoload system (§6.2b): none of the syscalls above can open
+a file by path, only read one already-open descriptor (`sys_read`),
+which is fine for a single, stdin-fed compiler but not for one that has
+to open whatever file the autoloader resolves a `use`d name to, and
+every other file transitively reachable that way. `path` is written
+`*char` here to match the type this table will eventually use
+everywhere once `char` exists. `openat`, not the older `open`, is
+deliberate: `dirfd` is always passed as `AT_FDCWD` (`-100`) since path
+resolution itself is done by the caller's own string logic (the
+default-mapping/pattern-matching rules §6.2b already specifies), never
+left to the kernel.
 
 `sys_munmap`/`sys_mremap` are new — the deallocate/reallocate
 counterparts to the alloc-only `sys_mmap` v0 already had, closing an
@@ -1214,10 +1257,10 @@ about, rather than leaving implicit:
 
 The whole-program, checked-before-any-codegen model (v0 §5.3) is
 unchanged: forward reference and mutual/direct recursion between
-functions defined in the same compiled program work without any
-declaration-order requirement, exactly as in v0 — the explicit forward
-declaration exists for the `#include` use case, not because ordering
-would otherwise matter.
+functions defined in the same namespace work without any
+declaration-order requirement, exactly as in v0 — one more reason the
+forward-declared form above had nothing left to justify it once
+`#include` was removed.
 
 ### 5.3 `pure`
 
@@ -1343,370 +1386,272 @@ work noted in §11, not attempted piecemeal here.
 ### 6.1 Top level
 
 ```ebnf
-program        ::= top_level_decl+
-top_level_decl ::= function_decl | struct_decl | extern_decl
+program        ::= namespace_decl autoload_decl* use_decl* top_level_decl+
+top_level_decl ::= function_decl | struct_decl | extern_decl | operator_decl
 ```
 
-Unchanged in shape from v0 — structs, `extern function`s, and
-`function`s (now including bodyless forward declarations) share one
-flat, order-independent top level.
+Every file opens with exactly one `namespace_decl` (§6.2), optionally
+followed by `@autoload` directives (§6.2b — legal, in practice, only in
+the one file that holds `main`), then `use` declarations (§6.2a), and
+only then the file's own structs/functions/externs/operators — a real
+grammar production now, not a preprocessing convention layered on top
+of it the way an earlier draft's `#include` was. `function_decl` no
+longer has a bodyless form (§5.2) — every function-shaped declaration
+has exactly one place it's written, in exactly one file, and it always
+has a body.
 
-### 6.2 `#include`
+### 6.2 Namespaces
 
-New in v1:
+**This replaces the earlier, discarded `#include`-based design**
+entirely — textual splicing, per-file `#include` lists, and the whole
+propagation-rule apparatus that grew out of trying to keep that model
+both explicit and scalable at once. Postulate v1 instead adopts a real
+namespace/module system, closer to how PHP (via Composer/PSR-4) or C#
+organize multi-file programs than to C's headers: every file declares
+which namespace it belongs to, every use of another namespace's symbol
+is named explicitly, and the compiler locates the file that must define
+a given symbol algorithmically, from its fully-qualified name, rather
+than by following a chain of textual includes.
 
 ```ebnf
-include_directive ::= "#" "include" quoted_path ";"
-quoted_path        ::= '"' path_text '"'
-```
-
-`path_text` is everything between the two `"` characters, taken
-literally as a filesystem path, resolved **relative to the file
-containing the `#include`** (not the current working directory, not the
-top-level compiled file). The path must already carry its own `.ptl`
-extension:
-
-```postulate
-#include "./structs.ptl";
-#include "../shared/math.ptl";
-```
-
-**Terminated by `;`, not by the newline — deliberately, to match every
-other statement/declaration in the language** (§1.1: "no
-statement-terminating newlines"). An earlier draft of this rule ended
-the directive at end-of-line instead, which quietly broke that
-principle: it made `#include` the one construct that couldn't share a
-physical line with anything else, code that can otherwise always be
-compressed onto one line. With `;` as the terminator, `#include`
-behaves exactly like any other line in that respect — nothing stops
-several directives, or a directive and ordinary code, from sharing one
-physical line:
-
-```postulate
-#include "./a.ptl"; #include "./b.ptl"; function main() : void { ... }
-```
-
-(not idiomatic, just not specially disallowed — the same way cramming
-unrelated statements onto one line elsewhere in the language isn't
-specially disallowed either). A `//` comment may still follow the `;`,
-exactly like after any other statement — nothing `#include`-specific
-about that.
-
-**Every `#include` in a file must appear before anything else in that
-file except comments and other `#include`s.** This is a genuine,
-positional rule, not just a style convention — a `#include` that
-follows any real declaration (a `function`/`struct`/`extern function`,
-in that same file) is a compile error. This is for readability, plainly
-stated as the reason: a file's dependencies are always visible in one
-place, at the top, never scattered through the body where they're easy
-to miss on a skim. Comments are exempt entirely — a file may open with
-a license header, an explanatory block comment, or line comments
-between individual `#include`s, none of which count as "something
-else" for this rule:
-
-```postulate
-// gcd.ptl -- greatest common divisor, specified against gcd_spec.
-
-#include "./contracts.ptl";
-// shared Point/Line struct defs
-#include "./structs.ptl";
-
-function lnko(x : uint, y : uint) : uint [ ... ] { ... }
+namespace_decl ::= "namespace" fqn ";"
+fqn            ::= "\" identifier ("\" identifier)*
 ```
 
 ```postulate
-function lnko(x : uint, y : uint) : uint [ ... ] { ... }
-
-#include "./structs.ptl";   // compile error: after lnko's declaration
+namespace \Core\Math;
 ```
 
-This applies **per file**, independently of `#include`'s own recursive
-nature: each file spliced in (the entry file, and every file it
-transitively `#include`s) is checked against this rule against its own
-content alone — an included file is free to open with its own leading
-comments and its own `#include`s before its own first real declaration,
-regardless of where in some *other* file's body the `#include` that
-pulled it in happens to sit.
+**Mandatory, and first** — a `.ptl` file with no `namespace_decl`, or
+with anything other than a comment preceding it, is a compile error
+("missing namespace"). There is **no** global/default namespace to fall
+back to (unlike v0's or an earlier v1 draft's single-file model) — every
+declaration in every file lives inside some namespace, always. `\`
+(backslash) is the segment separator, chosen to look and read like a
+filesystem path, since that's exactly what a namespace mostly *is* here
+(§6.2b) — not a stylistic accident.
 
-**The quotes reserve syntax space, not just delimit a string.**
-`#include "path"` is the only legal spelling in v1 — an angle-bracket
-form, `#include <path>`, is deliberately left syntactically unclaimed
-for a possible future path-resolution mode (a search-path/"system
-include" convention, in the spirit of C's distinction between `"..."`
-and `<...>`), should one ever be designed. That mode is not designed,
-not implemented, and not given any meaning here — `#include <anything>`
-is simply not valid v1 syntax today, reserved rather than spent.
+**One namespace may span several files** — `\Core\Math` isn't required
+to be exactly one file; several files may each declare `namespace
+\Core\Math;` and jointly contribute to it (structs, functions, and
+`extern function`s declared across any of them share that one
+namespace's own flat sub-namespace, §1.3). In the common case, though,
+each file provides exactly **one** externally-`use`-able declaration,
+**named after the file itself** — `\Core\Math\Matrix` is expected to
+live in a file named `Matrix.ptl`, sitting wherever `\Core\Math` maps to
+on disk (§6.2b's default rule folds the namespace's own segments
+directly into a directory path, and the final, symbol-naming segment of
+a fully-qualified name into the file's own basename). A file is free to
+also declare smaller, private helper functions/structs alongside its
+one primary, filename-matching declaration — nothing stops it — but the
+*default* autoload rule (§6.2b) only ever looks for a file whose name
+matches the symbol being resolved, so a second, differently-named
+top-level declaration in that same file is only reliably reachable by
+anyone who already knows to open that specific file directly (i.e., by
+`use`ing the primary, filename-matching symbol and expecting the rest
+to ride along) — not a distinct, independently-autoloadable entry point
+of its own. A project that genuinely wants several equally-important,
+independently-`use`d symbols should give each its own file, matching
+the naming discipline throughout.
 
-`#include` is a **preprocessing** step, resolved before the rest of the
-grammar is even relevant, and `;`-termination (above) doesn't change
-that: it makes the directive *read* consistently with the rest of the
-language, not *behave* like an ordinary parsed statement. One real
-consequence follows from no longer being anchored to "alone on its own
-line": the preprocessing scan has to recognize v1's comment syntax
-(§1.2) well enough to skip over `//` and `/* */` content without
-mistaking `#include`-looking text inside a comment for a real directive
-— a small, bounded amount of lexical awareness (comment-skipping only,
-nothing about identifiers, literals, or any other token shape), not a
-step toward `#include` becoming a real grammar production.
+**The `\Main` namespace and the program's entry point.** The file
+containing `main` (§6.3) must declare `namespace \Main;` — no other
+namespace may contain a `main` function, and `\Main` may contain at
+most one, project-wide (mirroring, at the namespace level, the same
+uniqueness v0 already required of `main` itself). This is also where
+`@autoload` overrides are legal at all (§6.2b) — tying "the one place
+allowed to redirect where the loader looks for things" to "the one,
+unique file that already has to exist and be unique in every project"
+removes any need for a *second*, separately-enforced uniqueness rule
+for where autoload configuration is allowed to live.
 
-**What a `#include` actually grants: everything the named file declares
-at its own top level — its `function`s, `extern function`s, and
-`struct`s — usable directly, as if declared in your own file.** This
-holds fully and unconditionally for any file you name in a `#include`
-of your own: nothing about it is partial or requires a further
-qualifier.
+### 6.2a Explicit imports (`use`)
 
-**What it does not grant, by default: anything reachable only through a
-file you did not yourself `#include`.** `#include` is **not transitive
-for functions and `extern function`s**: if your file `#include`s
-`b.ptl`, and `b.ptl` itself `#include`s `c.ptl`, your file does not
-thereby gain the ability to call a function declared in `c.ptl`. Each
-file's own `#include` list is a complete, exact statement of which
-other files' functions it can use — reading one file tells you
-everything it depends on directly, with no need to also chase through
-what *that* file depends on in turn.
+**Postulate's core transparency rule: no hidden dependencies, ever.** A
+fully-qualified name (`\Core\Math\Matrix`) may **never** appear directly
+in a function body or a struct's field list — only in a `use`
+declaration, in the file's own header, before any real declaration.
+Every external struct, function, or `extern function` a file's body
+refers to must be named, once, in that header — reading a file's `use`
+list is reading a *complete* account of everything it depends on,
+exactly the property the discarded `#include` design spent this whole
+session's earlier drafts trying, and repeatedly failing, to fully
+guarantee (propagation, forward declarations, and the "who owns what"
+bookkeeping that grew up around them are **all gone** — there is
+nothing left to propagate, because every dependency is named, flatly,
+by the file that actually has it).
 
-```postulate
-// c.ptl
-function helper() : int32 { return 1; }
+```ebnf
+use_decl   ::= "use" (fqn_group | fqn_single) ";"
+fqn_single ::= fqn ("as" identifier)?
+fqn_group  ::= fqn "\" "{" use_spec ("," use_spec)* "}"
+use_spec   ::= identifier ("as" identifier)?
+```
+
+Three forms, all resolving through the same autoloader (§6.2b):
+
+- **Single import, with an optional rename**:
+
+  ```postulate
+  use \Core\Math\Matrix;
+  use \Core\Math\Matrix as MTX;
+  ```
+
+  Brings exactly one symbol into scope, under its own name or the given
+  alias. `as` here is a different context from the `as` cast operator
+  (§3.7a) — the two never collide, since `use ... as ...` can only ever
+  appear in a file's header, never inside an expression, so the parser
+  never has to disambiguate them from the same position.
+
+- **Group import**, for several symbols from the same namespace without
+  repeating its prefix:
+
+  ```postulate
+  use \Core\Math\{Matrix as MTX, Vector, calculate_norm};
+  ```
+
+- **Namespace-level import**, bringing in the *namespace itself* rather
+  than one specific symbol, referenced afterward with a one-segment
+  qualifier:
+
+  ```postulate
+  use \Core\Math;
+
+  function run() : void [ requires: true; ensures: true; ] {
+    mut m : Math\Matrix := Math\create_identity();
+  }
+  ```
+
+  `Math\Matrix` here is **not** a fully-qualified name (that would still
+  be illegal in the body, per the rule above) — it's an ordinary
+  identifier reference, `Math` acting as the local alias `use \Core\Math;`
+  bound to the namespace, with `\` continuing to separate the alias from
+  the member being reached through it. This form trades a little of the
+  single-import form's "every individual name is listed up front"
+  transparency for brevity when a file genuinely uses many members of
+  one namespace — still fully explicit about *which namespace*, just not
+  about *which of its members*, one by one.
+
+### 6.2b The autoloader (`@autoload`)
+
+```ebnf
+autoload_decl ::= "@autoload" "(" pattern_string "," path_string ("," verify_flag)? ")" ";"
+verify_flag   ::= "verified" | "unverified"
 ```
 
 ```postulate
-// b.ptl
-#include "./c.ptl";
-function wrapper() : int32 { return helper() + 1; }   // fine: b.ptl includes c.ptl directly
-```
+namespace \Main;
 
-```postulate
-// a.ptl
-#include "./b.ptl";
+@autoload("\Vendor\Math\", "libs/math/src");
+@autoload("\Plugin\:module\", "plugins/:module/src");
 
-function main() : int32 {
-  return wrapper();   // fine: a.ptl includes b.ptl directly
-}
-
-function broken() : int32 {
-  return helper();    // compile error: a.ptl never included c.ptl
-}
-```
-
-`a.ptl` including `b.ptl` gets it `wrapper` (declared directly in
-`b.ptl`) but never `helper` (declared in `c.ptl`, which `a.ptl` itself
-never named) — even though `helper` is, transitively, part of what
-makes `b.ptl` compile at all. If `a.ptl` genuinely needs `helper` too,
-it says so itself, the same way `b.ptl` did: its own `#include
-"./c.ptl";`.
-
-**One deliberate exception, and only one: a `struct` type mentioned in
-something you can already see is visible too.** Unlike a function, a struct has no notion
-of an opaque or incomplete form (§5.1) — there is no way to use a value
-of a struct type correctly at all without knowing its full field
-layout, so making struct visibility follow the same strict,
-direct-`#include`-only rule functions follow would force every file to
-separately re-`#include` every struct any function it uses happens to
-mention, purely to restate something already implied by being able to
-call that function in the first place. Extending the example above:
-
-```postulate
-// c.ptl
-struct Pair { first : int32; second : int32; }
-function make_pair() : Pair { return Pair { first := 1, second := 2 }; }
-```
-
-```postulate
-// b.ptl
-#include "./c.ptl";
-function wrap_pair() : Pair { return make_pair(); }
-```
-
-```postulate
-// a.ptl
-#include "./b.ptl";
-
-function main() : int32 {
-  mut p : Pair := wrap_pair();   // fine: Pair is visible -- wrap_pair,
-                                  // which a.ptl does have (b.ptl is its
-                                  // own, direct #include), is declared
-                                  // to return one
-  return p.first;
-}
-
-function broken() : Pair {
-  return make_pair();   // still a compile error: make_pair itself was
-                         // never granted to a.ptl -- only Pair, its
-                         // *type*, followed wrap_pair into view
+function main() : int32 [ requires: true; ensures: result == 0; ] {
+  return 0;
 }
 ```
 
-`Pair` reaches `a.ptl` because `wrap_pair` — a function `a.ptl` does
-have — is declared to return one; `make_pair` itself, the function that
-actually produces one in `c.ptl`, does not reach `a.ptl`, for the same
-reason `helper` didn't above: functions never travel further than the
-file that directly `#include`s them.
+`pattern_string` and `path_string` are both `pure_string_literal`s
+(§1.5) — **no escapes**, every `\` above is a literal namespace-path
+separator, written exactly once, never doubled. Their content is
+additionally restricted to `path_char` (letters, digits, `_`, `/`, `-`,
+`.`) interspersed with `:identifier` placeholder segments (§9's own
+grammar) — a byte outside that set is a compile error here.
 
-This does **not** mean struct visibility can chain across several files
-the way the rejected, program-wide draft of this rule would have
-allowed — `Pair` reaches `a.ptl` because `b.ptl` itself `#include`s
-`c.ptl` (owns the dependency directly, not merely received it from
-somewhere else); if `b.ptl` had only *consumed* `Pair` through some
-other file's own signature, without `#include`ing `c.ptl` itself,
-`b.ptl` could not expose `Pair` onward to `a.ptl` at all (the next
-paragraph covers exactly why). Struct visibility propagates exactly
-**one** `#include` hop past wherever a type is actually owned — never
-further, and never by accident of how many files happen to sit between
-the true owner and you.
+**The default rule, with no `@autoload` involved at all**: a
+fully-qualified name's every segment except the last becomes a
+directory path (`\Core\Math\Matrix` → `Core/Math/`), and the last
+segment becomes a filename with `.ptl` appended (`Matrix.ptl`) — a
+straightforward, mechanical 1:1 mapping, resolvable without reading a
+single line of anyone's source first.
 
-What *does* recurse, independently of the paragraph above, is a
-struct's own **field layout** — nothing about naming: a struct field
-whose own type is itself another struct, declared in a third, more
-distant file, always has its full layout available wherever the outer
-struct is used, however many files away that inner declaration lives,
-because the compiler needs the actual bytes to generate correct code
-regardless of who's allowed to write the inner type's name.
+**`@autoload` directives override that default for a matching namespace
+*prefix***, redirecting where its files are actually found on disk —
+useful for vendored/third-party code, or any layout that doesn't match
+the default convention. Two constraints, both load-bearing:
 
-**A struct that only reached you this way may be *consumed*, but never
-*authored or re-exposed*.** Consuming covers everything that only needs
-to know the type's shape, which propagation already provides: naming
-`Pair` in a *local's* type annotation, reading a field off a value you
-already have, passing one along as an argument, assigning one whole
-value to another (`p2 := p1;`). Two things are different in kind, and
-both still require `a.ptl` to `#include "./c.ptl";` itself:
+- **Legal only in the file that declares `main`** (`\Main`, §6.2). Since
+  that file is already unique, project-wide, tying autoload
+  configuration to it guarantees autoload rules can never be a *hidden*
+  side effect of including some arbitrary library file — a dependency
+  cannot quietly repoint where a third namespace's files come from
+  (library poisoning) merely by being `use`d; only the one, obvious,
+  always-present entry point can.
+- **First-match wins, checked top-to-bottom.** The compiler tries each
+  `@autoload` directive against a name being resolved, in the order
+  written; the first whose pattern matches decides where to look. A
+  name matching no directive at all falls back to the default 1:1 rule
+  above — a directive list is a stack of *exceptions* to that default,
+  not a replacement for it.
 
-1. **Constructing one.** A struct literal (`Pair { first := ..., second
-   := ... }`, §3.8) doesn't consume an existing `Pair`, it *authors* a
-   new one, field by field — exactly the kind of dependency `#include`
-   exists to make you state yourself.
-2. **Putting it in a signature or a field list of your own.** A
-   function `a.ptl` itself declares, or a struct `a.ptl` itself
-   declares, is something *other* files may in turn `#include` `a.ptl`
-   to reach — if `a.ptl` could mention `Pair` there without owning the
-   dependency, `a.ptl` would silently become a further, undeclared
-   carrier of it, and whoever includes `a.ptl` would inherit `Pair`
-   (per the propagation rule) with no `#include "./c.ptl";` anywhere in
-   the chain to explain why. This is the same laundering the direct-
-   `#include`-only rule for functions was written to prevent in the
-   first place, just one level removed — closing it here is what keeps
-   that guarantee actually true two hops out, not just one.
+**Pattern matching**: a literal prefix (`"\Vendor\Math\"`) matches
+only that exact namespace prefix; a named placeholder (`:module`, as in
+`"\Plugin\:module\"`) matches any single namespace segment in that
+position and substitutes the matched text into the corresponding
+position of the path string on the other side — `\Plugin\Foo\Bar`
+resolves against `"plugins/:module/src"` by binding `:module` to `Foo`,
+giving `plugins/Foo/src` as the base directory `Bar` (and, if there were
+more segments, the rest of the namespace path) resolves within, by the
+same default folding rule the unmatched case already uses.
 
-```postulate
-// a.ptl
-#include "./b.ptl";
-
-function also_broken() : int32 {
-  mut p : Pair := Pair { first := 5, second := 6 };   // compile error
-                                                        // (construction): a.ptl
-                                                        // never included c.ptl
-  return p.first;
-}
-
-function still_broken(p : Pair) : void { }   // compile error (own signature):
-                                              // same reason -- a.ptl would
-                                              // become a further, silent
-                                              // source of Pair for anyone
-                                              // who includes a.ptl next
-
-struct Wrapper { inner : Pair; }             // compile error (own field list):
-                                              // the same rule, for structs
-                                              // instead of functions
-```
-
-Only a *local* — never part of anything `a.ptl` exposes to whoever
-includes `a.ptl` in turn — may hold a `Pair` on propagated visibility
-alone:
+**The `verified`/`unverified` flag** (default `unverified` if omitted)
+doesn't affect ordinary compilation at all — it's read only by the
+modular verification pipeline (§6.2c), marking a namespace prefix's
+files as pre-trusted (a vetted standard library, a reviewed third-party
+package) so their own bodies are never re-verified, only their public
+contracts loaded as axioms.
 
 ```postulate
-function fine() : int32 {
-  mut p : Pair := wrap_pair();   // fine -- a purely local use, not
-                                  // part of a.ptl's own exposed surface
-  return p.first;
+namespace \Main;
+
+@autoload("\Std\", "stdlib/src", verified);
+@autoload("\Vendor\Math\", "vendor/math/src", unverified);
+
+function main() : int32 [ requires: true; ensures: result == 0; ] {
+  return 0;
 }
 ```
 
-`a.ptl` can hold, inspect, and pass along a `Pair`, but authoring one,
-or writing it into its own function/struct declarations, is treated
-the same as calling `make_pair` directly would have been — a real
-dependency on `c.ptl` that has to be declared, not one `a.ptl` gets for
-free because `b.ptl` happened to need it too. Struct **layout**
-propagation itself stays fully automatic and unrestricted underneath
-all of this — a struct's field that is itself another struct from a
-third file always has its full layout available wherever the outer
-struct is used, regardless of ownership, because the compiler needs
-that layout to generate correct code no matter what; what's restricted
-above is only which type *names* `a.ptl`'s own source text may write in
-a constructing or exposing position, never what layout information the
-compiler itself is allowed to know.
+### 6.2c Modular compilation and verification
 
-**This is a deliberately narrower rule than "everything `#include`-
-reachable, however indirectly, shares one namespace,"** which an
-earlier draft of this section specified. Two things motivate the
-tightening: reading any one file now tells you the *whole* truth about
-what it can call, with no need to also read everything its own
-`#include`s reach, transitively, just to know whether some name is in
-scope — and it is what makes independently compiling and caching each
-file practical for an implementation (the work item this unlocks is
-`postulate_stage1_bootstrap_plan.md`'s `v1.0.4`; see also §11 item 2,
-which this doesn't retract — v1 still doesn't *mandate* any particular
-compilation strategy, this rule just stops accidentally ruling the
-scalable one out).
+The namespace/`use`/autoload system above isn't only a naming
+convenience — it's specifically shaped so that compiling (and, once
+§7.8's Why3 path is in play, *verifying*) one file never requires
+reading another file's body, only its public interface:
 
-**A consequence worth stating plainly: name-collision checking is only
-as wide as visibility itself.** Two files that never `#include` each
-other, directly or through struct-type propagation, may declare the
-same name without either file — or a compiler checking either one on
-its own — ever noticing; nothing in the language requires a
-whole-program pass that would catch it. If both nonetheless end up
-compiled into the same final program (through some third file
-`#include`ing both, without either seeing the other), that's exactly
-the position two unrelated C translation units defining a same-named
-external symbol are in: whether it actually matters depends on whether
-an implementation's own link step happens to notice a genuine symbol
-clash, not on anything either file's own compilation checked. This is a
-deliberate, accepted trade — the alternative (checking name uniqueness
-across the whole reachable set, which the earlier, untightened rule got
-for free) would reintroduce exactly the whole-program pass this section
-exists to make unnecessary.
+1. **The dependency graph is determined statically, cheaply, up front.**
+   A file's own `use` declarations name exactly which other
+   namespaces/symbols it needs; combined with the entry point's
+   `@autoload` overrides, the compiler resolves every `use` to a
+   concrete file path and builds the whole project's dependency graph
+   before compiling or verifying a single function body.
+2. **Compiling (or verifying) a module loads only what it `use`s —
+   signatures and contracts, never bodies.** A `use \Core\Math\Matrix;`
+   pulls in exactly enough of `Matrix.ptl` to type-check calls into it
+   (§9's grammar) and, for verification specifically, its `requires`/
+   `ensures` clauses as axioms (§7.8) — `Matrix.ptl`'s own function
+   bodies are not re-parsed, re-checked, or re-verified merely because
+   something else `use`s them.
+3. **Editing a module's implementation, without changing its public
+   surface, never requires recompiling or reverifying anyone who `use`s
+   it.** Only a change to what a module actually exposes (a signature,
+   a contract clause) invalidates its dependents; a body-only edit is
+   local to the one file that changed.
+4. **Incremental caching follows directly from point 3**: the compiler
+   tracks each module's own source hash (or timestamp); a module whose
+   hash is unchanged since its last successful compile/verify, and whose
+   own `use`d dependencies are themselves unchanged, is skipped entirely
+   — its previously-recorded public interface (and, for verification,
+   its already-discharged proof obligations) is reused as-is. A module
+   under a `verified` autoload prefix (§6.2b) skips re-verification
+   unconditionally, cache or not — it is taken as trusted, permanently,
+   by that flag alone.
 
-Two built-in safety properties, both automatic (no manual include-guard
-boilerplate needed):
-
-- **Include-once**: a file already spliced in earlier (identified by
-  its resolved absolute path) is silently skipped on a repeat
-  `#include`, anywhere in the inclusion graph — the equivalent of an
-  implicit `#pragma once` on every file.
-- **Cycle detection**: a file that `#include`s something already
-  *currently being* spliced (not yet finished) — a genuine cycle, not
-  just a repeat — is a compile error with a clear diagnostic, rather
-  than an infinite preprocessing loop.
-
-There is deliberately **no** macro expansion (`#define`) and no
-conditional compilation (`#ifdef`-equivalent) — `#include` is the one
-preprocessing feature v1 adds, kept as small as it can be while still
-solving the "split a program across files" problem. Further
-preprocessor directives beyond `#include` are a plausible later
-addition (§11), not part of v1.
-
-**This section defines what a program is allowed to reference, not how
-a compiler must build it.** An implementation is free to satisfy the
-visibility rule above by literally splicing every reachable file's text
-into one buffer and compiling it as a single pass — checking the
-narrower per-file visibility rule during name resolution instead of
-letting anything anywhere in the merge see everything else — or by
-compiling each file independently against just the declarations the
-rule grants it, caching each result, and linking the pieces together
-the way `Hoare/scripts/build.sh` already links multiple `.o` files
-today. Both are conformant; they only have to agree on which programs
-are valid and what they compute. §11 item 2 still doesn't make either
-strategy a requirement of v1 itself — but the visibility rule above was
-deliberately shaped so the scalable strategy is actually achievable by
-an implementation that wants it, which the wider, whole-program-flat
-version of this rule (an earlier draft) made needlessly hard:
-recompiling every reachable file's full text on every build, with no
-way to cache a file's own compiled result independently of who else
-happens to reach it, is a real, known limitation the wider rule
-couldn't avoid. Genuine separate compilation remains a bigger
-undertaking than just this naming rule (§11 item 2's own note about
-linking, not just name resolution) — this section resolves the
-*naming* half, not the whole thing.
+None of this requires reading any file's body except the one currently
+being compiled/verified and the one holding `main` — a direct
+consequence of `use` naming dependencies explicitly, by fully-qualified
+name, resolved to exactly one file each, rather than the earlier
+`#include` design's textual splicing ever having needed a body's worth
+of someone else's source just to make its *signature* available.
 
 ### 6.3 `main`
 
@@ -1737,6 +1682,13 @@ Any parameter list other than these two exact shapes is a compile
 error, same enforcement spirit as v0's "`main` must take zero
 parameters" rule.
 
+**New in v1, tied to the namespace system (§6.2)**: `main` may only be
+declared inside the `\Main` namespace, and at most once project-wide —
+a second `function main(...)`, anywhere, `\Main` or not, is a compile
+error, the namespace-level generalization of v0's own "exactly one
+`main`" rule. This is also the *only* file allowed to carry `@autoload`
+directives (§6.2b).
+
 **Changed from v0 in one more way**: `return_type` must be `void` or an
 **atomic type** — an integer type, `bool`, `char`, a float-family type,
 or a pointer type; never a struct or array — and this is now a
@@ -1756,17 +1708,18 @@ exit code (truncated to 8 bits), same as v0.
 ## 7. Verification contracts
 
 This is v1's central addition — the language's first real step toward
-its founding goal of mathematically precise correctness proofs. It is
-deliberately scoped **narrowly**: contracts are checked for
-well-formedness by the compiler always, but only ever *enforced* — made
-to actually catch a violation — by a separately compiled, opt-in
-variant of the program (§7.5). There is no static prover, no SMT
-solver, and no attempt at one in v1; see §11 for why that's a
-deliberate boundary, not an oversight. §7.1–§7.6 specify what a program
+its founding goal of mathematically precise correctness proofs. Its
+**default build pipeline** is deliberately scoped **narrowly**:
+contracts are checked for well-formedness by the compiler always, but
+only ever *enforced* at runtime — made to actually catch a violation —
+by a separately compiled, opt-in variant of the program (§7.5). A real
+static prover, built on Why3 and an SMT solver, does exist — as a
+distinct, separately-invoked tool (§7.8), never a hidden part of the
+default build. §7.1–§7.6 specify what a program
 writes and what gets checked when; §7.7 gives the formal derivation
 rules that are the actual reason those specific checking points are the
 correct ones, for anyone who wants the underlying proof theory, not
-just the practical rule set.
+just the practical rule set; §7.8 covers the optional static path.
 
 ### 7.1 Clauses
 
@@ -1807,31 +1760,26 @@ signature/condition position the way an earlier draft had them.
 
 **Clauses are mandatory, not optional** — a deliberate, considered
 change from an earlier v1 draft (which made all four optional, so a
-function/loop with none behaved exactly as in v0). Every function (§5.2
-— counting its forward declaration and definition together as one unit)
-must carry **at least one** `requires` and **at least one** `ensures`
-*somewhere* in that unit; every `while` (§4.4) must carry **at least
-one** `invariant` and **at least one** `decreases`. A function/loop
-with no meaningful constraint still states that explicitly —
-`requires: true; ensures: true;` is the honest way to say "nothing is
-assumed, nothing beyond termination is promised," not an omission.
+function/loop with none behaved exactly as in v0). Every function must
+carry **at least one** `requires` and **at least one** `ensures`; every
+`while` (§4.4) must carry **at least one** `invariant` and **at least
+one** `decreases`. A function/loop with no meaningful constraint still
+states that explicitly — `requires: true; ensures: true;` is the honest
+way to say "nothing is assumed, nothing beyond termination is
+promised," not an omission.
 
-The two are enforced at **different levels**, and that difference is
-deliberate, not an oversight: a `while`'s clause block is never split
-across two locations, so the grammar enforces it directly (§9:
-`loop_block ::= "[" loop_clause+ "]"` — `+`, not `*`; a `while` with an
-empty or absent clause block is a syntax error, full stop). A
-function's `contract_block`, by contrast, is allowed to sit on *either*
-its forward declaration or its definition (§5.2), so `contract_block`
-is `?` (optional) at each individual production — a function with a
-body and no forward declaration always carries its own block, but one
-half of a forward-declared/defined pair legitimately carries none.
-"At least one `requires` and `ensures` somewhere in the pair" is
-therefore a **semantic** rule (§8.1), checked once per function across
-both occurrences, not a per-production grammar `+`. Either way, ending
-up with no clauses at all — because the block was omitted everywhere
-it was allowed to be — is a compile error; the enforcement mechanism
-differs, the practical guarantee doesn't.
+Both are enforced **directly at the grammar level**, now that a
+function's `contract_block` is mandatory rather than `?` (§5.2 — the
+forward-declared/defined split an earlier draft needed this optionality
+for no longer exists): `contract_block ::= "[" contract_clause+ "]"` and
+`loop_block ::= "[" loop_clause+ "]"` both use `+`, not `*`, so a
+function or a `while` with an empty or absent clause block is a syntax
+error, full stop, the same way for both. `contract_clause+`/
+`loop_clause+` only guarantees *some* clause is present, not *which*
+kind — "at least one `requires` **and** at least one `ensures`" (not
+just one clause of either kind) is therefore still a **semantic** rule
+(§8.1), checked once per function against its one, always-present
+block.
 
 Two carve-outs, both narrow and already implied by other rules:
 
@@ -1844,11 +1792,6 @@ Two carve-outs, both narrow and already implied by other rules:
   terminates beyond what "it's not a loop and not recursive" already
   guarantees, so demanding a termination measure for it would be
   meaningless, not merely redundant.
-
-If a function has both a forward declaration and a definition, recall
-(§5.2) that clauses live on exactly one of the two — the mandatory
-requirement is checked against whichever one actually carries them, not
-doubled up.
 
 Multiple clauses of the same kind on one function/loop are still
 allowed and conjuncted (logical AND) together — often more readable
@@ -1947,12 +1890,14 @@ assumption ("this buffer is NUL-terminated within some reasonable
 distance") that was previously implicit and unstated — making that
 assumption a real, named parameter is the point, not a workaround.
 
-### 7.5 Checking model: runtime assertions, not static proof
+### 7.5 Checking model: runtime assertions by default
 
-v1 deliberately does **not** attempt to statically prove any contract
-clause true. Every clause the compiler accepts (well-typed `bool`
-expression, respecting §7.2's purity/self-reference rules) is —
-depending on how the program is compiled — either:
+The **default build pipeline** (`postulate build`/whatever the ordinary
+compile entry point ends up named) does **not** attempt to statically
+prove any contract clause true — that is a separate, opt-in path,
+§7.8. Every clause the compiler accepts (well-typed `bool` expression,
+respecting §7.2's purity/self-reference rules) is — depending on how
+the program is compiled — either:
 
 - **compiled normally** (the default): every contract clause is fully
   type-checked and validated for the rules in §7.2, but emits **no
@@ -1976,9 +1921,12 @@ different problem (stack corruption) — a deliberate, consistent pattern
 for this project: **verification-adjacent tooling is always something
 you turn on, never something baked permanently into every build.**
 
-A future language version may add genuine static verification (proving
-a clause true for *all* inputs, not just the ones a checked build
-happens to run on) — that is explicitly out of scope for v1; see §11.
+Genuine static verification (proving a clause true for *all* inputs,
+not just the ones a checked build happens to run on) **is** available
+in v1, via a distinct, separately-invoked tool built on Why3 — §7.8.
+Running it never changes what the default build produces; the two
+paths are independent, and a program that's never run through the
+static path still compiles and runs exactly as this section describes.
 
 ### 7.6 `old(...)` and `result`
 
@@ -2266,6 +2214,116 @@ stay ordinary predicates/measures over an — implicitly enriched —
 state once those are available; the rule above doesn't need to know
 where a predicate's sub-terms came from to hold.
 
+### 7.8 Static verification via Why3 (optional)
+
+§7.5 is deliberately silent on *proving* a contract clause; this section
+is where that happens, entirely outside the default build. Rather than
+building a bespoke SMT front-end, v1 targets **Why3** — an existing,
+mature verification platform — by translating a Postulate module and
+its contracts into **WhyML**, Why3's own input language, and letting
+Why3's own machinery (its VC generator, plus whichever backend solver
+is configured — Z3, CVC4, Alt-Ergo, or an interactive prover such as
+Coq) do the actual proof search:
+
+```
+┌────────────────────────┐
+│  Postulate kód (.ptl)  │  (requires / ensures / invariant / decreases)
+└───────────┬────────────┘
+            │  AST transzformáció
+            ▼
+┌────────────────────────┐
+│   WhyML kód (.mlw)     │  (Verification Conditions -- VC)
+└───────────┬────────────┘
+            │  Why3 Engine
+            ▼
+┌────────────────────────┐
+│  SMT Solvers / Coq     │  (Z3, CVC4, Alt-Ergo, Coq)
+└────────────────────────┘
+```
+
+**Why3, not a hand-written VC generator, for the same reason `opt`/`llc`
+were chosen over a hand-rolled optimizer/backend elsewhere in this
+project's own tooling** (`docs/postulate_stage1_bootstrap_plan.md`
+§2): weakest-precondition calculation and SMT-solver orchestration are
+exactly the kind of mature, general-purpose machinery not worth
+re-implementing, and §7.7's derivation rules are already stated in
+terms — sequence, selection, iteration, each with its own $lf$
+obligation — that map directly onto Why3's own `while`/`if`/sequencing
+VC generation, requiring no reinterpretation of the proof theory itself,
+only a syntactic transformation.
+
+**Type mapping**, the load-bearing part of the translation:
+
+| Postulate type | WhyML | Note |
+|---|---|---|
+| `int32`, `int64`, … | `int` / `mach.int.Int32` | bounded or mathematical integer, per context |
+| `bool` | `bool` | |
+| `struct` | `record`, mutable fields | matches v1's own by-value, mutable-field semantics |
+| `pure function` (§5.3) | `function`/`predicate` | side-effect-free, directly usable inside a clause, mirroring §7.2's own restriction |
+| ordinary `function` | `let`/`val` | imperative code with state/effects |
+
+**Worked example** — `increment`, a `ref`-parameter function (§5.3a)
+with a contract:
+
+```postulate
+struct Counter {
+    value : int32;
+    step  : int32;
+}
+
+function increment(ref c : Counter) : void [
+    requires: c.step > 0;
+    ensures:  c.value == old(c.value) + old(c.step);
+] {
+    c.value :+ c.step;
+}
+```
+
+```
+module Szamlalo
+  use int.Int
+  use ref.Ref
+
+  type counter = {
+    mutable value : int;
+    mutable step  : int;
+  }
+
+  let increment (c : counter) : unit
+    requires { c.step > 0 }
+    ensures  { c.value = (old c.value) + (old c.step) }
+  =
+    c.value <- c.value + c.step
+end
+```
+
+`old(c.value)`/`old(c.step)` (§7.6) map directly onto WhyML's own `old`
+— no reinterpretation needed, since both mean exactly the same thing:
+the parameter's value at function entry.
+
+**Invoking it** is a separate command from the default build, never a
+flag on it:
+
+```Bash
+postulate verify szamlalo.ptl --solver=z3
+# underlying: why3 prove -P z3 szamlalo.mlw
+
+postulate verify szamlalo.ptl --ide
+# underlying: why3 ide szamlalo.mlw   -- for obligations no automatic
+#                                        solver discharges on its own
+```
+
+**Modular, incremental, and namespace-aware** — this is where §6.2c's
+module system and this section meet: verifying a module loads only the
+`requires`/`ensures` of whatever it `use`s, as already-proven axioms,
+never re-deriving or re-checking another module's own body; a module
+under a `verified` `@autoload` prefix (§6.2b) is trusted outright and
+never sent through Why3 at all; everything else is verified once, and
+re-verified only when its own source (or something it `use`s) actually
+changes, per §6.2c's cache. A failed proof obligation is a `postulate
+verify` diagnostic, not a build failure — the default build (§7.5)
+neither runs nor depends on any of this.
+
 ---
 
 ## 8. Semantic rules — summary
@@ -2297,16 +2355,10 @@ and still apply.
   its own `decreases` clause (§5.3/§7.4); a non-recursive function
   (`pure` or not) carries no `decreases` requirement at all.
 - Every function (`extern` excepted, §7.1) must have at least one
-  `requires` and at least one `ensures` **somewhere** — on its
-  definition if it has no separate forward declaration, or on its
-  forward declaration if it has one (never both, §5.2). Zero clauses
-  anywhere for a given function is a compile error; this is checked
-  once per function, not once per `function_decl` production, since a
-  forward-declared function's clauses legitimately live apart from its
-  body.
+  `requires` and at least one `ensures` in its one, mandatory contract
+  block (§5.2/§7.1). Zero clauses of either kind is a compile error.
 - Every `while` must have at least one `invariant` and at least one
-  `decreases` clause (§4.4/§7.1) — no forward-declaration exception
-  applies here, since a loop has no equivalent split form.
+  `decreases` clause (§4.4/§7.1).
 
 ### 8.2 Purity
 
@@ -2327,16 +2379,22 @@ and still apply.
 - `break`/`continue` are only valid lexically inside a `while` body
   (§4.6).
 
-### 8.4 `#include` resolution
+### 8.4 Namespace/`use`/autoload resolution
 
-- Paths resolve relative to the including file, not the compiled
-  program's entry file or the working directory (§6.2).
-- A file already included anywhere earlier in the same compilation is
-  silently skipped on a repeat `#include` (§6.2).
-- A genuine inclusion cycle is a compile error (§6.2).
-- Every `#include` in a file must precede every non-comment,
-  non-`#include` content in that same file — checked per file, not
-  globally across the whole inclusion graph (§6.2).
+- Every `.ptl` file must open with a `namespace_decl`, preceded by
+  nothing but comments — a compile error ("missing namespace")
+  otherwise (§6.2).
+- A fully-qualified name may not appear directly in a function body or
+  a struct's field list — only in a `use` declaration or (§6.2a's
+  namespace-level form) as a `LocalAlias\member` reference (§6.2a).
+- `@autoload` directives are legal only in the file declaring `main`
+  (§6.2/§6.2b).
+- Resolving a fully-qualified name tries each `@autoload` pattern in
+  the order written, first match wins; no match falls back to the
+  default 1:1 namespace-segments-to-directory, final-segment-to-filename
+  mapping (§6.2b).
+- `main` may be declared only in the `\Main` namespace, and at most once
+  project-wide (§6.2/§6.3).
 
 ### 8.5 Casts
 
@@ -2350,132 +2408,149 @@ and still apply.
 ## 9. Complete grammar (EBNF)
 
 ```ebnf
-program            ::= top_level_decl+
-top_level_decl      ::= function_decl | struct_decl | extern_decl | operator_decl
-include_directive    ::= "#" "include" quoted_path ";"
-quoted_path          ::= '"' path_text '"'
+program               ::= namespace_decl autoload_decl* use_decl* top_level_decl+
 
-struct_decl        ::= "struct" identifier "{" field_decl+ "}"
-field_decl         ::= identifier ":" type ";"
+/* --- Névterek, Autoload és Importok --- */
+namespace_decl        ::= "namespace" fqn ";"
+use_decl              ::= "use" ( fqn_group | fqn_single ) ";"
+fqn_single            ::= fqn ("as" identifier)?
+fqn_group             ::= fqn "\" "{" use_spec ("," use_spec)* "}"
+use_spec              ::= identifier ("as" identifier)?
 
-function_decl      ::= ("pure")? "function" identifier "(" params? ")" ":" return_type
-                        contract_block? (func_block | ";")
-contract_block     ::= "[" contract_clause+ "]"
-return_type        ::= type | "void"
-extern_decl        ::= "extern" "function" identifier "(" params? ")" ":" return_type ";"
-operator_decl      ::= "operator" op_symbol "(" param "," param ")" ":" return_type func_block
-op_symbol          ::= "==" | "!=" | "<" | ">" | "<=" | ">=" | "+" | "-" | "*" | "/" | "%"
-params             ::= param ("," param)*
-param              ::= ("ref")? identifier ":" type
+autoload_decl         ::= "@autoload" "(" pattern_string "," path_string ("," verify_flag)? ")" ";"
+pattern_string        ::= pure_string_literal   /* content restricted to path_char | ":" identifier, §6.2b */
+path_string           ::= pure_string_literal   /* same restriction */
+verify_flag           ::= "verified" | "unverified"
 
-contract_clause    ::= requires_clause | ensures_clause | decreases_clause
-requires_clause    ::= "requires" ":" expr ";"
-ensures_clause     ::= "ensures" ":" expr ";"
-decreases_clause   ::= "decreases" ":" expr ";"
-invariant_clause   ::= "invariant" ":" expr ";"
+fqn                   ::= "\" identifier ("\" identifier)*
+path_char             ::= "a".."z" | "A".."Z" | "0".."9" | "_" | "/" | "-" | "." | "\"
 
-func_block         ::= "{" decl* stmt* "}"
-block              ::= "{" stmt* "}"
-decl               ::= ("mut" | "const") identifier ":" type (":=" expr)? ";"
+/* --- Deklarációk --- */
+top_level_decl        ::= function_decl | struct_decl | extern_decl | operator_decl
 
-stmt               ::= assign_stmt | incdec_stmt | if_stmt | while_stmt | return_stmt
-                      | break_stmt | continue_stmt | expr_stmt
+struct_decl          ::= "struct" identifier "{" field_decl+ "}"
+field_decl           ::= identifier ":" type ";"
 
-assign_pair        ::= lvalue assign_op expr
-assign_op          ::= ":=" | ":+" | ":-" | ":*" | ":/"
-assign_stmt        ::= assign_pair ("," assign_pair)* ";"
-incdec_stmt        ::= ("++" lvalue | lvalue "++" | "--" lvalue | lvalue "--") ";"
-lvalue             ::= "*" lvalue | identifier ( "[" expr "]" | "." identifier )*
+function_decl        ::= ("pure")? "function" identifier "(" params? ")" ":" return_type
+                          contract_block func_block
+contract_block       ::= "[" contract_clause+ "]"
+return_type          ::= type | "void"
+extern_decl          ::= "extern" "function" identifier "(" params? ")" ":" return_type ";"
+operator_decl        ::= "operator" op_symbol "(" param "," param ")" ":" return_type func_block
+op_symbol            ::= "==" | "!=" | "<" | ">" | "<=" | ">=" | "+" | "-" | "*" | "/" | "%"
+params               ::= param ("," param)*
+param                ::= ("ref")? identifier ":" type
 
-if_stmt            ::= "if" "(" expr ")" block
-                        ("elseif" "(" expr ")" block)*
-                        ("else" block)?
-while_stmt         ::= "while" "(" expr ")" "[" loop_clause+ "]" block
-loop_clause        ::= invariant_clause | decreases_clause
-return_stmt        ::= "return" expr? ";"
-break_stmt         ::= "break" ";"
-continue_stmt      ::= "continue" ";"
-expr_stmt          ::= expr ";"
+contract_clause      ::= requires_clause | ensures_clause | decreases_clause
+requires_clause      ::= "requires" ":" expr ";"
+ensures_clause       ::= "ensures" ":" expr ";"
+decreases_clause     ::= "decreases" ":" expr ";"
+invariant_clause     ::= "invariant" ":" expr ";"
 
-expr               ::= logic_or
-logic_or           ::= logic_and ("||" logic_and)*
-logic_and          ::= comparison ("&&" comparison)*
-comparison         ::= bit_or (("==" | "!=" | "<" | ">" | "<=" | ">=") bit_or)?
-bit_or             ::= bit_xor ("|" bit_xor)*
-bit_xor            ::= bit_and ("^" bit_and)*
-bit_and            ::= shift ("&" shift)*
-shift              ::= additive (("<<" | ">>") additive)*
-additive           ::= multiplicative (("+" | "-") multiplicative)*
-multiplicative     ::= exponent (("*" | "/" | "%") exponent)*
-exponent           ::= unary (("**" | "_/") exponent)?
-unary              ::= ("!" | "-" | "&") unary | cast_deref_or_postfix
+/* --- Utasítások és Blokkok --- */
+func_block           ::= "{" decl* stmt* "}"
+block                ::= "{" stmt* "}"
+decl                 ::= ("mut" | "const") identifier ":" type (":=" expr)? ";"
+
+stmt                 ::= assign_stmt | incdec_stmt | if_stmt | while_stmt | return_stmt
+                        | break_stmt | continue_stmt | expr_stmt
+
+assign_pair          ::= lvalue assign_op expr
+assign_op            ::= ":=" | ":+" | ":-" | ":*" | ":/"
+assign_stmt          ::= assign_pair ("," assign_pair)* ";"
+incdec_stmt          ::= ("++" lvalue | lvalue "++" | "--" lvalue | lvalue "--") ";"
+lvalue               ::= "*" lvalue | identifier ( "[" expr "]" | "." identifier )*
+
+if_stmt              ::= "if" "(" expr ")" block
+                          ("elseif" "(" expr ")" block)*
+                          ("else" block)?
+while_stmt           ::= "while" "(" expr ")" "[" loop_clause+ "]" block
+loop_clause          ::= invariant_clause | decreases_clause
+return_stmt          ::= "return" expr? ";"
+break_stmt           ::= "break" ";"
+continue_stmt        ::= "continue" ";"
+expr_stmt            ::= expr ";"
+
+/* --- Kifejezések --- */
+expr                 ::= logic_or
+logic_or             ::= logic_and ("||" logic_and)*
+logic_and            ::= comparison ("&&" comparison)*
+comparison           ::= bit_or (("==" | "!=" | "<" | ">" | "<=" | ">=") bit_or)?
+bit_or               ::= bit_xor ("|" bit_xor)*
+bit_xor              ::= bit_and ("^" bit_and)*
+bit_and              ::= shift ("&" shift)*
+shift                ::= additive (("<<" | ">>") additive)*
+additive             ::= multiplicative (("+" | "-") multiplicative)*
+multiplicative       ::= exponent (("*" | "/" | "%") exponent)*
+exponent             ::= unary (("**" | "_/") exponent)?
+unary                ::= ("!" | "-" | "&") unary | cast_deref_or_postfix
 cast_deref_or_postfix ::= lvalue "as" type | "*" unary | postfix
-postfix            ::= primary postfix_op*
-postfix_op         ::= "[" expr "]" | "." identifier | "(" args? ")"
-primary            ::= struct_literal | array_literal | identifier | literal
-                      | sizeof_expr | lengthof_expr | "(" expr ")"
-sizeof_expr        ::= "sizeof" "(" (type | expr) ")"
-lengthof_expr      ::= "lengthof" "(" (type | expr) ")"
-args               ::= arg ("," arg)*
-arg                ::= ("ref")? expr
+postfix              ::= primary postfix_op*
+postfix_op           ::= "[" expr "]" | "." identifier | "(" args? ")"
+primary              ::= struct_literal | array_literal | identifier | literal
+                        | sizeof_expr | lengthof_expr | "(" expr ")"
+sizeof_expr          ::= "sizeof" "(" (type | expr) ")"
+lengthof_expr        ::= "lengthof" "(" (type | expr) ")"
+args                 ::= arg ("," arg)*
+arg                  ::= ("ref")? expr
 
-struct_literal     ::= identifier "{" field_init ("," field_init)* "}"
-field_init         ::= identifier ":=" expr
+struct_literal       ::= identifier "{" field_init ("," field_init)* "}"
+field_init           ::= identifier ":=" expr
 
-array_literal      ::= "{" expr_list "}"
-expr_list          ::= expr ("," expr)*
+array_literal        ::= "{" expr_list "}"
+expr_list            ::= expr ("," expr)*
 
-literal            ::= integer_literal | float_literal | char_literal
-                      | bool_literal | null_literal
-integer_literal    ::= decimal_form | based_form
-decimal_form       ::= digit+
-based_form         ::= digit+ "n" value_digit+
-float_literal      ::= digit+ "." digit+ (("e" | "E") ("+" | "-")? digit+)?
-char_literal       ::= "'" (char_body | escape_seq) "'"
-escape_seq         ::= "\" ("n" | "t" | "r" | "0" | "\" | "'")
-bool_literal       ::= "true" | "false"
-null_literal       ::= "null"
+/* --- Literálok és Típusok --- */
+literal              ::= integer_literal | float_literal | char_literal
+                        | bool_literal | null_literal
+integer_literal      ::= decimal_form | based_form
+decimal_form         ::= digit+
+based_form           ::= digit+ "n" value_digit+
+float_literal        ::= digit+ "." digit+ (("e" | "E") ("+" | "-")? digit+)?
+char_literal         ::= "'" (char_body | escape_seq) "'"
+pure_string_literal  ::= '"' raw_char* '"'
+string_literal       ::= '"' (char_body | escape_seq)* '"'
+raw_char             ::= any byte except '"' and a raw newline
+escape_seq           ::= "\\" ("n" | "t" | "r" | "0" | "\\" | "'")
+bool_literal         ::= "true" | "false"
+null_literal         ::= "null"
 
-base_type          ::= "int8" | "int16" | "int" | "int32" | "int64"
-                      | "uint8" | "uint16" | "uint" | "uint32" | "uint64" | "uintptr"
-                      | "bool" | "char"
-                      | "float32" | "float64" | "float"
-                      | "ufloat32" | "ufloat64" | "ufloat"
-                      | identifier
-type               ::= "*" base_type "[" integer_literal "]"
-                      | "*" "void"
-                      | "*" type
-                      | base_type "[" integer_literal "]"
-                      | "(" type ")"
-                      | base_type
+base_type            ::= "int8" | "int16" | "int" | "int32" | "int64"
+                        | "uint8" | "uint16" | "uint" | "uint32" | "uint64" | "uintptr"
+                        | "bool" | "char"
+                        | "float32" | "float64" | "float"
+                        | "ufloat32" | "ufloat64" | "ufloat"
+                        | identifier
+type                 ::= "*" base_type "[" integer_literal "]"
+                        | "*" "void"
+                        | "*" type
+                        | base_type "[" integer_literal "]"
+                        | "(" type ")"
+                        | base_type
 
-identifier         ::= ("a".."z" | "A".."Z") ("a".."z" | "A".."Z" | "0".."9" | "_")*
-digit              ::= "0".."9"
-value_digit        ::= "0".."9" | "a".."f" | "A".."F"
+identifier           ::= ("a".."z" | "A".."Z") ("a".."z" | "A".."Z" | "0".."9" | "_")*
+digit                ::= "0".."9"
+value_digit          ::= "0".."9" | "a".."f" | "A".."F"
 
-comment            ::= line_comment | block_comment
-line_comment       ::= "//" (any_char_except_newline)* newline
-block_comment      ::= "/*" (any_char)* "*/"
+comment              ::= line_comment | block_comment
+line_comment         ::= "//" (any_char_except_newline)* newline
+block_comment        ::= "/*" (any_char)* "*/"
 
-keywords           ::= "function" | "struct" | "extern" | "mut" | "const" | "pure"
-                      | "ref" | "operator"
-                      | "if" | "else" | "elseif" | "while" | "return" | "break" | "continue"
-                      | "as" | "sizeof" | "lengthof"
-                      | "true" | "false" | "null"
-                      | "int8" | "int16" | "int" | "int32" | "int64"
-                      | "uint8" | "uint16" | "uint" | "uint32" | "uint64" | "uintptr"
-                      | "bool" | "void" | "char"
-                      | "float32" | "float64" | "float" | "ufloat32" | "ufloat64" | "ufloat"
+/* --- Lexikális elemek és Kulcsszavak --- */
+keywords             ::= "namespace" | "use" | "@autoload"
+                        | "verified" | "unverified"
+                        | "function" | "struct" | "extern" | "mut" | "const" | "pure"
+                        | "ref" | "operator"
+                        | "if" | "else" | "elseif" | "while" | "return" | "break" | "continue"
+                        | "as" | "sizeof" | "lengthof"
+                        | "true" | "false" | "null"
+                        | "int8" | "int16" | "int" | "int32" | "int64"
+                        | "uint8" | "uint16" | "uint" | "uint32" | "uint64" | "uintptr"
+                        | "bool" | "void" | "char"
+                        | "float32" | "float64" | "float" | "ufloat32" | "ufloat64" | "ufloat"
 
-contextual_keywords ::= "requires" | "ensures" | "invariant" | "decreases"
+contextual_keywords  ::= "requires" | "ensures" | "invariant" | "decreases"
                         | "old" | "result" | "last"
-                        -- see §1.4: these are ordinary identifiers everywhere
-                        -- except the grammar position(s) each is listed at above
-                        -- ("requires" has two: a contract_block clause keyword,
-                        -- and a bare expression atom inside "ensures"/"invariant",
-                        -- §7.6a; "old" is valid in both of those same two
-                        -- clauses too, §7.6 -- "result" alone stays ensures-only;
-                        -- "last(expr)" is valid in "invariant" and "decreases", §7.6b)
 ```
 
 The `type` rule's alternatives apply in order, first match wins — see
@@ -2582,49 +2657,40 @@ commitment to the exact shape.
 
 Explicitly discussed and intentionally **not** part of v1:
 
-1. **Namespaces / qualified names** (`ns.symbol`-style) — planned as
-   the very next step after v1 (informally, "v1.1"), specifically to
-   properly scope names pulled in through `#include` (§6.2), which for
-   now still dumps everything into one flat global namespace exactly
-   like a single-file v0 program. This is also explicitly flagged as
-   laying groundwork toward an eventual object-oriented capability,
-   though no further design work on that has happened yet.
-2. **True separate compilation** (independently built, cached/reusable
-   compiled units, not just one big textual splice, §6.2) — a bigger
-   undertaking than namespaces (it touches linking, not just name
-   resolution), needed for the same underlying reason (`#include`
-   re-parsing everything from source on every build doesn't scale
-   indefinitely), but tracked as its own, likely-later piece of work.
-   §6.2's file-scoped visibility rule was chosen specifically to make
-   this practical for an implementation that wants it; v1 itself still
-   doesn't mandate it.
-3. **Static verification** (proving a `requires`/`ensures`/`invariant`/
-   `decreases` clause true for *all* inputs, e.g. via an SMT solver) —
-   v1's contracts are runtime-checked only (§7.5), by deliberate choice,
-   not as a stepping stone whose "real" follow-up is already planned in
-   any detail. Whether/how static proving happens is entirely open.
-4. **A `string` standard library type**, **console I/O helpers**, and
+1. **Static verification's completeness is not guaranteed
+   project-wide.** §7.8's Why3 path can prove any individual module's
+   contracts, but a `verified` `@autoload` prefix (§6.2b) lets a module
+   be trusted *without* ever actually being run through it — meaning
+   "this project passed `postulate verify`" does not, by itself, mean
+   *every* reachable module was proven, only that every module which
+   wasn't already flagged trusted was. Whether/how to also guarantee
+   (or at least surface) *whole-project* proof coverage — as opposed to
+   per-module, opt-out-able coverage — is open, not designed here.
+2. **A `string` standard library type**, **console I/O helpers**, and
    **threading helpers** (`thread_create`/`thread_join`/`mutex`/
    `condvar`, §10) — all buildable on v1's primitives, none designed or
    built as part of v1 itself.
-5. **Struct field reflection** (querying a struct type's field list at
+3. **Struct field reflection** (querying a struct type's field list at
    compile time, in a form usable for indexing into it) — discussed,
    genuinely wanted, but not designed here: doing this soundly without
    breaking static typing needs its own dedicated design pass, and
-   overlaps enough with the polymorphism/type-class work (item 7) that
+   overlaps enough with the polymorphism/type-class work (item 5) that
    it makes more sense to design them together than to bolt a narrow
    version on now.
-6. **A general foreign-function interface** — `extern function` still
+4. **A general foreign-function interface** — `extern function` still
    names one fixed, Hoare-recognized set of Linux syscalls (v0 §5.2);
    v1 does not open this up to arbitrary external symbols.
-7. **Polymorphic (generic) functions and type classes** — noted as a
+5. **Polymorphic (generic) functions and type classes** — noted as a
    clear future direction, no design work done yet; §5.4's operator
-   overloading and item 5's struct reflection are both deliberately
+   overloading and item 3's struct reflection are both deliberately
    scoped to *not* need this, so that neither has to wait for it.
-8. **Further preprocessor directives** beyond `#include` (§6.2) — macro
-   expansion, conditional compilation — noted as plausible, not
-   designed.
-9. **Any language-level data-race protection.** `sys_clone` (§5.2) makes
+6. **No macro expansion or conditional compilation of any kind.** v1's
+   module system (§6.2) resolves entirely through real grammar
+   (`namespace`/`use`/`@autoload`) — there is no preprocessing step left
+   at all, and therefore nothing analogous to `#define`/`#ifdef` to
+   design either. A textual macro facility remains a plausible, wholly
+   separate, later addition, not a gap in the current design.
+7. **Any language-level data-race protection.** `sys_clone` (§5.2) makes
    genuinely concurrent, shared-address-space threads possible in v1,
    but nothing in the type system or checker knows that two threads can
    now execute at once — a pointer or `ref` parameter (§2.5/§5.3a) can
@@ -2663,6 +2729,8 @@ about themselves.
 ```postulate
 // Postulate v1 sample: greatest common divisor, by repeated subtraction,
 // specified against an independent recursive definition.
+
+namespace \Main;
 
 extern function print(val : uint) : void;
 
@@ -2863,5 +2931,6 @@ function classify(n : int32) : int32 [
 // mirrors; not repeated here.
 ```
 
-(`#include` isn't shown here since it only matters across multiple
-files — see §6.2's own examples.)
+(`namespace`/`use`/`@autoload` aren't repeated for each snippet above
+since they only matter across multiple files — see §6.2/§6.2a/§6.2b's
+own examples.)

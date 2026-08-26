@@ -1,0 +1,4 @@
+namespace \Main;
+
+@autoload("\Vendor\Math\
+, "libs/math/src");
