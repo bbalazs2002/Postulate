@@ -648,9 +648,11 @@ signature that doesn't match exactly, is a compile error.
 | `sys_close` | `(fd: int64) : int64` |
 
 `sys_openat`/`sys_close` (Linux syscalls 257/3) were added specifically
-to unblock `v1.0.1`'s `#include` (docs/postulate_stage1_v1_0_1_include_design.md)
-— Stage 1's own source is v0, and no earlier extern can open a file by
-path, only read an already-open descriptor. `path` is `*uint8`, not
+to unblock the `#include` mechanism an early Stage 1 bootstrap plan
+once had (retired since — superseded in full by v1's own namespace/
+`use`/`@autoload` system, `docs/postulate_stage1_bootstrap_plan.md`'s
+own "Revision note") — Stage 1's own source is v0, and no earlier
+extern can open a file by path, only read an already-open descriptor. `path` is `*uint8`, not
 `*char`, since v0 has no `char` type at all (the v1 reference's own
 §5.2 table for these two names uses `*char`, matching the type that
 form will eventually take once `char` exists).

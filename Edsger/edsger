@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# The Edsger compiler CLI -- the v1 analogue of Hoare/hoare: one command
+# instead of the manual pipeline (build/codegen -> llc) scripts/run_
+# codegen_tests.sh drives internally. Parses, checks, and generates LLVM
+# IR from a single `.ptl` file, then assembles it to a native object
+# file with `llc`.
+#
+# Deliberately does NOT link the result into a runnable binary the way
+# `hoare` does, even though the shape below mirrors `hoare` in every
+# other respect -- Edsger's own codegen module doesn't emit an entry
+# point (`_start`) or an exit syscall yet (unlike v0/Hoare, whose own
+# codegen bakes `_start` directly into every compiled program's output
+# -- see Hoare/scripts/build.sh's own `ld -e _start` line, and Hoare/
+# src/codegen_main.asm, which is what actually emits it). This is a
+# real, tracked gap, not an oversight of this script: see "Tracked
+# checkpoint: extern/syscall calls and `_start`" in docs/postulate_
+# stage1_bootstrap_plan.md for exactly what's missing and the concrete
+# LLVM-IR shape it needs once someone builds it. Until then, an
+# assembled `.o` is the most this script can honestly hand back --
+# linking it into something that runs is left to the caller, who knows
+# whether their own program needs an entry point wired up by hand.
+#
+# Requires `llc` on PATH (Ubuntu's `llvm` package, same as Edsger/
+# Dockerfile already installs) and build/codegen already built (see
+# scripts/build.sh) -- same requirement shape as every other script in
+# this repository. Run this from inside the Docker image (or an
+# equivalent Linux toolchain), not directly on a Windows host.
+set -uo pipefail
+
+# readlink -f resolves through a symlink (e.g. /usr/local/bin/edsger ->
+# /opt/edsger/edsger in the release image, see Dockerfile.release) to
+# the real script path, so build/codegen is still found relative to
+# where this file actually lives, not wherever it was invoked from --
+# same reasoning as hoare's own SCRIPT_PATH/SCRIPT_DIR lines.
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+CODEGEN="$SCRIPT_DIR/build/codegen"
+
+usage() {
+    echo "usage: $(basename "$0") <file.ptl> [-o <output>] [--emit-llvm]" >&2
+    echo "  -o <output>     output path (default: <file> with .ptl stripped, plus .o -- or .ll under --emit-llvm)" >&2
+    echo "  --emit-llvm     stop after codegen and write the emitted LLVM IR text itself, not an assembled object file" >&2
+}
+
+input=""
+output=""
+emit_llvm=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --emit-llvm)
+            emit_llvm=1
+            shift
+            ;;
+        -o)
+            if [[ $# -lt 2 ]]; then
+                echo "edsger: -o requires an argument" >&2
+                usage
+                exit 64
+            fi
+            output="$2"
+            shift 2
+            ;;
+        -*)
+            echo "edsger: unrecognized option '$1'" >&2
+            usage
+            exit 64
+            ;;
+        *)
+            if [[ -n "$input" ]]; then
+                echo "edsger: only one input file may be given (already have '$input', got '$1')" >&2
+                usage
+                exit 64
+            fi
+            input="$1"
+            shift
+            ;;
+    esac
+done
+
+if [[ -z "$input" ]]; then
+    echo "edsger: no input file given" >&2
+    usage
+    exit 64
+fi
+if [[ ! -f "$input" ]]; then
+    echo "edsger: no such file: $input" >&2
+    exit 64
+fi
+if [[ ! -x "$CODEGEN" ]]; then
+    echo "edsger: $CODEGEN not found -- build it first (see scripts/build.sh)" >&2
+    exit 64
+fi
+
+if [[ -z "$output" ]]; then
+    base=$(basename -- "$input")
+    if [[ "$base" == *.ptl ]]; then
+        base="${base%.ptl}"
+    fi
+    if [[ "$emit_llvm" -eq 1 ]]; then
+        output="${base}.ll"
+    else
+        output="${base}.o"
+    fi
+fi
+
+workdir=$(mktemp -d)
+trap 'rm -rf "$workdir"' EXIT
+
+"$CODEGEN" < "$input" > "$workdir/out.ll" 2> "$workdir/codegen.err"
+codegen_code=$?
+if [[ "$codegen_code" -ne 0 ]]; then
+    cat "$workdir/codegen.err" >&2
+    exit "$codegen_code"
+fi
+
+if [[ "$emit_llvm" -eq 1 ]]; then
+    cp "$workdir/out.ll" "$output"
+    exit 0
+fi
+
+# -mtriple given explicitly, not baked into the emitted `.ll`, so the
+# emitted text itself stays independent of whichever LLVM version's own
+# default datalayout string happens to be current (postulate_stage1_
+# bootstrap_plan.md's own "Tracked checkpoint" section, folded in from
+# the now-retired v1.0.2 design doc, explains this choice in full).
+if ! llc -filetype=obj -mtriple=x86_64-unknown-linux-gnu -o "$workdir/out.o" "$workdir/out.ll" 2> "$workdir/llc.err"; then
+    echo "edsger: internal error -- llc rejected the generated LLVM IR (this is an Edsger bug, please report it):" >&2
+    cat "$workdir/llc.err" >&2
+    exit 5
+fi
+
+cp "$workdir/out.o" "$output"
+
+echo "edsger: wrote $output (an unlinked object file -- Edsger doesn't emit an entry point/exit syscall yet, see this script's own header comment)" >&2

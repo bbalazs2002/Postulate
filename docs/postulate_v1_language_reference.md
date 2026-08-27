@@ -855,8 +855,7 @@ order is fixed changes. v0's right-to-left rule existed only because
 it was the natural order for Hoare's/the original Stage 1 proof of
 concept's push-based calling convention (the last-evaluated argument
 ends up closest to the stack pointer); Stage 1's LLVM IR backend
-(`v1.0.2`, see
-[`postulate_stage1_v1_0_2_llvm_backend_design.md`](postulate_stage1_v1_0_2_llvm_backend_design.md))
+(`v1.0.2`, `docs/postulate_stage1_bootstrap_plan.md`'s own step table)
 removes that mechanism, and with it the only reason to prefer
 right-to-left, so `v1` adopts left-to-right — matching source reading
 order, the default every C-family language without a specific reason
@@ -883,10 +882,21 @@ optional initialization by type, and the fixed "every `decl` precedes
 every statement in a `func_block`" placement rule all carry over as-is.
 Restated here rather than left to the cross-reference alone, since it's
 easy to miss and is not a v0-only affordance dropped in v1: for an
-array-typed `mut`/`const`, a single scalar expression (not an array
-literal) is a valid initializer and is **broadcast** to every element —
-`mut arr : int32[10] := 0;` sets all 10 elements to `0`. An array
-literal (§3.8) initializes each element individually instead; the two
+array-typed `mut`/`const`, a single expression whose type exactly
+matches the array's own element type — not itself an array literal —
+is a valid initializer and is **broadcast** to every element:
+`mut arr : int32[10] := 0;` sets all 10 elements to `0`, and this is
+not scalar-only — `mut pts : Point[4] := p;` (for an already-valued
+`Point`-typed `p`) is equally a broadcast, setting all 4 elements to
+independent copies of `p`, not 4 aliases of it (§7.2's "no partially-
+initialized composite values" principle extends naturally: a broadcast
+source is coerced/copied exactly once, then that one already-evaluated
+value is copied — never re-evaluated — into every element). A source
+whose type doesn't exactly match the element type (a scalar against a
+struct-typed element, or a mismatched struct) is a compile error, not a
+silently-attempted conversion — v1 §2.10's "no implicit conversion,
+anywhere" applies here too. An array literal (§3.8) initializes each
+element individually instead; a broadcast source and an array literal
 are mutually exclusive shapes for the same initializer position, not a
 literal-with-a-broadcast-fallback.
 
@@ -928,14 +938,17 @@ own rewrite above is easy to misread as replacing rather than
 extending it:** for a plain `:=` pair, the right-hand side may still be
 a plain expression, a struct/array literal, a plain-copy source of the
 same composite type (`p2 := p1;`), or — for an array-typed `lvalue` —
-a scalar **broadcast** source, matching the same shapes and rules as a
-`decl` initializer (§4.1): `arr := 0;` overwrites every element of an
-already-declared array `arr` with `0`, exactly like its initializer
-form would have. This broadcast permission is specific to `:=` — the
-four compound forms above are pure sugar for the *scalar* form of their
-underlying binary operator (§3.2), which has no array-operand shape at
-all, so `arr :+ 1;` for an array-typed `arr` is a plain type error, not
-an element-wise broadcast-add.
+a **broadcast** source (scalar or element-type-matching struct alike,
+§4.1), matching the same shapes and rules as a `decl` initializer:
+`arr := 0;` overwrites every element of an already-declared array `arr`
+with `0`, and `arr := p;` (for a `Point[N]`-typed `arr` and a
+`Point`-typed `p`) overwrites every element with its own independent
+copy of `p`, exactly like either's initializer form would have. This
+broadcast permission is specific to `:=` — the four compound forms
+above are pure sugar for the *scalar* form of their underlying binary
+operator (§3.2), which has no array-operand shape at all (nor any
+struct-operand shape), so `arr :+ 1;` for an array-typed `arr` is a
+plain type error, not an element-wise broadcast-add.
 
 **Resolution: context-sensitive lexing, not a spacing convention.** `:*`
 can look like it collides with a *type* — a pointer type also starts

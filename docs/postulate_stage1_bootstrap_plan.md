@@ -336,12 +336,12 @@ its job.
 
 | Version | Adds | Why here |
 |---|---|---|
-| `v1.0.1` | **Retired.** Was `#include` (relative-path resolution, recursive splice, include-once, cycle detection). Superseded in full by namespaces/`use`/`@autoload` (§6.2), built as part of `v1.0.6`. Historical design doc: [`postulate_stage1_v1_0_1_include_design.md`](postulate_stage1_v1_0_1_include_design.md) (describes a mechanism no longer part of the language). | See "Revision note" above. |
-| `v1.0.2` | **Done.** Codegen backend switch: emit LLVM IR instead of x86 NASM text; `llc` replaces `nasm`. Same scalar-only feature set as before — a backend swap, not a feature addition. | Foundation for composites, optimization, and per-module compilation alike — §2. |
-| `v1.0.3` | **Done.** Composite (struct/array) parameters and return values in Stage 1's own codegen — v0 parity. Structs, arrays, broadcast-init, pointers (scalar and composite pointees, including self-referential struct fields), and the by-value calling convention. Design: [`postulate_stage1_v1_0_3_composites_design.md`](postulate_stage1_v1_0_3_composites_design.md). | Implemented directly against LLVM IR's native aggregate types — §2. |
-| `v1.0.4` | **Retired.** Was true separate compilation, designed against `#include`'s textual-splice model. Never implemented. What it was trying to achieve is now the namespace system's own design property (§6.2c), not a separate mechanism to build. Superseded design doc: [`postulate_stage1_v1_0_4_separate_compilation_design.md`](postulate_stage1_v1_0_4_separate_compilation_design.md) (describes a mechanism the current language design doesn't need). | See "Revision note" above. |
+| `v1.0.1` | **Retired.** Was `#include` (relative-path resolution, recursive splice, include-once, cycle detection). Superseded in full by namespaces/`use`/`@autoload` (§6.2), built as part of `v1.0.6`. Its own design doc (`postulate_stage1_v1_0_1_include_design.md`, describing a mechanism no longer part of the language) has since been deleted — the one piece of it with lasting value, adding `sys_openat`/`sys_close` to the `extern function` whitelist to unblock file I/O, is already folded into `postulate_v1_language_reference.md` §5.2's own table and `postulate_v0_language_reference.md`'s own extern-table note. | See "Revision note" above. |
+| `v1.0.2` | **Done.** Codegen backend switch: emit LLVM IR instead of x86 NASM text; `llc` replaces `nasm`. Same scalar-only feature set as before — a backend swap, not a feature addition. Its own design doc (`postulate_stage1_v1_0_2_llvm_backend_design.md`) has since been deleted; the one piece of it not yet carried into Edsger — the extern/syscall inline-asm and `_start` emission technique — is preserved in the "Tracked checkpoint: extern/syscall calls and `_start`" section below, not lost. | Foundation for composites, optimization, and per-module compilation alike — §2. |
+| `v1.0.3` | **Done.** Composite (struct/array) parameters and return values in Stage 1's own codegen — v0 parity. Structs, arrays, broadcast-init (scalar **or** struct source, both at decl-init and at plain assignment — reference §4.1/§4.2, `v1.1.12` below), pointers (scalar and composite pointees, including self-referential struct fields), and the by-value calling convention. Its own design doc (`postulate_stage1_v1_0_3_composites_design.md`) has since been deleted; its broadcast-init scope finding and its `_start`/`main`-return-width note are preserved in `v1.1.12` and the "Tracked checkpoint" section below, respectively. | Implemented directly against LLVM IR's native aggregate types — §2. |
+| `v1.0.4` | **Retired.** Was true separate compilation, designed against `#include`'s textual-splice model. Never implemented. What it was trying to achieve is now the namespace system's own design property (§6.2c), not a separate mechanism to build. Its own design doc (`postulate_stage1_v1_0_4_separate_compilation_design.md`, describing a mechanism the current language design doesn't need) has since been deleted — nothing in it survived its own retirement, since none of it was ever built. | See "Revision note" above. |
 | **`v1.0.5`** *(placeholder — see `v1.1.2`)* | *(retired slot — optimization moved to `v1.1.2`; kept blank rather than reused, so no future step is ever ambiguously "the same number as something else.")* | — |
-| **`v1.0.6`** | **The Edsger rewrite. Generation `0` ends here.** Namespaces/`use`/`@autoload` (dependency resolution only, no caching); `char` + `as`; pointer arithmetic/`*void`/`uintptr`/`sizeof`/`lengthof`; full modular architecture (lexer/AST/parser/semantic-analyzer-and-type-checker/codegen as real, separate modules; pointer-linked `ASTNode` tree replacing the index arena). Built and verified **module by module**, each module covering the whole feature batch, each checked by hand before the next starts (§3). Design: [`postulate_stage1_v1_0_6_edsger_design.md`](postulate_stage1_v1_0_6_edsger_design.md). | §1/§3 — the module system is the architecture's own foundation, not an add-on to it; `char`/`as`/pointer arithmetic front-loaded so Edsger's own later stages are comfortable to write. |
+| **`v1.0.6`** | **The Edsger rewrite. Generation `0` ends here.** Namespaces/`use`/`@autoload` (dependency resolution only, no caching); `char` + `as`; pointer arithmetic/`*void`/`uintptr`/`sizeof`/`lengthof`; full modular architecture (lexer/AST/parser/semantic-analyzer-and-type-checker/codegen as real, separate modules; pointer-linked `ASTNode` tree replacing the index arena). Built and verified **module by module**, each module covering the whole feature batch, each checked by hand before the next starts (§3). Its own design doc (`postulate_stage1_v1_0_6_edsger_design.md`) has since been deleted — it described *how* to build what this row and §3 above already fully describe, and Edsger's own shipped source (`Edsger/src/*.ptl`) is now the more authoritative, more precise record of the actual result. | §1/§3 — the module system is the architecture's own foundation, not an add-on to it; `char`/`as`/pointer arithmetic front-loaded so Edsger's own later stages are comfortable to write. |
 | **`v1.1.1`** *(generation `1` begins — Edsger proper)* | Incremental compilation: skip recompiling a module whose own source is unchanged **and** whose `use`d dependencies' own *interfaces* — not merely their compiled bodies — are unchanged since its last successful compile (§6.2c's caching half, deliberately deferred out of `v1.0.6`). Cache-key scope is deliberately narrow: a module's own source hash, plus, per direct `use`d dependency, that dependency's *interface* hash as of this module's last compile — never a dependency's full body hash, and never anything from further down the transitive chain. This is what keeps a body-only edit in one module from cascading into recompiling everything that (even indirectly) depends on it. | Genuinely separable from `v1.0.6`'s dependency-*resolution* work; not worth the risk of getting both right at once. |
 | `v1.1.2` | Optimization turned on: each module's LLVM IR routed through `opt` at a chosen level before `llc`. | Moved here from the old `v1.0.5` — rides on the same LLVM IR switch (§2), but no longer competes with the rewrite for priority; verified by re-running the full fixture suite under optimization. |
 | `v1.1.3` | Statement sugar: `elseif` (§4.3), `break`/`continue` (§4.6), compound assignment `:+ :- :* :/` (§4.2), `++`/`--` (§4.2a). | Pure desugaring, no new types — deliberately left out of `v1.0.6` (its own note) since it has no dependency relationship to that batch. |
@@ -353,7 +353,7 @@ its job.
 | `v1.1.9` | Verification contracts, part 2: the opt-in checked-build codegen mode (§7.3–§7.5) — runtime assertions at every specified checkpoint, halt-with-diagnostic on failure. | Split from `v1.1.8` deliberately: parsing/checking a contract correctly and *emitting code* for one are separably testable, and this is the riskier of the two. |
 | `v1.1.10` | Static verification: the Why3/WhyML translation path and `postulate verify` tool (§7.8) — modular, axiom-per-`use`d-contract, `verified`-prefix-aware, incremental per `v1.1.1`'s own cache. Also where the cache's own remaining open questions (`.proof` validity relative to `unverified`-trusted axioms; a compiler-generation/build-identity component in the cache key, so an Edsger upgrade can't silently serve stale `.pto`/`.proof` entries) get resolved. | Needs `v1.1.8`'s contract grammar/semantics and `v1.1.1`'s incremental-compilation machinery (reused, not reinvented, for verification caching); entirely optional and separate from the default build (§7.5/§7.8), so it can land after everything the default pipeline needs. |
 | `v1.1.11` | Bounds-checking diagnostic build (§2.7b) — array indexing checked against `lengthof` in an opt-in build. | Same opt-in-diagnostic-build mechanism `v1.1.9` already built; reuses it rather than inventing a second one. |
-| `v1.1.12` | Array **broadcast-init and broadcast-assignment** (reference §4.1/§4.2): a single scalar expression as a `decl` initializer or a plain `:=` right-hand side, targeting an array-typed `mut`/`const`/`lvalue`, sets every element to that one value. Already real, working v1 behavior once — Stage 1's own pre-rewrite proof of concept implements it (`v1.0.3`'s own composite work, table row above) — but never carried into Edsger's Sema/Codegen: `v1.0.6`'s composite-type round (types, locals, parameters/return, field/index access, whole-value copy, struct/array literals) has no scalar-to-array broadcast path at all, in either `check_expected`/`decorate_literal_with_expected` (Sema) or the codegen side. Found during that round and deliberately left unfixed there rather than touched after the round had already shipped and passed its own test suite. | Small and fully self-contained — depends only on `v1.0.6`'s existing array-type support, nothing from `v1.1.1`–`v1.1.11`. Sequenced last among the ordinary feature steps (immediately before self-hosting closure) simply because it was found after this list was already drafted, not because anything here actually depends on the rest of generation `1`. |
+| `v1.1.12` | Array **broadcast-init and broadcast-assignment** (reference §4.1/§4.2): a single expression whose type exactly matches an array-typed `mut`/`const`/`lvalue`'s own element type — a scalar, **or a struct exactly matching an array-of-that-struct's element type** (`mut pts : Point[4] := p;`, not scalar-only) — as a `decl` initializer or a plain `:=` right-hand side, coerced/copied exactly once and that one value stored into every element (never re-evaluated per element). Already real, working v1 behavior once — Stage 1's own pre-rewrite proof of concept implements both the scalar and the struct-source shape, at both decl-init and assignment (`v1.0.3`'s own composite work, table row above; the struct-source shape was itself a mid-implementation discovery there, cross-checked directly against `Hoare/src/sema_stmt.asm`'s `check_array_broadcast_compatible` after an initial, too-narrow "scalar only" assumption) — but never carried into Edsger's Sema/Codegen: `v1.0.6`'s composite-type round (types, locals, parameters/return, field/index access, whole-value copy, struct/array literals) has no broadcast path of any kind, in either `check_expected`/`decorate_literal_with_expected` (Sema) or the codegen side. Found during that round and deliberately left unfixed there rather than touched after the round had already shipped and passed its own test suite. A source whose type doesn't exactly match the element type (scalar-vs-struct-element, or two different structs) must be a codegen/Sema error, not a silent miscompile — the old proof of concept's own testing caught a real bug of exactly this shape (see "Tracked checkpoint," below, for the general lesson about GEP index shapes that bug illustrates). | Small and fully self-contained — depends only on `v1.0.6`'s existing array-type support, nothing from `v1.1.1`–`v1.1.11`. Sequenced last among the ordinary feature steps (immediately before self-hosting closure) simply because it was found after this list was already drafted, not because anything here actually depends on the rest of generation `1`. |
 | `v1.1.13` | Self-hosting closure: Edsger compiles itself (Hoare → Edsger₁ from source; Edsger₁ → Edsger₂ from the same source; Edsger₂'s output agrees with Edsger₁'s). | The actual bootstrap goal (`Stage1/README.md`'s opening line) — only meaningful once the full v1.0 surface exists, since Edsger's own source will by then use most of it. |
 
 ### Tracked checkpoint: struct-field layout, before `v1.0.6`
@@ -368,6 +368,93 @@ deliberately deferred, not silently carried forward as permanent. This
 is a placeholder to make sure it gets a real look before `v1.0.6`
 closes out the still-single-file proof-of-concept era, rather than
 being forgotten between now and then.
+
+### Tracked checkpoint: extern/syscall calls and `_start`, not yet carried into Edsger
+
+`v1.0.6`'s own Module 4 (Codegen) description above says it emits LLVM
+IR "reusing and extending `v1.0.2`/`v1.0.3`'s existing emission logic"
+— true for scalar/composite/pointer codegen, but Edsger's actual
+`codegen.ptl` never ended up implementing the one piece of `v1.0.2`
+that made a *compiled program* itself runnable: an emitted entry point
+and an exit syscall. Every Edsger program compiles to a `define ...
+@main(...)` and nothing else — no `_start`, no way to call `extern
+function sys_write`/`sys_exit`/etc. at all, and consequently no way yet
+to link a compiled program into a binary that does anything observable
+or even exits cleanly (confirmed directly: nothing in `codegen.ptl`
+emits `_start`, an inline-asm `syscall`, or a `declare`d extern's
+actual implementation — an `extern function`'s own `declare` line is
+emitted, but nothing at link time backs the symbol it names). This is
+not a deliberate `v1.1.n`-style deferral the way `v1.1.12` above is —
+it's a genuine gap against `v1.0.6`'s own original intent, found while
+building `Edsger/edsger` (the CLI script mirroring `Hoare/hoare`, which
+is why that script deliberately stops at an unlinked `.o` rather than
+attempting to link one, per its own header comment) and while
+deleting the now-superseded `postulate_stage1_v1_0_2_llvm_backend_
+design.md`/`postulate_stage1_v1_0_3_composites_design.md`, which had
+already worked out the exact technique once for the pre-rewrite proof
+of concept. Preserved here rather than left to be rediscovered:
+
+- **Raw syscalls have no LLVM intrinsic** — each of the whitelisted
+  `extern function`s (§5.2's table: `sys_read`=0, `sys_write`=1,
+  `sys_close`=3, `sys_exit`=60, `sys_openat`=257, standard Linux
+  x86-64 numbers) needs to be emitted as a `call` to an inline-asm blob
+  with register-constrained operands — the standard LLVM idiom for raw
+  syscalls (the same technique e.g. Rust's and Zig's own freestanding
+  raw-syscall paths use), and the only realistic option short of
+  linking a separate hand-written stub object:
+
+  ```llvm
+  ; sys_write(fd, buf, count) -> i64
+  %ret = call i64 asm sideeffect
+    "syscall",
+    "={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}"
+    (i64 1, i64 %fd, i64 %buf, i64 %count)
+  ```
+
+  (`1` is `sys_write`'s own syscall number, loaded into the `rax` input
+  constraint directly as an immediate — `rax` is both an input, the
+  syscall number, and the output constraint, the return value, matching
+  the real `syscall` instruction's own behavior. `rcx`/`r11` are marked
+  clobbered because `syscall` itself overwrites them, an architectural
+  fact, not a convention choice; `~{memory}` prevents `llc` from
+  reordering surrounding memory operations across the call.)
+- **`_start` becomes a plain `define void @_start()`**: calls `@main`,
+  then performs the exit syscall inline-asm above with `main`'s return
+  value (`0` for a `void` main), then `unreachable`. No `@main`/libc/
+  crt0 convention needed — this is what makes `edsger`'s own eventual
+  link line able to stay exactly `ld -static -no-pie -e _start
+  -o out out.o`, no libc involved, mirroring `hoare`'s own link line
+  precisely. `_start` never reaches a `ret` (the process exits via the
+  syscall, not by returning), so any prologue `llc` may still emit for
+  it is dead code that never executes — harmless, not worth suppressing.
+- **`main`'s own declared return width, not an assumed one** — `_start`
+  must call `@main` at whatever width `main` actually declares (`void`
+  or any atomic type, reference §6.3), zero/sign-extending the result to
+  `i64` before the exit syscall only if it isn't already 64 bits wide
+  (the exit syscall's own observable exit code only depends on the low
+  8 bits regardless, so `zext` is fine unconditionally here, no need to
+  branch on `main`'s own signedness).
+- **A concrete bug shape to watch for, already hit once**: the old
+  proof of concept's own array codegen initially reused the same
+  `getelementptr` suffix piece for both "a runtime-computed element
+  index" (`i64 0, i64 %v2`) and "a compile-time-constant element
+  position" (`i64 0, i64 2`) — conflating the two produces
+  syntactically valid-looking IR that compiles cleanly but fails
+  `llc`'s own verifier (`'%vN' defined with type 'ptr' but expected
+  'i64'`) the moment it's actually assembled, not at Postulate-level
+  compile time. Edsger's own `codegen.ptl` already avoids this
+  particular shape (`gen_member_addr`'s constant-index GEPs and the
+  runtime-indexed array branch in `gen_addr` are two textually distinct
+  code paths, never sharing a "reuse the dynamic-index piece with a
+  literal appended" shortcut) — noted here so whoever adds syscall
+  codegen knows the failure mode to watch for if a similar shortcut
+  looks tempting there too, not because Edsger has this bug today.
+
+Whether this becomes its own `v1.1.n` step, gets folded backward into
+finishing `v1.0.6` itself, or is handled some other way is **explicitly
+not decided here** — same "flag it, don't silently lose it, decide
+later" spirit as the struct-field-layout checkpoint above, not a
+recommendation for which of those three it should be.
 
 ## 5. What's deliberately not in this plan
 
