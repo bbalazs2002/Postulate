@@ -1,8 +1,0 @@
-\Plugin\Foo\Bar
-2
-\Vendor\:module\
-vendor/:module/src
-0
-\Plugin\:module\
-plugins/:module/src
-0

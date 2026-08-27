@@ -1,0 +1,15 @@
+namespace \Main;
+
+@autoload("\Vendor\Geo\", "libs/geo/src");
+
+use \Core\Math\Sqrt;
+use \Vendor\Geo\Point;
+
+struct Wrapper {
+  p : Point;
+  s : Sqrt;
+}
+
+function main() : int32 {
+  return 0;
+}

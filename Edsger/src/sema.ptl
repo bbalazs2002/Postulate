@@ -1,68 +1,2001 @@
-// Edsger -- semantic analyzer module, v1.0.6 (Module 3), FIRST SLICE.
+// Edsger -- semantic analyzer module, v1.0.6 (Module 3), SECOND SLICE.
 // Written in Postulate v0, compiled by Hoare (Stage 0).
 //
-// Module 3's full scope (docs/postulate_stage1_v1_0_6_edsger_design.md,
-// "Module 3") is symbol-table construction, use/@autoload resolution,
-// and type checking/decoration -- built as a two-pass, worklist-driven
-// whole-program analysis (declare every top-level declaration across
-// every reachable file first, THEN check every function body, since by
-// then every symbol any body could reference already exists -- no
-// topological ordering, no deadlock on mutually-`use`-ing namespaces).
-// That whole design is agreed but not yet implemented here.
+// Self-contained, like lexer.ptl/parser.ptl: v0 has no separate
+// compilation, so this file embeds its own full copy of the lexer AND
+// parser (SourceReader through parse_program, unchanged from
+// parser.ptl) rather than "importing" them, so it can turn real .ptl
+// source into a real AST before doing anything semantic with it.
 //
-// This file is the FIRST, self-contained slice: the @autoload pattern-
-// matching / path-resolution algorithm (postulate_v1_language_
-// reference.md SS6.2b) on its own, built and unit-tested standalone
-// before the rest of Module 3 (symbol table, two-pass declare-then-
-// check, type rules, struct value-cycle detection) is added in a
-// follow-up step -- same module-by-module, incrementally-verified
-// discipline as lexer.ptl/parser.ptl. This was called out explicitly
-// for thorough testing, independent of everything else Module 3 will
-// eventually need.
+// This slice replaces the first slice's own throwaway line-based
+// @autoload test protocol (retired -- see git history / the previous
+// session for that version) with a real driver: tokenize + parse the
+// whole input, then:
+//   1. collect and validate every @autoload rule from the parsed
+//      AUTOLOAD_DECL nodes (validate_pattern, unchanged from the first
+//      slice) -- pattern/path text is sliced from each STRING_LIT
+//      token's own span with its surrounding quotes dropped
+//      (offset+1, length-2);
+//   2. resolve every use_decl's fqn against those rules (resolve_path,
+//      refactored below to take a fqn as pre-split Segment[] rather
+//      than a raw span -- the parser never records the position of
+//      the backslashes connecting a PATH_SEGMENT chain's own
+//      identifiers, only each segment's own token, so there is no
+//      single contiguous source span to hand it in the first place);
+//   3. run the symbol-table "declare" pass (struct/function/extern,
+//      postulate_stage1_v1_0_6_edsger_design.md's own Module 3 SS1)
+//      over the WHOLE program before computing anything that depends
+//      on cross-references -- this is pass 1 of the agreed two-pass
+//      design (declare everything, then check), which is what lets a
+//      struct field resolve a type declared later in the same file
+//      with no special-casing;
+//   4. compute every struct's size, detecting a value-type field cycle
+//      (struct A contains struct B by value, B contains A by value --
+//      an infinite size) via white/gray/black DFS coloring over the
+//      "sizing" call stack, flagging the error at the SECOND encounter
+//      of an in-progress struct only, not at every node in the cycle
+//      (this session's own explicit refinement, mirroring
+//      validate_pattern's identical "flag the second occurrence" rule
+//      for a duplicate autoload placeholder);
+//   5. dump the resolved use-paths and the symbol table itself
+//      (postulate_stage1_v1_0_6_edsger_design.md's own stated
+//      verification method for this module).
 //
-// Algorithm:
-//   - A pattern/path string's content is a "\"-separated (pattern) or
-//     "/"-separated (path) sequence of literal segments and
-//     ":label" placeholders -- a pattern segment starting with ":"
-//     binds whatever fqn segment sits in the same position; a path
-//     segment starting with ":" is replaced by that binding's value.
-//   - resolve(fqn, rules[]): try each rule in declaration order; a
-//     rule matches if its pattern's segments are a strict PREFIX of
-//     the fqn's own segments (at least one fqn segment must remain
-//     unconsumed -- a match with nothing left over has no filename to
-//     resolve to). On the first match, substitute every ":label" in
-//     the rule's path string with its bound segment, then append the
-//     fqn's remaining segments the same way the default rule would
-//     (directories for all but the last, ".ptl" on the last). No rule
-//     matching falls back to the default 1:1 rule over the WHOLE fqn.
-//   - A pattern that defines the same ":label" twice is a compile
-//     error, flagged at the SECOND occurrence only (not both) -- this
-//     session's own explicit refinement, mirroring how the struct
-//     value-cycle check (not yet implemented -- needs the symbol table
-//     this slice doesn't have yet) will also flag only the second
-//     encounter of a struct already being sized, not every node in the
-//     cycle.
-//
-// Test harness (main(), below): a plain line-based protocol, NOT the
-// real "extract a pure_string_literal's content" path (STRING_LIT
-// tokens carry their surrounding quotes in their own offset/length --
-// whoever wires this into the real multi-file driver later must slice
-// (offset+1, length-2) to drop them; this harness's input lines have no
-// quotes at all, since the algorithm under test only ever deals with
-// raw byte spans regardless of how they were obtained):
-//   line 1:        the fqn, e.g. \Plugin\Foo\Bar
-//   line 2:        rule count N
-//   next N groups of 3 lines: pattern, path, trust digit (0/1/2)
-// stdout: the resolved path + newline, on success.
-// stderr + exit 1: a duplicate-placeholder diagnostic, if any rule's
-// own pattern is malformed -- checked for ALL rules before any
-// resolution is attempted, matching how a real compiler would reject
-// the whole program rather than resolve against a half-validated rule
-// set.
+// Still NOT in this slice: multi-file `use`/`@autoload` file-opening
+// (sys_openat) -- use_decls are resolved to a PATH, but that file is
+// never actually opened/parsed/merged in yet; function-body/expression
+// type checking and AST decoration (data_type/symbol_ref/is_constant)
+// -- only top-level declarations and struct layout are handled. Both
+// remain for a follow-up step.
 
 extern function sys_read(fd: int64, buf: *uint8, count: uint64) : int64;
 extern function sys_write(fd: int64, buf: *uint8, count: uint64) : int64;
 extern function sys_exit(code: int64) : void;
+extern function sys_openat(dirfd: int64, path: *uint8, flags: int64, mode: int64) : int64;
+extern function sys_close(fd: int64) : int64;
+
+// ---------------------------------------------------------------------
+// Embedded lexer -- byte-for-byte the same design as lexer.ptl (see
+// that file's own header for the reasoning); copied rather than
+// shared, since v0 has no mechanism to share it. Buffer access goes
+// exclusively through reader_peek/reader_advance/reader_match/
+// reader_is_eof, exactly as there.
+// ---------------------------------------------------------------------
+
+struct SourceReader {
+  buffer : *(uint8[65536]);
+  length : uint64;
+  cursor : uint64;
+}
+
+function reader_is_eof(r: *SourceReader) : bool {
+  return (*r).cursor >= (*r).length;
+}
+
+function reader_peek(r: *SourceReader) : uint8 {
+  if (reader_is_eof(r)) {
+    return 0;
+  }
+  return (*(*r).buffer)[(*r).cursor];
+}
+
+function reader_advance(r: *SourceReader) : void {
+  if (reader_is_eof(r) == false) {
+    (*r).cursor := (*r).cursor + 1;
+  }
+}
+
+struct Token {
+  kind : int32;
+  offset : uint64;
+  length : uint64;
+}
+
+struct TriviaResult {
+  had_error : bool;
+  comment_start : uint64;
+  found_slash_token : bool;
+  slash_offset : uint64;
+}
+
+struct NumberResult {
+  had_error : bool;
+  error_at : uint64;
+}
+
+struct CharLitResult {
+  had_error : bool;
+  err_kind : int32;
+  error_at : uint64;
+}
+
+struct StringLitResult {
+  had_error : bool;
+}
+
+struct LineCol {
+  line : uint64;
+  col : uint64;
+}
+
+function is_digit(b: uint8) : bool {
+  return b >= 48 && b <= 57;
+}
+
+function is_hex_digit(b: uint8) : bool {
+  return (b >= 48 && b <= 57) || (b >= 97 && b <= 102) || (b >= 65 && b <= 70);
+}
+
+function is_alpha(b: uint8) : bool {
+  return (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || b == 95;
+}
+
+function is_alnum(b: uint8) : bool {
+  return is_alpha(b) || is_digit(b);
+}
+
+function is_ws(b: uint8) : bool {
+  return b == 32 || b == 9 || b == 13 || b == 10;
+}
+
+function skip_trivia(r: *SourceReader) : TriviaResult {
+  mut had_error : bool := false;
+  mut comment_start : uint64 := 0;
+  mut found_slash_token : bool := false;
+  mut slash_offset : uint64 := 0;
+  mut looping : bool := true;
+  mut slash_at : uint64 := 0;
+  mut terminated : bool := false;
+  mut inner_looping : bool := true;
+
+  while (looping) {
+    if (reader_is_eof(r)) {
+      looping := false;
+    } else {
+      if (is_ws(reader_peek(r))) {
+        reader_advance(r);
+      } else {
+        if (reader_peek(r) == 47) {
+          slash_at := (*r).cursor;
+          reader_advance(r);
+          if (reader_peek(r) == 47) {
+            reader_advance(r);
+            inner_looping := true;
+            while (inner_looping) {
+              if (reader_is_eof(r)) {
+                inner_looping := false;
+              } else {
+                if (reader_peek(r) == 10) {
+                  reader_advance(r);
+                  inner_looping := false;
+                } else {
+                  reader_advance(r);
+                }
+              }
+            }
+          } else {
+            if (reader_peek(r) == 42) {
+              reader_advance(r);
+              terminated := false;
+              inner_looping := true;
+              while (inner_looping) {
+                if (reader_is_eof(r)) {
+                  inner_looping := false;
+                } else {
+                  if (reader_peek(r) == 42) {
+                    reader_advance(r);
+                    if (reader_peek(r) == 47) {
+                      reader_advance(r);
+                      terminated := true;
+                      inner_looping := false;
+                    }
+                  } else {
+                    reader_advance(r);
+                  }
+                }
+              }
+              if (!terminated) {
+                had_error := true;
+                comment_start := slash_at;
+                looping := false;
+              }
+            } else {
+              found_slash_token := true;
+              slash_offset := slash_at;
+              looping := false;
+            }
+          }
+        } else {
+          looping := false;
+        }
+      }
+    }
+  }
+
+  return TriviaResult {
+    had_error := had_error,
+    comment_start := comment_start,
+    found_slash_token := found_slash_token,
+    slash_offset := slash_offset
+  };
+}
+
+function scan_number(r: *SourceReader) : NumberResult {
+  mut had_error : bool := false;
+  mut error_at : uint64 := 0;
+  mut n_pos : uint64 := 0;
+  mut has_value_digit : bool := false;
+  mut looping : bool := true;
+
+  while (looping) {
+    if (is_digit(reader_peek(r))) {
+      reader_advance(r);
+    } else {
+      looping := false;
+    }
+  }
+
+  if (reader_peek(r) == 110) {
+    n_pos := (*r).cursor;
+    reader_advance(r);
+    has_value_digit := false;
+    looping := true;
+    while (looping) {
+      if (is_hex_digit(reader_peek(r))) {
+        has_value_digit := true;
+        reader_advance(r);
+      } else {
+        looping := false;
+      }
+    }
+    if (!has_value_digit) {
+      had_error := true;
+      error_at := n_pos + 1;
+    }
+  }
+
+  return NumberResult { had_error := had_error, error_at := error_at };
+}
+
+function scan_char_literal(r: *SourceReader) : CharLitResult {
+  mut had_error : bool := false;
+  mut err_kind : int32 := 0;
+  mut error_at : uint64 := (*r).cursor;
+  mut b : uint8 := 0;
+  mut b2 : uint8 := 0;
+  mut body_ok : bool := false;
+  mut scanning : bool := false;
+  mut esc_at : uint64 := 0;
+
+  reader_advance(r);
+
+  if (reader_is_eof(r)) {
+    had_error := true;
+    err_kind := 1;
+  } else {
+    b := reader_peek(r);
+    if (b == 39) {
+      had_error := true;
+      err_kind := 2;
+      reader_advance(r);
+    } else {
+      if (b == 10 || b == 13) {
+        had_error := true;
+        err_kind := 1;
+      } else {
+        if (b == 92) {
+          esc_at := (*r).cursor;
+          reader_advance(r);
+          if (reader_is_eof(r)) {
+            had_error := true;
+            err_kind := 1;
+          } else {
+            b2 := reader_peek(r);
+            if (b2 == 110 || b2 == 116 || b2 == 114 || b2 == 48 || b2 == 92 || b2 == 39) {
+              reader_advance(r);
+              body_ok := true;
+            } else {
+              had_error := true;
+              err_kind := 3;
+              error_at := esc_at;
+              reader_advance(r);
+            }
+          }
+        } else {
+          reader_advance(r);
+          body_ok := true;
+        }
+      }
+    }
+
+    if (!had_error && body_ok) {
+      if (reader_is_eof(r)) {
+        had_error := true;
+        err_kind := 1;
+      } else {
+        if (reader_peek(r) == 39) {
+          reader_advance(r);
+        } else {
+          if (reader_peek(r) == 10) {
+            had_error := true;
+            err_kind := 1;
+          } else {
+            had_error := true;
+            err_kind := 4;
+            scanning := true;
+            while (scanning) {
+              if (reader_is_eof(r)) {
+                scanning := false;
+              } else {
+                if (reader_peek(r) == 39) {
+                  reader_advance(r);
+                  scanning := false;
+                } else {
+                  if (reader_peek(r) == 10) {
+                    scanning := false;
+                  } else {
+                    reader_advance(r);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return CharLitResult { had_error := had_error, err_kind := err_kind, error_at := error_at };
+}
+
+function scan_string_literal(r: *SourceReader) : StringLitResult {
+  mut had_error : bool := false;
+  mut looping : bool := true;
+
+  reader_advance(r);
+
+  while (looping) {
+    if (reader_is_eof(r)) {
+      had_error := true;
+      looping := false;
+    } else {
+      if (reader_peek(r) == 34) {
+        reader_advance(r);
+        looping := false;
+      } else {
+        if (reader_peek(r) == 10 || reader_peek(r) == 13) {
+          had_error := true;
+          looping := false;
+        } else {
+          reader_advance(r);
+        }
+      }
+    }
+  }
+
+  return StringLitResult { had_error := had_error };
+}
+
+function classify_word(r: *SourceReader, off: uint64, len: uint64) : int32 {
+  mut result : int32 := 1;
+  mut buf : *(uint8[65536]) := (*r).buffer;
+
+  if (len == 2) {
+    if ((*buf)[off + 0] == 105 && (*buf)[off + 1] == 102) { result := 15; }
+    if ((*buf)[off + 0] == 97 && (*buf)[off + 1] == 115) { result := 34; }
+  }
+  if (len == 3) {
+    if ((*buf)[off + 0] == 109 && (*buf)[off + 1] == 117 && (*buf)[off + 2] == 116) { result := 13; }
+    if ((*buf)[off + 0] == 105 && (*buf)[off + 1] == 110 && (*buf)[off + 2] == 116) { result := 24; }
+    if ((*buf)[off + 0] == 117 && (*buf)[off + 1] == 115 && (*buf)[off + 2] == 101) { result := 35; }
+  }
+  if (len == 4) {
+    if ((*buf)[off + 0] == 101 && (*buf)[off + 1] == 108 && (*buf)[off + 2] == 115 && (*buf)[off + 3] == 101) { result := 16; }
+    if ((*buf)[off + 0] == 116 && (*buf)[off + 1] == 114 && (*buf)[off + 2] == 117 && (*buf)[off + 3] == 101) { result := 19; }
+    if ((*buf)[off + 0] == 110 && (*buf)[off + 1] == 117 && (*buf)[off + 2] == 108 && (*buf)[off + 3] == 108) { result := 21; }
+    if ((*buf)[off + 0] == 105 && (*buf)[off + 1] == 110 && (*buf)[off + 2] == 116 && (*buf)[off + 3] == 56) { result := 22; }
+    if ((*buf)[off + 0] == 98 && (*buf)[off + 1] == 111 && (*buf)[off + 2] == 111 && (*buf)[off + 3] == 108) { result := 32; }
+    if ((*buf)[off + 0] == 118 && (*buf)[off + 1] == 111 && (*buf)[off + 2] == 105 && (*buf)[off + 3] == 100) { result := 33; }
+    if ((*buf)[off + 0] == 117 && (*buf)[off + 1] == 105 && (*buf)[off + 2] == 110 && (*buf)[off + 3] == 116) { result := 29; }
+    if ((*buf)[off + 0] == 99 && (*buf)[off + 1] == 104 && (*buf)[off + 2] == 97 && (*buf)[off + 3] == 114) { result := 36; }
+  }
+  if (len == 5) {
+    if ((*buf)[off + 0] == 99 && (*buf)[off + 1] == 111 && (*buf)[off + 2] == 110 && (*buf)[off + 3] == 115 && (*buf)[off + 4] == 116) { result := 14; }
+    if ((*buf)[off + 0] == 119 && (*buf)[off + 1] == 104 && (*buf)[off + 2] == 105 && (*buf)[off + 3] == 108 && (*buf)[off + 4] == 101) { result := 17; }
+    if ((*buf)[off + 0] == 102 && (*buf)[off + 1] == 97 && (*buf)[off + 2] == 108 && (*buf)[off + 3] == 115 && (*buf)[off + 4] == 101) { result := 20; }
+    if ((*buf)[off + 0] == 105 && (*buf)[off + 1] == 110 && (*buf)[off + 2] == 116 && (*buf)[off + 3] == 49 && (*buf)[off + 4] == 54) { result := 23; }
+    if ((*buf)[off + 0] == 105 && (*buf)[off + 1] == 110 && (*buf)[off + 2] == 116 && (*buf)[off + 3] == 51 && (*buf)[off + 4] == 50) { result := 25; }
+    if ((*buf)[off + 0] == 105 && (*buf)[off + 1] == 110 && (*buf)[off + 2] == 116 && (*buf)[off + 3] == 54 && (*buf)[off + 4] == 52) { result := 26; }
+    if ((*buf)[off + 0] == 117 && (*buf)[off + 1] == 105 && (*buf)[off + 2] == 110 && (*buf)[off + 3] == 116 && (*buf)[off + 4] == 56) { result := 27; }
+  }
+  if (len == 6) {
+    if ((*buf)[off + 0] == 115 && (*buf)[off + 1] == 116 && (*buf)[off + 2] == 114 && (*buf)[off + 3] == 117 && (*buf)[off + 4] == 99 && (*buf)[off + 5] == 116) { result := 11; }
+    if ((*buf)[off + 0] == 101 && (*buf)[off + 1] == 120 && (*buf)[off + 2] == 116 && (*buf)[off + 3] == 101 && (*buf)[off + 4] == 114 && (*buf)[off + 5] == 110) { result := 12; }
+    if ((*buf)[off + 0] == 114 && (*buf)[off + 1] == 101 && (*buf)[off + 2] == 116 && (*buf)[off + 3] == 117 && (*buf)[off + 4] == 114 && (*buf)[off + 5] == 110) { result := 18; }
+    if ((*buf)[off + 0] == 117 && (*buf)[off + 1] == 105 && (*buf)[off + 2] == 110 && (*buf)[off + 3] == 116 && (*buf)[off + 4] == 49 && (*buf)[off + 5] == 54) { result := 28; }
+    if ((*buf)[off + 0] == 117 && (*buf)[off + 1] == 105 && (*buf)[off + 2] == 110 && (*buf)[off + 3] == 116 && (*buf)[off + 4] == 51 && (*buf)[off + 5] == 50) { result := 30; }
+    if ((*buf)[off + 0] == 117 && (*buf)[off + 1] == 105 && (*buf)[off + 2] == 110 && (*buf)[off + 3] == 116 && (*buf)[off + 4] == 54 && (*buf)[off + 5] == 52) { result := 31; }
+    if ((*buf)[off + 0] == 115 && (*buf)[off + 1] == 105 && (*buf)[off + 2] == 122 && (*buf)[off + 3] == 101 && (*buf)[off + 4] == 111 && (*buf)[off + 5] == 102) { result := 41; }
+  }
+  if (len == 7) {
+    if ((*buf)[off + 0] == 117 && (*buf)[off + 1] == 105 && (*buf)[off + 2] == 110 && (*buf)[off + 3] == 116 && (*buf)[off + 4] == 112 && (*buf)[off + 5] == 116 && (*buf)[off + 6] == 114) { result := 43; }
+  }
+  if (len == 8) {
+    if ((*buf)[off + 0] == 102 && (*buf)[off + 1] == 117 && (*buf)[off + 2] == 110 && (*buf)[off + 3] == 99 && (*buf)[off + 4] == 116 && (*buf)[off + 5] == 105 && (*buf)[off + 6] == 111 && (*buf)[off + 7] == 110) { result := 10; }
+    if ((*buf)[off + 0] == 118 && (*buf)[off + 1] == 101 && (*buf)[off + 2] == 114 && (*buf)[off + 3] == 105 && (*buf)[off + 4] == 102 && (*buf)[off + 5] == 105 && (*buf)[off + 6] == 101 && (*buf)[off + 7] == 100) { result := 37; }
+    if ((*buf)[off + 0] == 108 && (*buf)[off + 1] == 101 && (*buf)[off + 2] == 110 && (*buf)[off + 3] == 103 && (*buf)[off + 4] == 116 && (*buf)[off + 5] == 104 && (*buf)[off + 6] == 111 && (*buf)[off + 7] == 102) { result := 42; }
+  }
+  if (len == 9) {
+    if ((*buf)[off + 0] == 110 && (*buf)[off + 1] == 97 && (*buf)[off + 2] == 109 && (*buf)[off + 3] == 101 && (*buf)[off + 4] == 115 && (*buf)[off + 5] == 112 && (*buf)[off + 6] == 97 && (*buf)[off + 7] == 99 && (*buf)[off + 8] == 101) { result := 39; }
+  }
+  if (len == 10) {
+    if ((*buf)[off + 0] == 117 && (*buf)[off + 1] == 110 && (*buf)[off + 2] == 118 && (*buf)[off + 3] == 101 && (*buf)[off + 4] == 114 && (*buf)[off + 5] == 105 && (*buf)[off + 6] == 102 && (*buf)[off + 7] == 105 && (*buf)[off + 8] == 101 && (*buf)[off + 9] == 100) { result := 38; }
+  }
+
+  return result;
+}
+
+function lex_next(r: *SourceReader) : Token {
+  mut trivia : TriviaResult := skip_trivia(r);
+  mut tok_offset : uint64 := 0;
+  mut b : uint8 := 0;
+  mut num : NumberResult := NumberResult { had_error := false, error_at := 0 };
+  mut cl : CharLitResult := CharLitResult { had_error := false, err_kind := 0, error_at := 0 };
+  mut sl : StringLitResult := StringLitResult { had_error := false };
+  mut is_autoload : bool := false;
+  mut j : uint64 := 0;
+  mut next_b : uint8 := 0;
+
+  mut ext_first    : uint8[7] := {58, 61, 33, 60, 62, 38, 124};
+  mut ext_byte1    : uint8[7] := {61, 61, 61, 61, 61, 38, 124};
+  mut ext_kind1    : int32[7] := {70, 71, 72, 73, 74, 77, 78};
+  mut ext_byte2    : uint8[7] := {0, 0, 0, 60, 62, 0, 0};
+  mut ext_kind2    : int32[7] := {0, 0, 0, 75, 76, 0, 0};
+  mut ext_lone_kind : int32[7] := {50, 254, 79, 86, 87, 82, 89};
+
+  mut single_byte : uint8[16] := {59, 44, 46, 40, 41, 123, 125, 91, 93, 92, 45, 42, 47, 37, 43, 94};
+  mut single_kind : int32[16] := {51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 80, 81, 83, 84, 85, 88};
+
+  if (trivia.had_error) {
+    return Token { kind := 253, offset := trivia.comment_start, length := 0 };
+  }
+
+  if (trivia.found_slash_token) {
+    return Token { kind := 83, offset := trivia.slash_offset, length := 1 };
+  }
+
+  if (reader_is_eof(r)) {
+    return Token { kind := 0, offset := (*r).cursor, length := 0 };
+  }
+
+  tok_offset := (*r).cursor;
+  b := reader_peek(r);
+
+  if (is_alpha(b)) {
+    while (is_alnum(reader_peek(r))) {
+      reader_advance(r);
+    }
+    return Token {
+      kind := classify_word(r, tok_offset, (*r).cursor - tok_offset),
+      offset := tok_offset,
+      length := (*r).cursor - tok_offset
+    };
+  }
+
+  if (is_digit(b)) {
+    num := scan_number(r);
+    if (num.had_error) {
+      return Token { kind := 252, offset := num.error_at, length := 0 };
+    }
+    return Token { kind := 2, offset := tok_offset, length := (*r).cursor - tok_offset };
+  }
+
+  if (b == 39) {
+    cl := scan_char_literal(r);
+    if (cl.had_error) {
+      if (cl.err_kind == 1) {
+        return Token { kind := 251, offset := tok_offset, length := 0 };
+      }
+      if (cl.err_kind == 2) {
+        return Token { kind := 250, offset := tok_offset, length := 0 };
+      }
+      if (cl.err_kind == 3) {
+        return Token { kind := 249, offset := cl.error_at, length := 0 };
+      }
+      return Token { kind := 248, offset := tok_offset, length := 0 };
+    }
+    return Token { kind := 3, offset := tok_offset, length := (*r).cursor - tok_offset };
+  }
+
+  if (b == 34) {
+    sl := scan_string_literal(r);
+    if (sl.had_error) {
+      return Token { kind := 247, offset := tok_offset, length := 0 };
+    }
+    return Token { kind := 4, offset := tok_offset, length := (*r).cursor - tok_offset };
+  }
+
+  if (b == 64) {
+    is_autoload := false;
+    if (tok_offset + 9 <= (*r).length) {
+      if ((*(*r).buffer)[tok_offset + 1] == 97 && (*(*r).buffer)[tok_offset + 2] == 117 && (*(*r).buffer)[tok_offset + 3] == 116 && (*(*r).buffer)[tok_offset + 4] == 111 && (*(*r).buffer)[tok_offset + 5] == 108 && (*(*r).buffer)[tok_offset + 6] == 111 && (*(*r).buffer)[tok_offset + 7] == 97 && (*(*r).buffer)[tok_offset + 8] == 100) {
+        if (!(tok_offset + 9 < (*r).length && is_alnum((*(*r).buffer)[tok_offset + 9]))) {
+          is_autoload := true;
+        }
+      }
+    }
+    if (is_autoload) {
+      j := 0;
+      while (j < 9) {
+        reader_advance(r);
+        j := j + 1;
+      }
+      return Token { kind := 40, offset := tok_offset, length := 9 };
+    }
+    reader_advance(r);
+    return Token { kind := 254, offset := tok_offset, length := 1 };
+  }
+
+  j := 0;
+  while (j < 7) {
+    if (b == ext_first[j]) {
+      reader_advance(r);
+      next_b := reader_peek(r);
+      if (next_b == ext_byte1[j]) {
+        reader_advance(r);
+        return Token { kind := ext_kind1[j], offset := tok_offset, length := 2 };
+      }
+      if (ext_byte2[j] != 0 && next_b == ext_byte2[j]) {
+        reader_advance(r);
+        return Token { kind := ext_kind2[j], offset := tok_offset, length := 2 };
+      }
+      return Token { kind := ext_lone_kind[j], offset := tok_offset, length := 1 };
+    }
+    j := j + 1;
+  }
+
+  j := 0;
+  while (j < 16) {
+    if (b == single_byte[j]) {
+      reader_advance(r);
+      return Token { kind := single_kind[j], offset := tok_offset, length := 1 };
+    }
+    j := j + 1;
+  }
+
+  reader_advance(r);
+  return Token { kind := 254, offset := tok_offset, length := 1 };
+}
+
+// ---------------------------------------------------------------------
+// The AST: a pointer-linked ASTNode arena, per docs/postulate_stage1_
+// v1_0_6_edsger_design.md. `string_val`/`float_val` from that design
+// doc's own sketch are dropped here (a third small adjustment, on top
+// of its own two): every name/literal this module needs is already a
+// contiguous span of the original source at some token, reachable via
+// a node's own `tok` field -- no separate raw-text pointer is needed,
+// keeping "how do I get this node's text" uniform (always: slice `src`
+// at `tok.offset`/`tok.length`). `op_type` is `int32`, not `uint32` as
+// first sketched -- it always holds a lexer token-kind value, which is
+// `int32` throughout; keeping the field's type the same as what it
+// actually stores avoids the kind_to_u64-style bridge function
+// Stage1/src/parser.ptl needed for exactly this mismatch (v0 has no
+// implicit int32/uint32 conversion, SS2.8).
+// ---------------------------------------------------------------------
+
+struct ASTNode {
+  kind : uint32;
+  tok : Token;
+
+  first_child : *ASTNode;
+  next_sibling : *ASTNode;
+
+  data_type : *ASTNode;
+  is_mutable : bool;
+
+  int_val : int64;
+  op_type : int32;
+
+  left : *ASTNode;
+  right : *ASTNode;
+  extra : *ASTNode;
+}
+
+// Node kinds. Grouped by hundreds purely for readability; the language
+// doesn't care. Field usage per kind (left/right/extra/first_child/
+// data_type/int_val/op_type/is_mutable/tok) is documented at each
+// parse function that builds that kind, and mirrored in dump_node.
+//
+// 100 PROGRAM        first_child = NAMESPACE_DECL, AUTOLOAD_DECL*, USE_DECL*, top_level_decl+ (source order)
+// 101 NAMESPACE_DECL first_child = PATH_SEGMENT chain (the fqn)
+// 102 PATH_SEGMENT   tok = identifier
+// 103 USE_DECL       int_val = 0 single/namespace-level, 1 group; first_child = fqn PATH_SEGMENT chain; right = alias PATH_SEGMENT (single form, nullable); extra = USE_ITEM chain (group form)
+// 104 USE_ITEM       tok = identifier; right = alias PATH_SEGMENT (nullable)
+// 105 AUTOLOAD_DECL  int_val = 0 default/1 verified/2 unverified; left = pattern STRING_LIT; right = path STRING_LIT
+// 110 STRUCT_DECL    tok = name; first_child = FIELD_DECL chain
+// 111 FIELD_DECL     tok = name; data_type = type node
+// 112 EXTERN_DECL    tok = name; first_child = PARAM_DECL chain; data_type = return type node
+// 113 FUNCTION_DECL  tok = name; first_child = PARAM_DECL chain; data_type = return type node; extra = BLOCK body
+// 114 PARAM_DECL     tok = name; data_type = type node
+// 120 TYPE_BASE      tok = base-type keyword or struct-name identifier
+// 121 TYPE_POINTER   left = inner type node
+// 122 TYPE_ARRAY     left = inner type node; int_val = size
+// 130 BLOCK          first_child = statement chain (func_block's decl* stmt* flattened into one source-order chain)
+// 131 IF_STMT        left = cond; right = then BLOCK; extra = else BLOCK or nested IF_STMT (nullable)
+// 132 WHILE_STMT     left = cond; right = body BLOCK
+// 133 RETURN_STMT    left = expr (nullable)
+// 134 DECL_STMT      tok = name; is_mutable = true for mut; data_type = type node; left = initializer expr (nullable)
+// 135 ASSIGN_STMT    left = lvalue expr; right = rvalue expr
+// 136 EXPR_STMT      left = expr
+// 140 IDENT_EXPR     tok = identifier
+// 141 INT_LIT        tok = int token; int_val = parsed value
+// 142 CHAR_LIT       tok = char token
+// 143 STRING_LIT     tok = string token
+// 144 BOOL_LIT       tok = true/false; int_val = 1/0
+// 145 NULL_LIT       tok = null
+// 146 BINARY_EXPR    op_type = operator kind; left/right = operands
+// 147 UNARY_EXPR     op_type = operator kind; left = operand
+// 148 CAST_EXPR      left = operand; data_type = target type node
+// 149 CALL_EXPR      left = callee expr; first_child = argument expr chain
+// 150 INDEX_EXPR     left = base; right = index expr
+// 151 FIELD_EXPR     left = base; tok = field name
+// 152 STRUCT_LIT     tok = struct name; first_child = FIELD_INIT chain
+// 153 ARRAY_LIT      first_child = element expr chain
+// 154 FIELD_INIT     tok = field name; left = value expr
+// 155 SIZEOF_EXPR    left = operand expr (nullable) XOR data_type = operand type (nullable)
+// 156 LENGTHOF_EXPR  same as SIZEOF_EXPR
+
+struct Parser {
+  src : *(uint8[65536]);
+  src_len : uint64;
+
+  toks_kind : *(int32[20000]);
+  toks_offset : *(uint64[20000]);
+  toks_length : *(uint64[20000]);
+  tok_count : uint64;
+  tok_idx : uint64;
+
+  pool : *(ASTNode[50000]);
+  node_count : uint64;
+
+  had_error : bool;
+  err_tok_idx : uint64;
+
+  lex_error : bool;
+  lex_error_tok : Token;
+}
+
+function uint64_to_int64(n: uint64) : int64 {
+  mut result : int64 := 0;
+  mut steps : uint64 := n;
+  while (steps > 0) {
+    result := result + 1;
+    steps := steps - 1;
+  }
+  return result;
+}
+
+function byte_digit_value(b: uint8) : uint64 {
+  mut result : uint64 := 0;
+  if (b == 49) { result := 1; }
+  if (b == 50) { result := 2; }
+  if (b == 51) { result := 3; }
+  if (b == 52) { result := 4; }
+  if (b == 53) { result := 5; }
+  if (b == 54) { result := 6; }
+  if (b == 55) { result := 7; }
+  if (b == 56) { result := 8; }
+  if (b == 57) { result := 9; }
+  if (b == 97 || b == 65) { result := 10; }
+  if (b == 98 || b == 66) { result := 11; }
+  if (b == 99 || b == 67) { result := 12; }
+  if (b == 100 || b == 68) { result := 13; }
+  if (b == 101 || b == 69) { result := 14; }
+  if (b == 102 || b == 70) { result := 15; }
+  return result;
+}
+
+// decimal_form / based_form -> numeric value (same algorithm as
+// Stage1/src/parser.ptl's own compute_int_value): `10n11` is base 10,
+// digits "1","1" -> 1*10+1 -- an arbitrary-base integer literal, not
+// decimal-followed-by-garbage.
+function compute_int_value(src: *(uint8[65536]), offset: uint64, length: uint64) : uint64 {
+  mut i : uint64 := 0;
+  mut value : uint64 := 0;
+  mut looping : bool := true;
+  mut base : uint64 := 0;
+
+  while (looping) {
+    if (i >= length) {
+      looping := false;
+    } else {
+      if (is_digit((*src)[offset + i])) {
+        value := value * 10 + byte_digit_value((*src)[offset + i]);
+        i := i + 1;
+      } else {
+        looping := false;
+      }
+    }
+  }
+  if (i < length) {
+    if ((*src)[offset + i] == 110) {
+      base := value;
+      value := 0;
+      i := i + 1;
+      looping := true;
+      while (looping) {
+        if (i >= length) {
+          looping := false;
+        } else {
+          value := value * base + byte_digit_value((*src)[offset + i]);
+          i := i + 1;
+        }
+      }
+    }
+  }
+  return value;
+}
+
+// ---------------------------------------------------------------------
+// Parser-state helpers. `advance`/`fail` mutate `*p` in place -- no
+// PState/ParseResult threading needed the way Stage1/src/parser.ptl's
+// purely-functional index arena required, since a real pointer-based
+// arena and a real mutable context struct let every function just
+// mutate the shared state directly, exactly like the lexer's own
+// SourceReader already does.
+// ---------------------------------------------------------------------
+
+function cur_kind(p: *Parser) : int32 {
+  return (*(*p).toks_kind)[(*p).tok_idx];
+}
+
+function peek_kind(p: *Parser, ahead: uint64) : int32 {
+  mut i : uint64 := (*p).tok_idx + ahead;
+  if (i >= (*p).tok_count) {
+    return 0;
+  }
+  return (*(*p).toks_kind)[i];
+}
+
+function cur_tok(p: *Parser) : Token {
+  return Token {
+    kind := (*(*p).toks_kind)[(*p).tok_idx],
+    offset := (*(*p).toks_offset)[(*p).tok_idx],
+    length := (*(*p).toks_length)[(*p).tok_idx]
+  };
+}
+
+function advance(p: *Parser) : void {
+  if ((*p).tok_idx < (*p).tok_count) {
+    (*p).tok_idx := (*p).tok_idx + 1;
+  }
+}
+
+function fail(p: *Parser) : void {
+  if (!(*p).had_error) {
+    (*p).had_error := true;
+    (*p).err_tok_idx := (*p).tok_idx;
+  }
+}
+
+function expect(p: *Parser, kind: int32) : bool {
+  if (cur_kind(p) == kind) {
+    advance(p);
+    return true;
+  }
+  fail(p);
+  return false;
+}
+
+function mark(p: *Parser) : uint64 {
+  return (*p).tok_idx;
+}
+
+function reset_to(p: *Parser, idx: uint64) : void {
+  (*p).tok_idx := idx;
+  (*p).had_error := false;
+}
+
+function alloc_node(p: *Parser, kind: uint32) : *ASTNode {
+  mut n : *ASTNode := &(*(*p).pool)[(*p).node_count];
+  (*p).node_count := (*p).node_count + 1;
+  (*n).kind := kind;
+  (*n).tok := Token { kind := 0, offset := 0, length := 0 };
+  (*n).first_child := null;
+  (*n).next_sibling := null;
+  (*n).data_type := null;
+  (*n).is_mutable := false;
+  (*n).int_val := 0;
+  (*n).op_type := 0;
+  (*n).left := null;
+  (*n).right := null;
+  (*n).extra := null;
+  return n;
+}
+
+// ---------------------------------------------------------------------
+// Types. Mirrors Stage1/src/parser.ptl's own PEG-style precedence
+// (postulate_v0_language_reference.md SS2.5) exactly, plus `*void`
+// (postulate_v1_language_reference.md SS2.6, terminal -- no `[N]`, no
+// further nesting) and `uintptr` as an ordinary base_type keyword.
+// `void` is deliberately NOT in parse_base_type's own keyword range --
+// same exclusion Stage1/src/parser.ptl already had -- so it can only
+// be reached through the `*void` special case here or through
+// parse_return_type's own direct check, matching the reference's
+// grammar-level restriction, not just a semantic one.
+// ---------------------------------------------------------------------
+
+function parse_base_type(p: *Parser) : *ASTNode {
+  mut k : int32 := cur_kind(p);
+  mut n : *ASTNode := null;
+  mut t : Token := cur_tok(p);
+
+  if ((k >= 22 && k <= 32) || k == 36 || k == 43) {
+    n := alloc_node(p, 120);
+    (*n).tok := t;
+    advance(p);
+    return n;
+  }
+  if (k == 1) {
+    n := alloc_node(p, 120);
+    (*n).tok := t;
+    advance(p);
+    return n;
+  }
+  fail(p);
+  return null;
+}
+
+// integer_literal only (not a general expr) -- the array-size position.
+function parse_array_size(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := null;
+  mut t : Token := cur_tok(p);
+
+  if (cur_kind(p) != 2) {
+    fail(p);
+    return null;
+  }
+  n := alloc_node(p, 141);
+  (*n).tok := t;
+  (*n).int_val := uint64_to_int64(compute_int_value((*p).src, t.offset, t.length));
+  advance(p);
+  return n;
+}
+
+function parse_type(p: *Parser) : *ASTNode {
+  mut save : uint64 := 0;
+  mut n : *ASTNode := null;
+  mut inner : *ASTNode := null;
+  mut base : *ASTNode := null;
+  mut size : *ASTNode := null;
+  mut ptr_node : *ASTNode := null;
+  mut void_base : *ASTNode := null;
+
+  if (cur_kind(p) == 81) {
+    if (peek_kind(p, 1) == 33) {
+      advance(p);
+      void_base := alloc_node(p, 120);
+      (*void_base).tok := cur_tok(p);
+      advance(p);
+      n := alloc_node(p, 121);
+      (*n).left := void_base;
+      return n;
+    }
+
+    save := mark(p);
+    advance(p);
+    base := parse_base_type(p);
+    if (!(*p).had_error && cur_kind(p) == 58) {
+      advance(p);
+      size := parse_array_size(p);
+      if (!(*p).had_error && cur_kind(p) == 59) {
+        advance(p);
+        ptr_node := alloc_node(p, 121);
+        (*ptr_node).left := base;
+        n := alloc_node(p, 122);
+        (*n).left := ptr_node;
+        (*n).int_val := (*size).int_val;
+        return n;
+      }
+    }
+    reset_to(p, save);
+    advance(p);
+    inner := parse_type(p);
+    if ((*p).had_error) {
+      return null;
+    }
+    n := alloc_node(p, 121);
+    (*n).left := inner;
+    return n;
+  }
+
+  if (cur_kind(p) == 54) {
+    advance(p);
+    inner := parse_type(p);
+    if ((*p).had_error) {
+      return null;
+    }
+    if (!expect(p, 55)) {
+      return null;
+    }
+    return inner;
+  }
+
+  base := parse_base_type(p);
+  if ((*p).had_error) {
+    return null;
+  }
+  if (cur_kind(p) == 58) {
+    advance(p);
+    size := parse_array_size(p);
+    if ((*p).had_error) {
+      return null;
+    }
+    if (!expect(p, 59)) {
+      return null;
+    }
+    n := alloc_node(p, 122);
+    (*n).left := base;
+    (*n).int_val := (*size).int_val;
+    return n;
+  }
+  return base;
+}
+
+// return_type ::= type | "void"
+function parse_return_type(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := null;
+
+  if (cur_kind(p) == 33) {
+    n := alloc_node(p, 120);
+    (*n).tok := cur_tok(p);
+    advance(p);
+    return n;
+  }
+  return parse_type(p);
+}
+
+// ---------------------------------------------------------------------
+// Expressions. Precedence (loosest to tightest), matching Stage1/src/
+// parser.ptl's own chain (postulate_v0_language_reference.md SS3.1)
+// exactly, with `as` (parse_cast) newly inserted between unary and
+// multiplicative: logic_or, logic_and, comparison (NOT chainable --
+// `a < b < c` is a syntax error, at most one comparison operator via a
+// single optional check, never a loop), bit_or, bit_xor, bit_and,
+// shift, additive, multiplicative, cast, unary, postfix, primary.
+// ---------------------------------------------------------------------
+
+// sizeof_expr/lengthof_expr ::= keyword "(" (type | expr) ")" --
+// disambiguated by trying `type` first (a bare identifier always
+// parses as a type here, since telling "a known struct name" from "a
+// variable name" needs a symbol table this module doesn't have --
+// Module 3's job to reinterpret an unresolved TYPE_BASE as a variable
+// reference if no such struct exists) and falling back to `expr` only
+// when `type` doesn't even parse.
+function parse_sizeof_or_lengthof(p: *Parser, node_kind: uint32) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, node_kind);
+  mut save : uint64 := 0;
+  mut ty : *ASTNode := null;
+  mut ex : *ASTNode := null;
+
+  advance(p);
+  if (!expect(p, 54)) { return null; }
+
+  save := mark(p);
+  ty := parse_type(p);
+  if (!(*p).had_error && cur_kind(p) == 55) {
+    (*n).data_type := ty;
+    advance(p);
+    return n;
+  }
+
+  reset_to(p, save);
+  ex := parse_expr(p);
+  if ((*p).had_error) { return null; }
+  (*n).left := ex;
+  if (!expect(p, 55)) { return null; }
+  return n;
+}
+
+function parse_field_init(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := null;
+  mut t : Token := cur_tok(p);
+  mut val : *ASTNode := null;
+
+  if (cur_kind(p) != 1) { fail(p); return null; }
+  advance(p);
+  if (!expect(p, 70)) { return null; }
+  val := parse_expr(p);
+  if ((*p).had_error) { return null; }
+  n := alloc_node(p, 154);
+  (*n).tok := t;
+  (*n).left := val;
+  return n;
+}
+
+// struct_literal ::= identifier "{" field_init ("," field_init)* "}"
+function parse_struct_literal(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 152);
+  mut t : Token := cur_tok(p);
+  mut first : *ASTNode := null;
+  mut prev : *ASTNode := null;
+  mut item : *ASTNode := null;
+
+  (*n).tok := t;
+  advance(p);
+  advance(p);
+  first := parse_field_init(p);
+  if ((*p).had_error) { return null; }
+  (*n).first_child := first;
+  prev := first;
+  while (cur_kind(p) == 52) {
+    advance(p);
+    item := parse_field_init(p);
+    if ((*p).had_error) { return null; }
+    (*prev).next_sibling := item;
+    prev := item;
+  }
+  if (!expect(p, 57)) { return null; }
+  return n;
+}
+
+// array_literal ::= "{" expr ("," expr)* "}"
+function parse_array_literal(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 153);
+  mut first : *ASTNode := null;
+  mut prev : *ASTNode := null;
+  mut item : *ASTNode := null;
+
+  advance(p);
+  first := parse_expr(p);
+  if ((*p).had_error) { return null; }
+  (*n).first_child := first;
+  prev := first;
+  while (cur_kind(p) == 52) {
+    advance(p);
+    item := parse_expr(p);
+    if ((*p).had_error) { return null; }
+    (*prev).next_sibling := item;
+    prev := item;
+  }
+  if (!expect(p, 57)) { return null; }
+  return n;
+}
+
+// primary ::= int | char | string | true | false | null | sizeof_expr |
+//             lengthof_expr | struct_literal | identifier |
+//             array_literal | "(" expr ")"
+// `identifier "{"` (one token of lookahead) is a struct_literal, a
+// bare identifier otherwise -- same disambiguation Stage1/src/
+// parser.ptl already used.
+function parse_primary(p: *Parser) : *ASTNode {
+  mut k : int32 := cur_kind(p);
+  mut n : *ASTNode := null;
+  mut t : Token := cur_tok(p);
+  mut inner : *ASTNode := null;
+
+  if (k == 2) {
+    n := alloc_node(p, 141);
+    (*n).tok := t;
+    (*n).int_val := uint64_to_int64(compute_int_value((*p).src, t.offset, t.length));
+    advance(p);
+    return n;
+  }
+  if (k == 3) {
+    n := alloc_node(p, 142);
+    (*n).tok := t;
+    advance(p);
+    return n;
+  }
+  if (k == 4) {
+    n := alloc_node(p, 143);
+    (*n).tok := t;
+    advance(p);
+    return n;
+  }
+  if (k == 19) {
+    n := alloc_node(p, 144);
+    (*n).tok := t;
+    (*n).int_val := 1;
+    advance(p);
+    return n;
+  }
+  if (k == 20) {
+    n := alloc_node(p, 144);
+    (*n).tok := t;
+    (*n).int_val := 0;
+    advance(p);
+    return n;
+  }
+  if (k == 21) {
+    n := alloc_node(p, 145);
+    (*n).tok := t;
+    advance(p);
+    return n;
+  }
+  if (k == 41) {
+    return parse_sizeof_or_lengthof(p, 155);
+  }
+  if (k == 42) {
+    return parse_sizeof_or_lengthof(p, 156);
+  }
+  if (k == 1) {
+    if (peek_kind(p, 1) == 56) {
+      return parse_struct_literal(p);
+    }
+    n := alloc_node(p, 140);
+    (*n).tok := t;
+    advance(p);
+    return n;
+  }
+  if (k == 56) {
+    return parse_array_literal(p);
+  }
+  if (k == 54) {
+    advance(p);
+    inner := parse_expr(p);
+    if ((*p).had_error) { return null; }
+    if (!expect(p, 55)) { return null; }
+    return inner;
+  }
+  fail(p);
+  return null;
+}
+
+// postfix ::= primary ("[" expr "]" | "." identifier | "(" arg_list? ")")*
+function parse_postfix(p: *Parser) : *ASTNode {
+  mut node : *ASTNode := parse_primary(p);
+  mut looping : bool := true;
+  mut k : int32 := 0;
+  mut idx : *ASTNode := null;
+  mut n : *ASTNode := null;
+  mut t : Token := Token { kind := 0, offset := 0, length := 0 };
+  mut first : *ASTNode := null;
+  mut prev : *ASTNode := null;
+  mut arg : *ASTNode := null;
+
+  if ((*p).had_error) { return null; }
+
+  looping := true;
+  while (looping) {
+    k := cur_kind(p);
+    if (k == 58) {
+      advance(p);
+      idx := parse_expr(p);
+      if ((*p).had_error) { return null; }
+      if (!expect(p, 59)) { return null; }
+      n := alloc_node(p, 150);
+      (*n).left := node;
+      (*n).right := idx;
+      node := n;
+    } else {
+    if (k == 53) {
+      advance(p);
+      if (cur_kind(p) != 1) { fail(p); return null; }
+      t := cur_tok(p);
+      advance(p);
+      n := alloc_node(p, 151);
+      (*n).left := node;
+      (*n).tok := t;
+      node := n;
+    } else {
+    if (k == 54) {
+      advance(p);
+      n := alloc_node(p, 149);
+      (*n).left := node;
+      if (cur_kind(p) != 55) {
+        first := parse_expr(p);
+        if ((*p).had_error) { return null; }
+        (*n).first_child := first;
+        prev := first;
+        while (cur_kind(p) == 52) {
+          advance(p);
+          arg := parse_expr(p);
+          if ((*p).had_error) { return null; }
+          (*prev).next_sibling := arg;
+          prev := arg;
+        }
+      }
+      if (!expect(p, 55)) { return null; }
+      node := n;
+    } else {
+      looping := false;
+    }}}
+  }
+  return node;
+}
+
+// unary ::= ("!" | "-" | "*" | "&") unary | postfix
+function parse_unary(p: *Parser) : *ASTNode {
+  mut k : int32 := cur_kind(p);
+  mut n : *ASTNode := null;
+  mut inner : *ASTNode := null;
+
+  if (k == 79 || k == 80 || k == 81 || k == 82) {
+    advance(p);
+    inner := parse_unary(p);
+    if ((*p).had_error) { return null; }
+    n := alloc_node(p, 147);
+    (*n).op_type := k;
+    (*n).left := inner;
+    return n;
+  }
+  return parse_postfix(p);
+}
+
+// cast ::= unary ("as" type)* -- new in v1.0.6 (postulate_v1_language_
+// reference.md SS3.7a). Binds tighter than every binary operator but
+// looser than unary/postfix: `-x as int32` is `(-x) as int32`, and
+// `x as int32 + 1` is `(x as int32) + 1`.
+function parse_cast(p: *Parser) : *ASTNode {
+  mut node : *ASTNode := parse_unary(p);
+  mut n : *ASTNode := null;
+  mut ty : *ASTNode := null;
+
+  if ((*p).had_error) { return null; }
+  while (cur_kind(p) == 34) {
+    advance(p);
+    ty := parse_type(p);
+    if ((*p).had_error) { return null; }
+    n := alloc_node(p, 148);
+    (*n).left := node;
+    (*n).data_type := ty;
+    node := n;
+  }
+  return node;
+}
+
+function parse_multiplicative(p: *Parser) : *ASTNode {
+  mut node : *ASTNode := parse_cast(p);
+  mut k : int32 := 0;
+  mut n : *ASTNode := null;
+  mut rhs : *ASTNode := null;
+
+  if ((*p).had_error) { return null; }
+  k := cur_kind(p);
+  while (k == 81 || k == 83 || k == 84) {
+    advance(p);
+    rhs := parse_cast(p);
+    if ((*p).had_error) { return null; }
+    n := alloc_node(p, 146);
+    (*n).op_type := k;
+    (*n).left := node;
+    (*n).right := rhs;
+    node := n;
+    k := cur_kind(p);
+  }
+  return node;
+}
+
+function parse_additive(p: *Parser) : *ASTNode {
+  mut node : *ASTNode := parse_multiplicative(p);
+  mut k : int32 := 0;
+  mut n : *ASTNode := null;
+  mut rhs : *ASTNode := null;
+
+  if ((*p).had_error) { return null; }
+  k := cur_kind(p);
+  while (k == 85 || k == 80) {
+    advance(p);
+    rhs := parse_multiplicative(p);
+    if ((*p).had_error) { return null; }
+    n := alloc_node(p, 146);
+    (*n).op_type := k;
+    (*n).left := node;
+    (*n).right := rhs;
+    node := n;
+    k := cur_kind(p);
+  }
+  return node;
+}
+
+function parse_shift(p: *Parser) : *ASTNode {
+  mut node : *ASTNode := parse_additive(p);
+  mut k : int32 := 0;
+  mut n : *ASTNode := null;
+  mut rhs : *ASTNode := null;
+
+  if ((*p).had_error) { return null; }
+  k := cur_kind(p);
+  while (k == 75 || k == 76) {
+    advance(p);
+    rhs := parse_additive(p);
+    if ((*p).had_error) { return null; }
+    n := alloc_node(p, 146);
+    (*n).op_type := k;
+    (*n).left := node;
+    (*n).right := rhs;
+    node := n;
+    k := cur_kind(p);
+  }
+  return node;
+}
+
+function parse_bit_and(p: *Parser) : *ASTNode {
+  mut node : *ASTNode := parse_shift(p);
+  mut n : *ASTNode := null;
+  mut rhs : *ASTNode := null;
+
+  if ((*p).had_error) { return null; }
+  while (cur_kind(p) == 82) {
+    advance(p);
+    rhs := parse_shift(p);
+    if ((*p).had_error) { return null; }
+    n := alloc_node(p, 146);
+    (*n).op_type := 82;
+    (*n).left := node;
+    (*n).right := rhs;
+    node := n;
+  }
+  return node;
+}
+
+function parse_bit_xor(p: *Parser) : *ASTNode {
+  mut node : *ASTNode := parse_bit_and(p);
+  mut n : *ASTNode := null;
+  mut rhs : *ASTNode := null;
+
+  if ((*p).had_error) { return null; }
+  while (cur_kind(p) == 88) {
+    advance(p);
+    rhs := parse_bit_and(p);
+    if ((*p).had_error) { return null; }
+    n := alloc_node(p, 146);
+    (*n).op_type := 88;
+    (*n).left := node;
+    (*n).right := rhs;
+    node := n;
+  }
+  return node;
+}
+
+function parse_bit_or(p: *Parser) : *ASTNode {
+  mut node : *ASTNode := parse_bit_xor(p);
+  mut n : *ASTNode := null;
+  mut rhs : *ASTNode := null;
+
+  if ((*p).had_error) { return null; }
+  while (cur_kind(p) == 89) {
+    advance(p);
+    rhs := parse_bit_xor(p);
+    if ((*p).had_error) { return null; }
+    n := alloc_node(p, 146);
+    (*n).op_type := 89;
+    (*n).left := node;
+    (*n).right := rhs;
+    node := n;
+  }
+  return node;
+}
+
+// comparison is NOT chainable (postulate_v0_language_reference.md
+// SS3.1) -- at most one comparison operator, via a single optional
+// check, never a loop.
+function parse_comparison(p: *Parser) : *ASTNode {
+  mut node : *ASTNode := parse_bit_or(p);
+  mut k : int32 := 0;
+  mut n : *ASTNode := null;
+  mut rhs : *ASTNode := null;
+
+  if ((*p).had_error) { return null; }
+  k := cur_kind(p);
+  if (k == 71 || k == 72 || k == 73 || k == 74 || k == 86 || k == 87) {
+    advance(p);
+    rhs := parse_bit_or(p);
+    if ((*p).had_error) { return null; }
+    n := alloc_node(p, 146);
+    (*n).op_type := k;
+    (*n).left := node;
+    (*n).right := rhs;
+    node := n;
+  }
+  return node;
+}
+
+function parse_logic_and(p: *Parser) : *ASTNode {
+  mut node : *ASTNode := parse_comparison(p);
+  mut n : *ASTNode := null;
+  mut rhs : *ASTNode := null;
+
+  if ((*p).had_error) { return null; }
+  while (cur_kind(p) == 77) {
+    advance(p);
+    rhs := parse_comparison(p);
+    if ((*p).had_error) { return null; }
+    n := alloc_node(p, 146);
+    (*n).op_type := 77;
+    (*n).left := node;
+    (*n).right := rhs;
+    node := n;
+  }
+  return node;
+}
+
+function parse_logic_or(p: *Parser) : *ASTNode {
+  mut node : *ASTNode := parse_logic_and(p);
+  mut n : *ASTNode := null;
+  mut rhs : *ASTNode := null;
+
+  if ((*p).had_error) { return null; }
+  while (cur_kind(p) == 78) {
+    advance(p);
+    rhs := parse_logic_and(p);
+    if ((*p).had_error) { return null; }
+    n := alloc_node(p, 146);
+    (*n).op_type := 78;
+    (*n).left := node;
+    (*n).right := rhs;
+    node := n;
+  }
+  return node;
+}
+
+function parse_expr(p: *Parser) : *ASTNode {
+  return parse_logic_or(p);
+}
+
+// ---------------------------------------------------------------------
+// Statements, declarations, blocks (postulate_v0_language_reference.md
+// SS4). Assignment targets are parsed as ordinary `parse_expr`, over-
+// permissively (accepting shapes like a bare literal on the left of
+// `:=`) -- matching Stage1/src/parser.ptl's own established choice,
+// which its own comment there explains: the grammar is deliberately
+// more permissive than the semantics; rejecting a non-lvalue target is
+// Module 3's job, since this module has no checker phase at all.
+// ---------------------------------------------------------------------
+
+// assign_pair ::= lvalue ":=" expr -- `lv` already parsed by the caller.
+function parse_assign_pair_from(p: *Parser, lv: *ASTNode) : *ASTNode {
+  mut rv : *ASTNode := null;
+  mut n : *ASTNode := null;
+
+  advance(p);
+  rv := parse_expr(p);
+  if ((*p).had_error) { return null; }
+  n := alloc_node(p, 137);
+  (*n).left := lv;
+  (*n).right := rv;
+  return n;
+}
+
+function parse_assign_pair(p: *Parser) : *ASTNode {
+  mut lv : *ASTNode := parse_expr(p);
+  if ((*p).had_error) { return null; }
+  if (cur_kind(p) != 70) { fail(p); return null; }
+  return parse_assign_pair_from(p, lv);
+}
+
+// stmt ::= assign_stmt | if_stmt | while_stmt | return_stmt | expr_stmt
+// assign_stmt ::= assign_pair ("," assign_pair)* ";" -- "simultaneous
+// assignment" (SS4.2): every pair here hangs off ASSIGN_STMT's own
+// first_child chain, distinct from BLOCK's next_sibling statement
+// chain, so a multi-pair `a := b, b := a;` is unambiguous from "two
+// separate statements."
+function parse_stmt(p: *Parser) : *ASTNode {
+  mut k : int32 := cur_kind(p);
+  mut first : *ASTNode := null;
+  mut n : *ASTNode := null;
+  mut pair1 : *ASTNode := null;
+  mut prev : *ASTNode := null;
+  mut item : *ASTNode := null;
+
+  if (k == 15) { return parse_if_stmt(p); }
+  if (k == 17) { return parse_while_stmt(p); }
+  if (k == 18) { return parse_return_stmt(p); }
+
+  first := parse_expr(p);
+  if ((*p).had_error) { return null; }
+
+  if (cur_kind(p) == 70) {
+    n := alloc_node(p, 135);
+    pair1 := parse_assign_pair_from(p, first);
+    if ((*p).had_error) { return null; }
+    (*n).first_child := pair1;
+    prev := pair1;
+    while (cur_kind(p) == 52) {
+      advance(p);
+      item := parse_assign_pair(p);
+      if ((*p).had_error) { return null; }
+      (*prev).next_sibling := item;
+      prev := item;
+    }
+    if (!expect(p, 51)) { return null; }
+    return n;
+  }
+
+  if (!expect(p, 51)) { return null; }
+  n := alloc_node(p, 136);
+  (*n).left := first;
+  return n;
+}
+
+function parse_if_stmt(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 131);
+  mut cond : *ASTNode := null;
+  mut then_b : *ASTNode := null;
+  mut else_b : *ASTNode := null;
+
+  advance(p);
+  if (!expect(p, 54)) { return null; }
+  cond := parse_expr(p);
+  if ((*p).had_error) { return null; }
+  if (!expect(p, 55)) { return null; }
+  then_b := parse_block(p);
+  if ((*p).had_error) { return null; }
+  (*n).left := cond;
+  (*n).right := then_b;
+  if (cur_kind(p) == 16) {
+    advance(p);
+    else_b := parse_block(p);
+    if ((*p).had_error) { return null; }
+    (*n).extra := else_b;
+  }
+  return n;
+}
+
+function parse_while_stmt(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 132);
+  mut cond : *ASTNode := null;
+  mut body : *ASTNode := null;
+
+  advance(p);
+  if (!expect(p, 54)) { return null; }
+  cond := parse_expr(p);
+  if ((*p).had_error) { return null; }
+  if (!expect(p, 55)) { return null; }
+  body := parse_block(p);
+  if ((*p).had_error) { return null; }
+  (*n).left := cond;
+  (*n).right := body;
+  return n;
+}
+
+function parse_return_stmt(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 133);
+  mut e : *ASTNode := null;
+
+  advance(p);
+  if (cur_kind(p) == 51) {
+    advance(p);
+    return n;
+  }
+  e := parse_expr(p);
+  if ((*p).had_error) { return null; }
+  if (!expect(p, 51)) { return null; }
+  (*n).left := e;
+  return n;
+}
+
+// block ::= "{" stmt* "}" -- no decls (see parse_func_block for the
+// func-body-only decl* stmt* shape, SS4.1).
+function parse_block(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 130);
+  mut prev : *ASTNode := null;
+  mut s : *ASTNode := null;
+
+  if (!expect(p, 56)) { return null; }
+  while (cur_kind(p) != 57) {
+    if (cur_kind(p) == 0) { fail(p); return null; }
+    s := parse_stmt(p);
+    if ((*p).had_error) { return null; }
+    if (prev == null) {
+      (*n).first_child := s;
+    } else {
+      (*prev).next_sibling := s;
+    }
+    prev := s;
+  }
+  advance(p);
+  return n;
+}
+
+// decl ::= ("mut" | "const") identifier ":" type (":=" expr)? ";"
+function parse_decl_stmt(p: *Parser) : *ASTNode {
+  mut is_mut : bool := cur_kind(p) == 13;
+  mut t : Token := Token { kind := 0, offset := 0, length := 0 };
+  mut ty : *ASTNode := null;
+  mut init : *ASTNode := null;
+  mut n : *ASTNode := null;
+
+  advance(p);
+  if (cur_kind(p) != 1) { fail(p); return null; }
+  t := cur_tok(p);
+  advance(p);
+  if (!expect(p, 50)) { return null; }
+  ty := parse_type(p);
+  if ((*p).had_error) { return null; }
+  n := alloc_node(p, 134);
+  (*n).tok := t;
+  (*n).is_mutable := is_mut;
+  (*n).data_type := ty;
+  if (cur_kind(p) == 70) {
+    advance(p);
+    init := parse_expr(p);
+    if ((*p).had_error) { return null; }
+    (*n).left := init;
+  }
+  if (!expect(p, 51)) { return null; }
+  return n;
+}
+
+// func_block ::= "{" decl* stmt* "}" -- decls only ever come first
+// (grammar-enforced, SS4.1): parse decl* while the current token is
+// "mut"/"const", falling through to stmt* the moment neither matches.
+// Both halves land in the same source-order BLOCK.first_child chain --
+// nothing downstream needs to tell "was this a decl or a statement"
+// apart from the node's own kind.
+function parse_func_block(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 130);
+  mut prev : *ASTNode := null;
+  mut d : *ASTNode := null;
+  mut s : *ASTNode := null;
+  mut k : int32 := 0;
+
+  if (!expect(p, 56)) { return null; }
+  k := cur_kind(p);
+  while (k == 13 || k == 14) {
+    d := parse_decl_stmt(p);
+    if ((*p).had_error) { return null; }
+    if (prev == null) {
+      (*n).first_child := d;
+    } else {
+      (*prev).next_sibling := d;
+    }
+    prev := d;
+    k := cur_kind(p);
+  }
+  while (cur_kind(p) != 57) {
+    if (cur_kind(p) == 0) { fail(p); return null; }
+    s := parse_stmt(p);
+    if ((*p).had_error) { return null; }
+    if (prev == null) {
+      (*n).first_child := s;
+    } else {
+      (*prev).next_sibling := s;
+    }
+    prev := s;
+  }
+  advance(p);
+  return n;
+}
+
+// ---------------------------------------------------------------------
+// Top-level declarations (postulate_v0_language_reference.md SS9-SS10,
+// unchanged from v0 apart from dropping the bodyless-function form --
+// SS5.2/SS6.1 of the v1 reference -- which Stage1/src/parser.ptl never
+// had to begin with, so there is nothing to remove here either).
+// ---------------------------------------------------------------------
+
+function parse_param(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := null;
+  mut t : Token := cur_tok(p);
+  mut ty : *ASTNode := null;
+
+  if (cur_kind(p) != 1) { fail(p); return null; }
+  advance(p);
+  if (!expect(p, 50)) { return null; }
+  ty := parse_type(p);
+  if ((*p).had_error) { return null; }
+  n := alloc_node(p, 114);
+  (*n).tok := t;
+  (*n).data_type := ty;
+  return n;
+}
+
+// params ::= (param ("," param)*)? -- optional: an empty list (no
+// leading identifier) is success, not a parse error.
+function parse_params_into(p: *Parser, container: *ASTNode) : void {
+  mut first : *ASTNode := null;
+  mut prev : *ASTNode := null;
+  mut item : *ASTNode := null;
+
+  if (cur_kind(p) != 1) { return; }
+  first := parse_param(p);
+  if ((*p).had_error) { return; }
+  (*container).first_child := first;
+  prev := first;
+  while (cur_kind(p) == 52) {
+    advance(p);
+    item := parse_param(p);
+    if ((*p).had_error) { return; }
+    (*prev).next_sibling := item;
+    prev := item;
+  }
+}
+
+function parse_field_decl(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := null;
+  mut t : Token := cur_tok(p);
+  mut ty : *ASTNode := null;
+
+  if (cur_kind(p) != 1) { fail(p); return null; }
+  advance(p);
+  if (!expect(p, 50)) { return null; }
+  ty := parse_type(p);
+  if ((*p).had_error) { return null; }
+  if (!expect(p, 51)) { return null; }
+  n := alloc_node(p, 111);
+  (*n).tok := t;
+  (*n).data_type := ty;
+  return n;
+}
+
+function parse_struct_decl(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 110);
+  mut prev : *ASTNode := null;
+  mut f : *ASTNode := null;
+
+  advance(p);
+  if (cur_kind(p) != 1) { fail(p); return null; }
+  (*n).tok := cur_tok(p);
+  advance(p);
+  if (!expect(p, 56)) { return null; }
+  while (cur_kind(p) != 57) {
+    if (cur_kind(p) == 0) { fail(p); return null; }
+    f := parse_field_decl(p);
+    if ((*p).had_error) { return null; }
+    if (prev == null) {
+      (*n).first_child := f;
+    } else {
+      (*prev).next_sibling := f;
+    }
+    prev := f;
+  }
+  advance(p);
+  return n;
+}
+
+function parse_extern_decl(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 112);
+  mut rt : *ASTNode := null;
+
+  advance(p);
+  if (!expect(p, 10)) { return null; }
+  if (cur_kind(p) != 1) { fail(p); return null; }
+  (*n).tok := cur_tok(p);
+  advance(p);
+  if (!expect(p, 54)) { return null; }
+  parse_params_into(p, n);
+  if ((*p).had_error) { return null; }
+  if (!expect(p, 55)) { return null; }
+  if (!expect(p, 50)) { return null; }
+  rt := parse_return_type(p);
+  if ((*p).had_error) { return null; }
+  (*n).data_type := rt;
+  if (!expect(p, 51)) { return null; }
+  return n;
+}
+
+function parse_function(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 113);
+  mut rt : *ASTNode := null;
+  mut body : *ASTNode := null;
+
+  advance(p);
+  if (cur_kind(p) != 1) { fail(p); return null; }
+  (*n).tok := cur_tok(p);
+  advance(p);
+  if (!expect(p, 54)) { return null; }
+  parse_params_into(p, n);
+  if ((*p).had_error) { return null; }
+  if (!expect(p, 55)) { return null; }
+  if (!expect(p, 50)) { return null; }
+  rt := parse_return_type(p);
+  if ((*p).had_error) { return null; }
+  (*n).data_type := rt;
+  body := parse_func_block(p);
+  if ((*p).had_error) { return null; }
+  (*n).extra := body;
+  return n;
+}
+
+// ---------------------------------------------------------------------
+// Namespaces / use / @autoload -- new in v1.0.6 (postulate_v1_language_
+// reference.md SS6.1/SS6.2/SS6.2a/SS6.2b), replacing the retired
+// #include entirely.
+// ---------------------------------------------------------------------
+
+// fqn ::= "\" identifier ("\" identifier)*
+function parse_fqn_into(p: *Parser, container: *ASTNode) : void {
+  mut first : *ASTNode := null;
+  mut prev : *ASTNode := null;
+  mut seg : *ASTNode := null;
+
+  if (!expect(p, 60)) { return; }
+  if (cur_kind(p) != 1) { fail(p); return; }
+  seg := alloc_node(p, 102);
+  (*seg).tok := cur_tok(p);
+  advance(p);
+  first := seg;
+  prev := seg;
+  (*container).first_child := first;
+
+  while (cur_kind(p) == 60 && peek_kind(p, 1) == 1) {
+    advance(p);
+    seg := alloc_node(p, 102);
+    (*seg).tok := cur_tok(p);
+    advance(p);
+    (*prev).next_sibling := seg;
+    prev := seg;
+  }
+}
+
+function parse_namespace_decl(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 101);
+
+  if (!expect(p, 39)) { return null; }
+  parse_fqn_into(p, n);
+  if ((*p).had_error) { return null; }
+  if (!expect(p, 51)) { return null; }
+  return n;
+}
+
+// use_spec ::= identifier ("as" identifier)?
+function parse_use_item(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := null;
+  mut alias : *ASTNode := null;
+
+  if (cur_kind(p) != 1) { fail(p); return null; }
+  n := alloc_node(p, 104);
+  (*n).tok := cur_tok(p);
+  advance(p);
+  if (cur_kind(p) == 34) {
+    advance(p);
+    if (cur_kind(p) != 1) { fail(p); return null; }
+    alias := alloc_node(p, 102);
+    (*alias).tok := cur_tok(p);
+    advance(p);
+    (*n).right := alias;
+  }
+  return n;
+}
+
+// use_decl   ::= "use" (fqn_group | fqn_single) ";"
+// fqn_single ::= fqn ("as" identifier)?
+// fqn_group  ::= fqn "\" "{" use_spec ("," use_spec)* "}"
+// The single-import and namespace-level-import forms (SS6.2a) share
+// this exact grammar -- which one a given `use` turns out to be is a
+// Module 3 question (does the fqn resolve to a specific declaration or
+// to a namespace?), not something this module can or needs to tell
+// apart.
+function parse_use_decl(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 103);
+  mut alias : *ASTNode := null;
+  mut first : *ASTNode := null;
+  mut prev : *ASTNode := null;
+  mut item : *ASTNode := null;
+
+  advance(p);
+  parse_fqn_into(p, n);
+  if ((*p).had_error) { return null; }
+
+  if (cur_kind(p) == 60 && peek_kind(p, 1) == 56) {
+    advance(p);
+    advance(p);
+    (*n).int_val := 1;
+    first := parse_use_item(p);
+    if ((*p).had_error) { return null; }
+    (*n).extra := first;
+    prev := first;
+    while (cur_kind(p) == 52) {
+      advance(p);
+      item := parse_use_item(p);
+      if ((*p).had_error) { return null; }
+      (*prev).next_sibling := item;
+      prev := item;
+    }
+    if (!expect(p, 57)) { return null; }
+  } else {
+    if (cur_kind(p) == 34) {
+      advance(p);
+      if (cur_kind(p) != 1) { fail(p); return null; }
+      alias := alloc_node(p, 102);
+      (*alias).tok := cur_tok(p);
+      advance(p);
+      (*n).right := alias;
+    }
+  }
+  if (!expect(p, 51)) { return null; }
+  return n;
+}
+
+// autoload_decl ::= "@autoload" "(" pattern_string "," path_string
+//                    ("," verify_flag)? ")" ";"
+// pattern_string/path_string content-restriction (path_char |
+// :placeholder, SS6.2b) is a Module 3 concern, not checked here --
+// same "grammar more permissive than semantics" precedent as the
+// assignment-target/sizeof-argument cases above.
+function parse_autoload_decl(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 105);
+  mut pat : *ASTNode := null;
+  mut pth : *ASTNode := null;
+
+  advance(p);
+  if (!expect(p, 54)) { return null; }
+  if (cur_kind(p) != 4) { fail(p); return null; }
+  pat := alloc_node(p, 143);
+  (*pat).tok := cur_tok(p);
+  advance(p);
+  (*n).left := pat;
+  if (!expect(p, 52)) { return null; }
+  if (cur_kind(p) != 4) { fail(p); return null; }
+  pth := alloc_node(p, 143);
+  (*pth).tok := cur_tok(p);
+  advance(p);
+  (*n).right := pth;
+  if (cur_kind(p) == 52) {
+    advance(p);
+    if (cur_kind(p) == 37) {
+      (*n).int_val := 1;
+      advance(p);
+    } else {
+      if (cur_kind(p) == 38) {
+        (*n).int_val := 2;
+        advance(p);
+      } else {
+        fail(p);
+        return null;
+      }
+    }
+  }
+  if (!expect(p, 55)) { return null; }
+  if (!expect(p, 51)) { return null; }
+  return n;
+}
+
+// program ::= namespace_decl autoload_decl* use_decl* top_level_decl+
+// (SS6.1) -- a real, grammar-enforced order, not a semantic convention:
+// exactly one namespace_decl, then every @autoload, then every use,
+// then at least one struct/extern/function, until EOF.
+function parse_program(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 100);
+  mut ns : *ASTNode := null;
+  mut prev : *ASTNode := null;
+  mut item : *ASTNode := null;
+  mut k : int32 := 0;
+  mut count : uint64 := 0;
+
+  ns := parse_namespace_decl(p);
+  if ((*p).had_error) { return null; }
+  (*n).first_child := ns;
+  prev := ns;
+
+  while (cur_kind(p) == 40) {
+    item := parse_autoload_decl(p);
+    if ((*p).had_error) { return null; }
+    (*prev).next_sibling := item;
+    prev := item;
+  }
+
+  while (cur_kind(p) == 35) {
+    item := parse_use_decl(p);
+    if ((*p).had_error) { return null; }
+    (*prev).next_sibling := item;
+    prev := item;
+  }
+
+  k := cur_kind(p);
+  while (k == 10 || k == 11 || k == 12) {
+    if (k == 10) {
+      item := parse_function(p);
+    } else {
+      if (k == 11) {
+        item := parse_struct_decl(p);
+      } else {
+        item := parse_extern_decl(p);
+      }
+    }
+    if ((*p).had_error) { return null; }
+    (*prev).next_sibling := item;
+    prev := item;
+    count := count + 1;
+    k := cur_kind(p);
+  }
+
+  if (count == 0) { fail(p); return null; }
+  if (cur_kind(p) != 0) { fail(p); return null; }
+  return n;
+}
 
 struct Segment {
   offset : uint64;
@@ -94,11 +2027,13 @@ struct MatchResult {
   matched : bool;
   binding_count : uint64;
   consumed : uint64;
+  would_consume_all : bool;
 }
 
 struct ResolveResult {
   length : uint64;
   matched_rule : int64;
+  warn_count : uint64;
 }
 
 struct LookupResult {
@@ -122,6 +2057,28 @@ function bytes_equal(src: *(uint8[65536]), off1: uint64, len1: uint64, off2: uin
   }
   while (i < len1) {
     if ((*src)[off1 + i] != (*src)[off2 + i]) {
+      eq := false;
+    }
+    i := i + 1;
+  }
+  return eq;
+}
+
+// Same as bytes_equal, but the two spans live in two POSSIBLY DIFFERENT
+// buffers -- needed once symbol names/types can come from different
+// files (each file's offsets only mean something relative to its own
+// buffer). bytes_equal itself stays as it is for the genuinely single-
+// buffer comparisons (autoload pattern/path text, both always sourced
+// from the one file that declared them).
+function bytes_equal_cross(src1: *(uint8[65536]), off1: uint64, len1: uint64, src2: *(uint8[65536]), off2: uint64, len2: uint64) : bool {
+  mut i : uint64 := 0;
+  mut eq : bool := true;
+
+  if (len1 != len2) {
+    return false;
+  }
+  while (i < len1) {
+    if ((*src1)[off1 + i] != (*src2)[off2 + i]) {
       eq := false;
     }
     i := i + 1;
@@ -208,7 +2165,13 @@ function validate_pattern(src: *(uint8[65536]), pat_off: uint64, pat_len: uint64
 // against the fqn's leading segments (a ":label" segment matches any
 // one fqn segment and binds it; a literal segment must match exactly)
 // AND at least one fqn segment is left over afterward -- a match that
-// consumes the whole fqn has no filename left to resolve to.
+// consumes the whole fqn has no filename left to resolve to, so it is
+// never treated as a real match; `would_consume_all` tells the caller
+// this WAS the reason (as opposed to the segments simply not lining
+// up at all), so it can warn instead of silently moving on -- a
+// pattern strictly longer than the fqn (pat_count > fqn_count) can
+// never align regardless of remainder, so that stays an ordinary,
+// unremarkable non-match with no warning.
 function match_pattern(src: *(uint8[65536]), fqn_segs: *(Segment[16]), fqn_count: uint64, pat_off: uint64, pat_len: uint64, out_bindings: *(Binding[16])) : MatchResult {
   mut pat_segs : Segment[16];
   mut pat_count : uint64 := split_path(src, pat_off, pat_len, 92, &pat_segs);
@@ -216,8 +2179,8 @@ function match_pattern(src: *(uint8[65536]), fqn_segs: *(Segment[16]), fqn_count
   mut ok : bool := true;
   mut bcount : uint64 := 0;
 
-  if (pat_count >= fqn_count) {
-    return MatchResult { matched := false, binding_count := 0, consumed := 0 };
+  if (pat_count > fqn_count) {
+    return MatchResult { matched := false, binding_count := 0, consumed := 0, would_consume_all := false };
   }
 
   while (i < pat_count && ok) {
@@ -237,7 +2200,14 @@ function match_pattern(src: *(uint8[65536]), fqn_segs: *(Segment[16]), fqn_count
     i := i + 1;
   }
 
-  return MatchResult { matched := ok, binding_count := bcount, consumed := pat_count };
+  if (!ok) {
+    return MatchResult { matched := false, binding_count := 0, consumed := 0, would_consume_all := false };
+  }
+  if (pat_count == fqn_count) {
+    return MatchResult { matched := false, binding_count := 0, consumed := pat_count, would_consume_all := true };
+  }
+
+  return MatchResult { matched := true, binding_count := bcount, consumed := pat_count, would_consume_all := false };
 }
 
 function lookup_binding(src: *(uint8[65536]), bindings: *(Binding[16]), bcount: uint64, label_off: uint64, label_len: uint64) : LookupResult {
@@ -297,36 +2267,58 @@ function append_remaining_segments(out: *(uint8[512]), pos: uint64, src: *(uint8
   return new_pos;
 }
 
-function uint64_to_int64(n: uint64) : int64 {
-  mut result : int64 := 0;
-  mut steps : uint64 := n;
-  while (steps > 0) {
-    result := result + 1;
-    steps := steps - 1;
+// ---------------------------------------------------------------------
+// fqn segments straight from a PATH_SEGMENT chain (NAMESPACE_DECL's or
+// USE_DECL's own first_child) -- avoids needing one contiguous source
+// span for the whole fqn (the parser never records the position of the
+// backslashes connecting segments, only each segment's own identifier
+// token), and match_pattern already wanted pre-split segments anyway;
+// resolve_path is refactored below to take them the same way.
+// ---------------------------------------------------------------------
+
+function segments_from_chain(first: *ASTNode, out: *(Segment[16])) : uint64 {
+  mut count : uint64 := 0;
+  mut n : *ASTNode := first;
+  while (n != null) {
+    (*out)[count] := Segment { offset := (*n).tok.offset, length := (*n).tok.length };
+    count := count + 1;
+    n := (*n).next_sibling;
   }
-  return result;
+  return count;
 }
 
 // First-match-wins, checked top-to-bottom (postulate_v1_language_
 // reference.md SS6.2b); no match falls back to the plain default rule
 // over the whole fqn. Caller is expected to have already validated
 // every rule's own pattern (validate_pattern) -- this function assumes
-// well-formed rules, it doesn't re-check them.
-function resolve_path(src: *(uint8[65536]), fqn_off: uint64, fqn_len: uint64, rules: *(AutoloadRule[32]), rule_count: uint64, out: *(uint8[512])) : ResolveResult {
-  mut fqn_segs : Segment[16];
-  mut fqn_count : uint64 := split_path(src, fqn_off, fqn_len, 92, &fqn_segs);
+// well-formed rules, it doesn't re-check them. A rule whose pattern
+// would consume the fqn's every segment (match_pattern's own
+// `would_consume_all`) is recorded, in trial order, into
+// `warn_rules`/the returned `warn_count` -- skipped silently as far as
+// resolution itself goes (the next rule, or the default, still decides
+// the actual path), but surfaced so the caller can warn instead of the
+// compiler quietly doing nothing about it. Takes the fqn as already-
+// split segments (see segments_from_chain above) rather than a raw
+// span -- the real caller (main(), below) only ever has a PATH_SEGMENT
+// chain to offer, never one contiguous span.
+function resolve_path(src: *(uint8[65536]), fqn_segs: *(Segment[16]), fqn_count: uint64, rules: *(AutoloadRule[32]), rule_count: uint64, out: *(uint8[512]), warn_rules: *(uint64[32])) : ResolveResult {
   mut r : uint64 := 0;
   mut bindings : Binding[16];
-  mut mr : MatchResult := MatchResult { matched := false, binding_count := 0, consumed := 0 };
+  mut mr : MatchResult := MatchResult { matched := false, binding_count := 0, consumed := 0, would_consume_all := false };
   mut matched_rule : int64 := -1;
   mut pos : uint64 := 0;
   mut path_segs : Segment[16];
   mut path_count : uint64 := 0;
   mut i : uint64 := 0;
   mut lb : LookupResult := LookupResult { found := false, index := 0 };
+  mut warn_count : uint64 := 0;
 
   while (r < rule_count && !mr.matched) {
-    mr := match_pattern(src, &fqn_segs, fqn_count, (*rules)[r].pattern_offset, (*rules)[r].pattern_length, &bindings);
+    mr := match_pattern(src, fqn_segs, fqn_count, (*rules)[r].pattern_offset, (*rules)[r].pattern_length, &bindings);
+    if (mr.would_consume_all) {
+      (*warn_rules)[warn_count] := r;
+      warn_count := warn_count + 1;
+    }
     if (!mr.matched) {
       r := r + 1;
     }
@@ -350,67 +2342,502 @@ function resolve_path(src: *(uint8[65536]), fqn_off: uint64, fqn_len: uint64, ru
       }
       i := i + 1;
     }
-    pos := append_remaining_segments(out, pos, src, &fqn_segs, mr.consumed, fqn_count, true);
+    pos := append_remaining_segments(out, pos, src, fqn_segs, mr.consumed, fqn_count, true);
   } else {
-    pos := append_remaining_segments(out, pos, src, &fqn_segs, 0, fqn_count, false);
+    pos := append_remaining_segments(out, pos, src, fqn_segs, 0, fqn_count, false);
   }
 
-  return ResolveResult { length := pos, matched_rule := matched_rule };
+  return ResolveResult { length := pos, matched_rule := matched_rule, warn_count := warn_count };
 }
 
 // ---------------------------------------------------------------------
-// Line-based test harness -- see the file header for the exact
-// protocol. Not the real multi-file driver (which doesn't exist yet);
-// a focused unit-test rig for the resolution algorithm above.
+// Symbol table + declare pass + struct layout (postulate_stage1_v1_0_6
+// _edsger_design.md, "Module 3"): pass 1 of the agreed two-pass design
+// -- register every top-level struct/function/extern BEFORE looking at
+// any body, so a reference to something declared later in the same
+// file (or, once multi-file resolution exists, in a `use`d file not
+// yet opened) still resolves once this pass finishes; nothing here
+// ever needs a REFERENCED declaration to already be checked, only to
+// exist. Multi-file `use`/`@autoload` file-opening itself, and the
+// pass-2 body/expression type-checking that reads this table, are both
+// still to come -- this slice covers declare + struct sizing only, for
+// a single already-parsed file.
 // ---------------------------------------------------------------------
 
-function read_line(buf: *(uint8[65536]), len: uint64, cursor: uint64) : LineResult {
-  mut i : uint64 := cursor;
-  mut next_cursor : uint64 := 0;
-
-  if (cursor >= len) {
-    return LineResult { offset := cursor, length := 0, next := cursor, has_line := false };
-  }
-  while (i < len && (*buf)[i] != 10) {
-    i := i + 1;
-  }
-  if (i < len) {
-    next_cursor := i + 1;
-  } else {
-    next_cursor := i;
-  }
-  return LineResult { offset := cursor, length := i - cursor, next := next_cursor, has_line := true };
+struct Symbol {
+  kind : int32;          // 1 = struct, 2 = function, 3 = extern
+  decl : *ASTNode;        // the STRUCT_DECL/FUNCTION_DECL/EXTERN_DECL node
+  file_idx : uint64;       // which FileSet.buffers[] slot decl's tok offsets are relative to
+  size : uint64;           // structs only, once sized
+  sizing_state : int32;   // structs only: 0 not started, 1 in progress, 2 done
 }
 
-function uint64_of_digit(b: uint8) : uint64 {
-  mut r : uint64 := 0;
-  if (b == 49) { r := 1; }
-  if (b == 50) { r := 2; }
-  if (b == 51) { r := 3; }
-  if (b == 52) { r := 4; }
-  if (b == 53) { r := 5; }
-  if (b == 54) { r := 6; }
-  if (b == 55) { r := 7; }
-  if (b == 56) { r := 8; }
-  if (b == 57) { r := 9; }
-  return r;
+// `buffers` replaces the first slice's single `src` -- once more than one
+// file is in play, every offset/length pair only means something
+// relative to ITS OWN file's buffer, so every place that used to read
+// `s.src` directly now needs to know which slot to read instead (each
+// Symbol carries its own `file_idx` for exactly this reason).
+struct Sema {
+  buffers : *(FileBuf[24]);
+  symbols : *(Symbol[256]);
+  symbol_count : uint64;
+  had_error : bool;
+  err_node : *ASTNode;
+  err_file_idx : uint64;
+  err_kind : int32;       // 1 duplicate declaration, 2 struct value cycle, 3 unknown type
 }
 
-function int32_of_digit(b: uint8) : int32 {
-  mut r : int32 := 0;
-  if (b == 49) { r := 1; }
-  if (b == 50) { r := 2; }
-  return r;
+function sym_decl(s: *Sema, i: uint64) : *ASTNode {
+  return (*(*s).symbols)[i].decl;
 }
 
-function parse_uint_line(buf: *(uint8[65536]), off: uint64, len: uint64) : uint64 {
+function sym_src(s: *Sema, i: uint64) : *(uint8[65536]) {
+  return &(*(*s).buffers)[(*(*s).symbols)[i].file_idx].bytes;
+}
+
+function names_equal(s: *Sema, existing_idx: uint64, decl_file_idx: uint64, decl: *ASTNode) : bool {
+  mut a : *ASTNode := sym_decl(s, existing_idx);
+  return bytes_equal_cross(sym_src(s, existing_idx), (*a).tok.offset, (*a).tok.length, &(*(*s).buffers)[decl_file_idx].bytes, (*decl).tok.offset, (*decl).tok.length);
+}
+
+function declare_one(s: *Sema, decl: *ASTNode, k: uint32, file_idx: uint64) : void {
+  mut sym_kind : int32 := 0;
   mut i : uint64 := 0;
-  mut v : uint64 := 0;
-  while (i < len) {
-    v := v * 10 + uint64_of_digit((*buf)[off + i]);
+  mut dup : bool := false;
+
+  if (k == 110) { sym_kind := 1; }
+  if (k == 113) { sym_kind := 2; }
+  if (k == 112) { sym_kind := 3; }
+
+  while (i < (*s).symbol_count && !dup) {
+    if (names_equal(s, i, file_idx, decl)) {
+      dup := true;
+    }
     i := i + 1;
   }
-  return v;
+  if (dup) {
+    (*s).had_error := true;
+    (*s).err_node := decl;
+    (*s).err_file_idx := file_idx;
+    (*s).err_kind := 1;
+    return;
+  }
+
+  (*(*s).symbols)[(*s).symbol_count] := Symbol { kind := sym_kind, decl := decl, file_idx := file_idx, size := 0, sizing_state := 0 };
+  (*s).symbol_count := (*s).symbol_count + 1;
+}
+
+function declare_program(s: *Sema, program: *ASTNode, file_idx: uint64) : void {
+  mut child : *ASTNode := (*program).first_child;
+  mut k : uint32 := 0;
+
+  while (child != null && !(*s).had_error) {
+    k := (*child).kind;
+    if (k == 110 || k == 113 || k == 112) {
+      declare_one(s, child, k, file_idx);
+    }
+    child := (*child).next_sibling;
+  }
+}
+
+function find_struct_symbol(s: *Sema, query_src: *(uint8[65536]), name_off: uint64, name_len: uint64) : LookupResult {
+  mut i : uint64 := 0;
+  mut found : bool := false;
+  mut idx : uint64 := 0;
+
+  while (i < (*s).symbol_count) {
+    if ((*(*s).symbols)[i].kind == 1) {
+      if (bytes_equal_cross(sym_src(s, i), (*sym_decl(s, i)).tok.offset, (*sym_decl(s, i)).tok.length, query_src, name_off, name_len)) {
+        found := true;
+        idx := i;
+      }
+    }
+    i := i + 1;
+  }
+  return LookupResult { found := found, index := idx };
+}
+
+// Fixed sizes for the scalar base-type keywords, keyed directly by the
+// lexer's own token kind (TYPE_BASE.tok.kind) -- 0 means "not a
+// recognized scalar keyword," the signal to field_type_size that this
+// must be a struct-name reference instead. `int`/`uint` are aliases
+// for `int32`/`uint32` (postulate_v1_language_reference.md SS2.7a's
+// own "not a distinct type, exactly like int/uint" note about
+// `uintptr`).
+function base_type_size(kind: int32) : uint64 {
+  mut sz : uint64 := 0;
+  if (kind == 22) { sz := 1; }
+  if (kind == 27) { sz := 1; }
+  if (kind == 36) { sz := 1; }
+  if (kind == 32) { sz := 1; }
+  if (kind == 23) { sz := 2; }
+  if (kind == 28) { sz := 2; }
+  if (kind == 24) { sz := 4; }
+  if (kind == 25) { sz := 4; }
+  if (kind == 29) { sz := 4; }
+  if (kind == 30) { sz := 4; }
+  if (kind == 26) { sz := 8; }
+  if (kind == 31) { sz := 8; }
+  if (kind == 43) { sz := 8; }
+  return sz;
+}
+
+// Value-cycle detection: `sizing_state` is a classic white/gray/black
+// DFS coloring over the "struct field, by value" reference graph. A
+// struct hit while it is still gray (1, "being sized right now,
+// further up the same call stack") is a real value cycle -- reported
+// once, HERE, at this second encounter, per this session's own
+// refinement (mirrors validate_pattern's own "flag the second
+// occurrence" rule for a duplicate autoload placeholder). Reaching an
+// already-black (2, "done") struct is the ordinary, ex­pected case of
+// two fields sharing a type -- not an error, just returns its already-
+// known size. Declaration order doesn't matter: every struct already
+// has a symbol table entry from the declare pass before this ever
+// runs, so a field referencing a struct declared LATER in the file
+// still resolves correctly.
+function compute_struct_size(s: *Sema, idx: uint64) : uint64 {
+  mut decl : *ASTNode := sym_decl(s, idx);
+  mut field : *ASTNode := null;
+  mut total : uint64 := 0;
+
+  if ((*(*s).symbols)[idx].sizing_state == 2) {
+    return (*(*s).symbols)[idx].size;
+  }
+  if ((*(*s).symbols)[idx].sizing_state == 1) {
+    (*s).had_error := true;
+    (*s).err_node := decl;
+    (*s).err_file_idx := (*(*s).symbols)[idx].file_idx;
+    (*s).err_kind := 2;
+    return 0;
+  }
+
+  (*(*s).symbols)[idx].sizing_state := 1;
+
+  field := (*decl).first_child;
+  while (field != null && !(*s).had_error) {
+    total := total + field_type_size(s, (*field).data_type, (*(*s).symbols)[idx].file_idx);
+    field := (*field).next_sibling;
+  }
+
+  (*(*s).symbols)[idx].sizing_state := 2;
+  (*(*s).symbols)[idx].size := total;
+  return total;
+}
+
+function field_type_size(s: *Sema, ty: *ASTNode, file_idx: uint64) : uint64 {
+  mut k : uint32 := (*ty).kind;
+  mut builtin : uint64 := 0;
+  mut lr : LookupResult := LookupResult { found := false, index := 0 };
+
+  if (k == 121) {
+    return 8;
+  }
+  if (k == 122) {
+    return field_type_size(s, (*ty).left, file_idx) * int64_to_uint64((*ty).int_val);
+  }
+
+  builtin := base_type_size((*ty).tok.kind);
+  if (builtin > 0) {
+    return builtin;
+  }
+
+  lr := find_struct_symbol(s, &(*(*s).buffers)[file_idx].bytes, (*ty).tok.offset, (*ty).tok.length);
+  if (!lr.found) {
+    (*s).had_error := true;
+    (*s).err_node := ty;
+    (*s).err_file_idx := file_idx;
+    (*s).err_kind := 3;
+    return 0;
+  }
+  return compute_struct_size(s, lr.index);
+}
+
+function compute_all_struct_sizes(s: *Sema) : void {
+  mut i : uint64 := 0;
+  while (i < (*s).symbol_count && !(*s).had_error) {
+    if ((*(*s).symbols)[i].kind == 1 && (*(*s).symbols)[i].sizing_state == 0) {
+      compute_struct_size(s, i);
+    }
+    i := i + 1;
+  }
+}
+
+function int32_of_int_val(n: int64) : int32 {
+  mut result : int32 := 0;
+  mut steps : int64 := n;
+  while (steps > 0) {
+    result := result + 1;
+    steps := steps - 1;
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------
+// Tokenizing (into the Parser's own arrays, exactly like parser.ptl's
+// own tokenize_all) and I/O/dump helpers.
+// ---------------------------------------------------------------------
+
+function tokenize_all(p: *Parser) : void {
+  mut r : SourceReader := SourceReader { buffer := (*p).src, length := (*p).src_len, cursor := 0 };
+  mut looping : bool := true;
+  mut t : Token := Token { kind := 0, offset := 0, length := 0 };
+
+  while (looping) {
+    t := lex_next(&r);
+    (*(*p).toks_kind)[(*p).tok_count] := t.kind;
+    (*(*p).toks_offset)[(*p).tok_count] := t.offset;
+    (*(*p).toks_length)[(*p).tok_count] := t.length;
+    (*p).tok_count := (*p).tok_count + 1;
+    if (t.kind == 0) {
+      looping := false;
+    } else {
+      if (t.kind >= 247 && t.kind <= 254) {
+        (*p).lex_error := true;
+        (*p).lex_error_tok := t;
+        looping := false;
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------
+// Multi-file discovery/opening (postulate_stage1_v1_0_6_edsger_design.md,
+// "Module 3" SS2 -- "resolve its own top-level declarations"). Every
+// discovered file gets its OWN slot in `buffers` (a fixed MAX_FILES
+// array of ordinary uint8[65536] locals, not one per-file heap
+// allocation and not one shared arena) -- chosen specifically so that
+// nothing about the already-reviewed lexer/parser code (SourceReader,
+// Parser, every function typed against `*(uint8[65536])`) needs to
+// change: a slot's address is exactly the same shape those functions
+// already expect. The AST arena (Parser.pool) stays the ONE thing
+// genuinely shared across every file -- Module 3/4 need to walk every
+// file's declarations uniformly, so their nodes all live in the same
+// pool regardless of which file produced them; only the raw source
+// bytes are kept apart, per file, since offsets only mean something
+// relative to the buffer they were measured against.
+//
+// MAX_FILES = 24 is a deliberately modest cap for now (24 x 64 KiB =
+// 1.5 MiB, comfortable alongside the ~4.85 MiB node pool under the
+// platform's default 8 MiB stack) -- raising the process's own stack
+// limit to support many more files was considered and set aside: it
+// would push that requirement onto every future user of the compiler,
+// not just this bootstrap session. The agreed longer-term answer for
+// compiling the real, fully-namespaced Edsger (likely dozens of small,
+// one-declaration-per-file modules) is a SEPARATE heap-backed variant
+// of this same design later -- `sys_mmap` declared with a genuinely
+// v0-legal `*(uint8[N])` return type (an extern declaration is only a
+// Postulate-side ABI label; it doesn't have to match `sys_mmap`'s
+// stdlib-documented `*uint8` return to be a correct binding for the
+// same underlying syscall), so every function that already expects a
+// `*(uint8[65536))` buffer keeps working completely unchanged.
+// Hoare's actual parser (Hoare/src/type_parser.asm's `.based` case)
+// only ever applies ONE array-size suffix per base type -- chained
+// `T[N][M]` is not real v0 syntax, despite the language reference's
+// own "int32[3][4]-style" description (that passage describes intent
+// this implementation doesn't have). A one-field wrapper struct plus a
+// single-dimension array of IT is the workaround: `FileBuf[24]`, each
+// element's own `.bytes` field being the familiar `uint8[65536]` shape
+// every lexer/parser function already expects.
+struct FileBuf {
+  bytes : uint8[65536];
+}
+
+struct PathBuf {
+  bytes : uint8[512];
+}
+
+struct FileSet {
+  buffers : *(FileBuf[24]);
+  lens : *(uint64[24]);
+  paths : *(PathBuf[24]);
+  path_lens : *(uint64[24]);
+  programs : *(*ASTNode[24]);
+  count : uint64;
+  had_error : bool;
+  err_kind : int32;      // 1 open failed, 2 file too large, 3 lex error, 4 parse error, 5 too many files
+  err_path_idx : uint64;
+}
+
+function paths_equal(fs: *FileSet, idx: uint64, cand: *(uint8[512]), cand_len: uint64) : bool {
+  mut i : uint64 := 0;
+  mut eq : bool := true;
+
+  if ((*(*fs).path_lens)[idx] != cand_len) {
+    return false;
+  }
+  while (i < cand_len) {
+    if ((*(*fs).paths)[idx].bytes[i] != (*cand)[i]) {
+      eq := false;
+    }
+    i := i + 1;
+  }
+  return eq;
+}
+
+function find_existing_file(fs: *FileSet, cand: *(uint8[512]), cand_len: uint64) : LookupResult {
+  mut i : uint64 := 0;
+  mut found : bool := false;
+  mut idx : uint64 := 0;
+
+  while (i < (*fs).count) {
+    if (paths_equal(fs, i, cand, cand_len)) {
+      found := true;
+      idx := i;
+    }
+    i := i + 1;
+  }
+  return LookupResult { found := found, index := idx };
+}
+
+function copy_path(fs: *FileSet, slot: uint64, src: *(uint8[512]), len: uint64) : void {
+  mut i : uint64 := 0;
+  while (i < len) {
+    (*(*fs).paths)[slot].bytes[i] := (*src)[i];
+    i := i + 1;
+  }
+  (*(*fs).path_lens)[slot] := len;
+}
+
+// Opens and fully reads one file into buffers[slot] -- same sys_openat/
+// sys_read/sys_close shape the retired Stage1/src/lexer.ptl's own
+// #include resolution already used (dirfd=-100 is AT_FDCWD, flags=0 is
+// O_RDONLY), just against a per-slot buffer instead of one shared pool.
+function open_and_read_file(fs: *FileSet, slot: uint64, path_buf: *(uint8[512]), path_len: uint64) : void {
+  mut fd : int64 := 0;
+  mut n : int64 := 0;
+  mut reading : bool := true;
+  mut pos : uint64 := 0;
+
+  (*path_buf)[path_len] := 0;
+  fd := sys_openat(-100, &(*path_buf)[0], 0, 0);
+  if (fd < 0) {
+    (*fs).had_error := true;
+    (*fs).err_kind := 1;
+    (*fs).err_path_idx := slot;
+    return;
+  }
+
+  while (reading) {
+    if (pos >= 65536) {
+      (*fs).had_error := true;
+      (*fs).err_kind := 2;
+      (*fs).err_path_idx := slot;
+      reading := false;
+    } else {
+      n := sys_read(fd, &(*(*fs).buffers)[slot].bytes[pos], 65536 - pos);
+      if (n < 0) {
+        (*fs).had_error := true;
+        (*fs).err_kind := 2;
+        (*fs).err_path_idx := slot;
+        reading := false;
+      } else {
+        if (n == 0) {
+          reading := false;
+        } else {
+          pos := pos + int64_to_uint64(n);
+        }
+      }
+    }
+  }
+  sys_close(fd);
+  (*(*fs).lens)[slot] := pos;
+}
+
+// Tokenizes + parses buffers[slot] into a fresh PROGRAM root, reusing
+// the ONE shared Parser (its tok_kind/offset/length arrays are pure
+// per-file scratch, safe to reset and reuse; its node pool is the
+// shared arena and is deliberately NOT reset, so node_count keeps
+// accumulating across every file).
+function process_file(fs: *FileSet, p: *Parser, slot: uint64) : void {
+  (*p).src := &(*(*fs).buffers)[slot].bytes;
+  (*p).src_len := (*(*fs).lens)[slot];
+  (*p).tok_count := 0;
+  (*p).tok_idx := 0;
+  (*p).had_error := false;
+  (*p).lex_error := false;
+
+  tokenize_all(p);
+  if ((*p).lex_error) {
+    (*fs).had_error := true;
+    (*fs).err_kind := 3;
+    (*fs).err_path_idx := slot;
+    return;
+  }
+
+  (*(*fs).programs)[slot] := parse_program(p);
+  if ((*p).had_error) {
+    (*fs).had_error := true;
+    (*fs).err_kind := 4;
+    (*fs).err_path_idx := slot;
+  }
+}
+
+// The worklist itself: `fs.programs[0..count)` doubles as the queue --
+// walking it with a plain index that keeps up with `count` as new
+// files get appended is a breadth-first traversal of the "uses" graph
+// with no separate queue structure needed (the same shape parse_block's
+// own comments elsewhere in this file describe for list-building,
+// applied here to files instead of AST children). A file already
+// opened from two different `use`s is only opened and resolved once
+// (postulate_v1_language_reference.md SS6.2c), via `find_existing_file`.
+// `@autoload` rules are collected ONCE, from the entry file only,
+// before this ever runs (SS6.2b: legal only in the file that declares
+// `main`) -- a `use`d file's OWN `@autoload` decls, if it mistakenly
+// has any, are simply never looked at, matching the established
+// "grammar more permissive than semantics" precedent until a real
+// check for this is added.
+function discover_files(fs: *FileSet, p: *Parser, rules: *(AutoloadRule[32]), rule_count: uint64) : void {
+  mut i : uint64 := 0;
+  mut child : *ASTNode := null;
+  mut fqn_segs : Segment[16];
+  mut fqn_count : uint64 := 0;
+  mut warn_rules : uint64[32] := 0;
+  mut resres : ResolveResult := ResolveResult { length := 0, matched_rule := -1, warn_count := 0 };
+  mut path_scratch : uint8[512] := 0;
+  mut lr : LookupResult := LookupResult { found := false, index := 0 };
+  mut slot : uint64 := 0;
+
+  while (i < (*fs).count && !(*fs).had_error) {
+    child := (*(*(*fs).programs)[i]).first_child;
+    while (child != null && !(*fs).had_error) {
+      if ((*child).kind == 103) {
+        fqn_count := segments_from_chain((*child).first_child, &fqn_segs);
+        resres := resolve_path(&(*(*fs).buffers)[i].bytes, &fqn_segs, fqn_count, rules, rule_count, &path_scratch, &warn_rules);
+
+        lr := find_existing_file(fs, &path_scratch, resres.length);
+        if (!lr.found) {
+          if ((*fs).count >= 24) {
+            (*fs).had_error := true;
+            (*fs).err_kind := 5;
+          } else {
+            slot := (*fs).count;
+            copy_path(fs, slot, &path_scratch, resres.length);
+            (*fs).count := (*fs).count + 1;
+            open_and_read_file(fs, slot, &path_scratch, resres.length);
+            if (!(*fs).had_error) {
+              process_file(fs, p, slot);
+            }
+          }
+        }
+      }
+      child := (*child).next_sibling;
+    }
+    i := i + 1;
+  }
+}
+
+function digit_to_ascii(d: uint64) : uint8 {
+  mut result : uint8 := 48;
+  if (d == 1) { result := 49; }
+  if (d == 2) { result := 50; }
+  if (d == 3) { result := 51; }
+  if (d == 4) { result := 52; }
+  if (d == 5) { result := 53; }
+  if (d == 6) { result := 54; }
+  if (d == 7) { result := 55; }
+  if (d == 8) { result := 56; }
+  if (d == 9) { result := 57; }
+  return result;
 }
 
 function int64_to_uint64(n: int64) : uint64 {
@@ -423,7 +2850,84 @@ function int64_to_uint64(n: int64) : uint64 {
   return result;
 }
 
-function write_all(fd: int64, buf: *(uint8[512]), total: uint64) : bool {
+function append_byte(out: *(uint8[131072]), pos: uint64, b: uint8) : uint64 {
+  (*out)[pos] := b;
+  return pos + 1;
+}
+
+function append_str(out: *(uint8[131072]), pos: uint64, s: *(uint8[100]), s_len: uint64) : uint64 {
+  mut i : uint64 := 0;
+  mut new_pos : uint64 := pos;
+  while (i < s_len) {
+    (*out)[new_pos] := (*s)[i];
+    new_pos := new_pos + 1;
+    i := i + 1;
+  }
+  return new_pos;
+}
+
+function append_slice(out: *(uint8[131072]), pos: uint64, src: *(uint8[65536]), off: uint64, ln: uint64) : uint64 {
+  mut i : uint64 := 0;
+  mut new_pos : uint64 := pos;
+  while (i < ln) {
+    (*out)[new_pos] := (*src)[off + i];
+    new_pos := new_pos + 1;
+    i := i + 1;
+  }
+  return new_pos;
+}
+
+function append_from_512(out: *(uint8[131072]), pos: uint64, src: *(uint8[512]), off: uint64, ln: uint64) : uint64 {
+  mut i : uint64 := 0;
+  mut new_pos : uint64 := pos;
+  while (i < ln) {
+    (*out)[new_pos] := (*src)[off + i];
+    new_pos := new_pos + 1;
+    i := i + 1;
+  }
+  return new_pos;
+}
+
+function append_uint(out: *(uint8[131072]), pos: uint64, value: uint64) : uint64 {
+  mut digits : uint8[24] := 0;
+  mut count : uint64 := 0;
+  mut v : uint64 := value;
+  mut new_pos : uint64 := pos;
+  mut d : uint64 := 0;
+  mut i : uint64 := 0;
+
+  if (v == 0) {
+    digits[0] := 48;
+    count := 1;
+  } else {
+    while (v > 0) {
+      d := v % 10;
+      digits[count] := digit_to_ascii(d);
+      count := count + 1;
+      v := v / 10;
+    }
+  }
+
+  i := 0;
+  while (i < count) {
+    new_pos := append_byte(out, new_pos, digits[(count - 1) - i]);
+    i := i + 1;
+  }
+  return new_pos;
+}
+
+function append_fqn(out: *(uint8[131072]), pos: uint64, src: *(uint8[65536]), segs: *(Segment[16]), count: uint64) : uint64 {
+  mut i : uint64 := 0;
+  mut new_pos : uint64 := pos;
+  while (i < count) {
+    new_pos := append_byte(out, new_pos, 92);
+    new_pos := append_slice(out, new_pos, src, (*segs)[i].offset, (*segs)[i].length);
+    i := i + 1;
+  }
+  return new_pos;
+}
+
+function write_all(fd: int64, buf: *(uint8[131072]), total: uint64) : bool {
   mut pos : uint64 := 0;
   mut n : int64 := 0;
   mut ok : bool := true;
@@ -445,7 +2949,12 @@ function write_all(fd: int64, buf: *(uint8[512]), total: uint64) : bool {
   return ok;
 }
 
-function append_str_e(out: *(uint8[256]), pos: uint64, s: *(uint8[80]), s_len: uint64) : uint64 {
+function append_byte_e(out: *(uint8[256]), pos: uint64, b: uint8) : uint64 {
+  (*out)[pos] := b;
+  return pos + 1;
+}
+
+function append_str_e(out: *(uint8[256]), pos: uint64, s: *(uint8[100]), s_len: uint64) : uint64 {
   mut i : uint64 := 0;
   mut new_pos : uint64 := pos;
   while (i < s_len) {
@@ -467,9 +2976,58 @@ function append_snippet_e(out: *(uint8[256]), pos: uint64, src: *(uint8[65536]),
   return new_pos;
 }
 
-function append_byte_e(out: *(uint8[256]), pos: uint64, b: uint8) : uint64 {
-  (*out)[pos] := b;
-  return pos + 1;
+// Same as append_snippet_e, but for a resolved-path-sized (512-byte)
+// source instead of a full file buffer -- FileSet.paths entries need
+// this shape when a file-discovery error (open failed, too large) has
+// only a path to show, not a position within some file's own text.
+function append_snippet_e_512(out: *(uint8[256]), pos: uint64, src: *(uint8[512]), off: uint64, ln: uint64) : uint64 {
+  mut i : uint64 := 0;
+  mut new_pos : uint64 := pos;
+  while (i < ln) {
+    (*out)[new_pos] := (*src)[off + i];
+    new_pos := new_pos + 1;
+    i := i + 1;
+  }
+  return new_pos;
+}
+
+function append_fqn_e(out: *(uint8[256]), pos: uint64, src: *(uint8[65536]), segs: *(Segment[16]), count: uint64) : uint64 {
+  mut i : uint64 := 0;
+  mut new_pos : uint64 := pos;
+  while (i < count) {
+    new_pos := append_byte_e(out, new_pos, 92);
+    new_pos := append_snippet_e(out, new_pos, src, (*segs)[i].offset, (*segs)[i].length);
+    i := i + 1;
+  }
+  return new_pos;
+}
+
+function append_uint_e(out: *(uint8[256]), pos: uint64, value: uint64) : uint64 {
+  mut digits : uint8[24] := 0;
+  mut count : uint64 := 0;
+  mut v : uint64 := value;
+  mut new_pos : uint64 := pos;
+  mut d : uint64 := 0;
+  mut i : uint64 := 0;
+
+  if (v == 0) {
+    digits[0] := 48;
+    count := 1;
+  } else {
+    while (v > 0) {
+      d := v % 10;
+      digits[count] := digit_to_ascii(d);
+      count := count + 1;
+      v := v / 10;
+    }
+  }
+
+  i := 0;
+  while (i < count) {
+    new_pos := append_byte_e(out, new_pos, digits[(count - 1) - i]);
+    i := i + 1;
+  }
+  return new_pos;
 }
 
 function write_all_small(fd: int64, buf: *(uint8[256]), total: uint64) : bool {
@@ -494,100 +3052,359 @@ function write_all_small(fd: int64, buf: *(uint8[256]), total: uint64) : bool {
   return ok;
 }
 
+function compute_line_col(src: *(uint8[65536]), src_len: uint64, target: uint64) : LineCol {
+  mut i : uint64 := 0;
+  mut line : uint64 := 1;
+  mut last_line_start : uint64 := 0;
+  mut limit : uint64 := target;
+  mut col : uint64 := 0;
+
+  if (limit > src_len) {
+    limit := src_len;
+  }
+  while (i < limit) {
+    if ((*src)[i] == 10) {
+      line := line + 1;
+      last_line_start := i + 1;
+    }
+    i := i + 1;
+  }
+  col := (target - last_line_start) + 1;
+
+  return LineCol { line := line, col := col };
+}
+
 function main() : int32 {
-  mut in_buf : uint8[65536] := 0;
-  mut in_len : uint64 := 0;
+  mut buffers_arr : FileBuf[24];
+  mut lens_arr : uint64[24] := 0;
+  mut paths_arr : PathBuf[24];
+  mut path_lens_arr : uint64[24] := 0;
+  mut programs_arr : *ASTNode[24];
+
+  mut fs : FileSet := FileSet {
+    buffers := &buffers_arr,
+    lens := &lens_arr,
+    paths := &paths_arr,
+    path_lens := &path_lens_arr,
+    programs := &programs_arr,
+    count := 0,
+    had_error := false,
+    err_kind := 0,
+    err_path_idx := 0
+  };
+
   mut reading : bool := true;
   mut n : int64 := 0;
-  mut cursor : uint64 := 0;
+  mut entry_len : uint64 := 0;
 
-  mut fqn_line : LineResult := LineResult { offset := 0, length := 0, next := 0, has_line := false };
-  mut count_line : LineResult := LineResult { offset := 0, length := 0, next := 0, has_line := false };
-  mut rule_count : uint64 := 0;
-  mut i : uint64 := 0;
-  mut pat_line : LineResult := LineResult { offset := 0, length := 0, next := 0, has_line := false };
-  mut path_line : LineResult := LineResult { offset := 0, length := 0, next := 0, has_line := false };
-  mut trust_line : LineResult := LineResult { offset := 0, length := 0, next := 0, has_line := false };
+  mut toks_kind_arr : int32[20000] := 0;
+  mut toks_offset_arr : uint64[20000] := 0;
+  mut toks_length_arr : uint64[20000] := 0;
+  mut pool_arr : ASTNode[50000];
+
+  mut parser : Parser := Parser {
+    src := &buffers_arr[0].bytes,
+    src_len := 0,
+    toks_kind := &toks_kind_arr,
+    toks_offset := &toks_offset_arr,
+    toks_length := &toks_length_arr,
+    tok_count := 0,
+    tok_idx := 0,
+    pool := &pool_arr,
+    node_count := 0,
+    had_error := false,
+    err_tok_idx := 0,
+    lex_error := false,
+    lex_error_tok := Token { kind := 0, offset := 0, length := 0 }
+  };
+
+  mut symbols_arr : Symbol[256];
+  mut sema : Sema := Sema {
+    buffers := &buffers_arr,
+    symbols := &symbols_arr,
+    symbol_count := 0,
+    had_error := false,
+    err_node := null,
+    err_file_idx := 0,
+    err_kind := 0
+  };
 
   mut rules : AutoloadRule[32];
+  mut rule_count : uint64 := 0;
   mut vr : ValidateResult := ValidateResult { ok := true, dup_offset := 0, dup_length := 0 };
-  mut had_error : bool := false;
+  mut autoload_error : bool := false;
 
-  mut out_buf : uint8[512] := 0;
-  mut resres : ResolveResult := ResolveResult { length := 0, matched_rule := -1 };
+  mut child : *ASTNode := null;
+  mut pat_node : *ASTNode := null;
+  mut path_node : *ASTNode := null;
 
+  mut fqn_segs : Segment[16];
+  mut fqn_count : uint64 := 0;
+  mut warn_rules : uint64[32] := 0;
+  mut resres : ResolveResult := ResolveResult { length := 0, matched_rule := -1, warn_count := 0 };
+  mut path_out : uint8[512] := 0;
+  mut w : uint64 := 0;
+  mut i : uint64 := 0;
+
+  mut out_buf : uint8[131072] := 0;
+  mut out_pos : uint64 := 0;
   mut err_buf : uint8[256] := 0;
   mut err_pos : uint64 := 0;
-  mut wrote_ok : bool := true;
+  mut lc : LineCol := LineCol { line := 0, col := 0 };
   mut exit_code : int64 := 0;
+  mut wrote_ok : bool := true;
+  mut err_src : *(uint8[65536]) := &buffers_arr[0].bytes;
 
-  mut msg_dup : uint8[80] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 100, 117, 112, 108, 105, 99, 97, 116, 101, 32, 97, 117, 116, 111, 108, 111, 97, 100, 32, 112, 108, 97, 99, 101, 104, 111, 108, 100, 101, 114, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-  mut msg_dup_close : uint8[80] := {39, 32, 105, 110, 32, 112, 97, 116, 116, 101, 114, 110, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_lex : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 108, 101, 120, 32, 101, 114, 114, 111, 114, 32, 98, 101, 102, 111, 114, 101, 32, 112, 97, 114, 115, 105, 110, 103, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_parse : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 112, 97, 114, 115, 101, 32, 101, 114, 114, 111, 114, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_dupdecl_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 100, 117, 112, 108, 105, 99, 97, 116, 101, 32, 100, 101, 99, 108, 97, 114, 97, 116, 105, 111, 110, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_dupdecl_b : uint8[100] := {39, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_cycle_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 115, 116, 114, 117, 99, 116, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_cycle_b : uint8[100] := {39, 32, 104, 97, 115, 32, 97, 110, 32, 105, 110, 102, 105, 110, 105, 116, 101, 32, 115, 105, 122, 101, 32, 40, 118, 97, 108, 117, 101, 45, 116, 121, 112, 101, 32, 102, 105, 101, 108, 100, 32, 99, 121, 99, 108, 101, 41, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_unknown_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 117, 110, 107, 110, 111, 119, 110, 32, 116, 121, 112, 101, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_unknown_b : uint8[100] := {39, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_dup_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 100, 117, 112, 108, 105, 99, 97, 116, 101, 32, 97, 117, 116, 111, 108, 111, 97, 100, 32, 112, 108, 97, 99, 101, 104, 111, 108, 100, 101, 114, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_dup_b : uint8[100] := {39, 32, 105, 110, 32, 112, 97, 116, 116, 101, 114, 110, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_warn_a : uint8[100] := {115, 101, 109, 97, 32, 119, 97, 114, 110, 105, 110, 103, 58, 32, 97, 117, 116, 111, 108, 111, 97, 100, 32, 112, 97, 116, 116, 101, 114, 110, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_warn_b : uint8[100] := {39, 32, 109, 97, 116, 99, 104, 101, 115, 32, 116, 104, 101, 32, 119, 104, 111, 108, 101, 32, 110, 97, 109, 101, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_warn_c : uint8[100] := {39, 32, 119, 105, 116, 104, 32, 110, 111, 116, 104, 105, 110, 103, 32, 108, 101, 102, 116, 32, 102, 111, 114, 32, 97, 32, 102, 105, 108, 101, 110, 97, 109, 101, 32, 45, 45, 32, 115, 107, 105, 112, 112, 101, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_col : uint8[100] := {44, 32, 99, 111, 108, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_use : uint8[100] := {85, 83, 69, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_arrow : uint8[100] := {32, 45, 62, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_sym_struct : uint8[100] := {83, 89, 77, 32, 83, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_sym_func : uint8[100] := {83, 89, 77, 32, 70, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_sym_extern : uint8[100] := {83, 89, 77, 32, 88, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_size : uint8[100] := {32, 115, 105, 122, 101, 61, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_open : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 99, 111, 117, 108, 100, 32, 110, 111, 116, 32, 111, 112, 101, 110, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_toolarge : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 102, 105, 108, 101, 32, 116, 111, 111, 32, 108, 97, 114, 103, 101, 58, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_toomany : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 116, 111, 111, 32, 109, 97, 110, 121, 32, 102, 105, 108, 101, 115, 32, 114, 101, 97, 99, 104, 101, 100, 32, 119, 104, 105, 108, 101, 32, 114, 101, 115, 111, 108, 118, 105, 110, 103, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_filelex : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 108, 101, 120, 32, 101, 114, 114, 111, 114, 32, 105, 110, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_fileparse : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 112, 97, 114, 115, 101, 32, 101, 114, 114, 111, 114, 32, 105, 110, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
+  // ---- 0. read the entry file from stdin into slot 0, then tokenize +
+  // parse it exactly like any other slot (process_file doesn't care
+  // how a buffer got filled) ----
   while (reading) {
-    if (in_len >= 65536) {
+    if (entry_len >= 65536) {
       reading := false;
     } else {
-      n := sys_read(0, &in_buf[in_len], 65536 - in_len);
+      n := sys_read(0, &buffers_arr[0].bytes[entry_len], 65536 - entry_len);
       if (n < 0) {
         reading := false;
       } else {
         if (n == 0) {
           reading := false;
         } else {
-          in_len := in_len + int64_to_uint64(n);
+          entry_len := entry_len + int64_to_uint64(n);
         }
       }
     }
   }
+  lens_arr[0] := entry_len;
+  fs.count := 1;
+  process_file(&fs, &parser, 0);
 
-  fqn_line := read_line(&in_buf, in_len, cursor);
-  cursor := fqn_line.next;
-  count_line := read_line(&in_buf, in_len, cursor);
-  cursor := count_line.next;
-  rule_count := parse_uint_line(&in_buf, count_line.offset, count_line.length);
+  if (fs.had_error) {
+    err_src := &buffers_arr[fs.err_path_idx].bytes;
+    if (fs.err_kind == 3) {
+      lc := compute_line_col(err_src, lens_arr[fs.err_path_idx], parser.lex_error_tok.offset);
+      err_pos := append_str_e(&err_buf, err_pos, &msg_lex, 45);
+    } else {
+      lc := compute_line_col(err_src, lens_arr[fs.err_path_idx], (*parser.toks_offset)[parser.err_tok_idx]);
+      err_pos := append_str_e(&err_buf, err_pos, &msg_parse, 32);
+    }
+    err_pos := append_uint_e(&err_buf, err_pos, lc.line);
+    err_pos := append_str_e(&err_buf, err_pos, &msg_col, 6);
+    err_pos := append_uint_e(&err_buf, err_pos, lc.col);
+    err_pos := append_byte_e(&err_buf, err_pos, 10);
+    wrote_ok := write_all_small(2, &err_buf, err_pos);
+    sys_exit(1);
+    return 0;
+  }
 
-  i := 0;
-  while (i < rule_count) {
-    pat_line := read_line(&in_buf, in_len, cursor);
-    cursor := pat_line.next;
-    path_line := read_line(&in_buf, in_len, cursor);
-    cursor := path_line.next;
-    trust_line := read_line(&in_buf, in_len, cursor);
-    cursor := trust_line.next;
-
-    rules[i] := AutoloadRule {
-      pattern_offset := pat_line.offset,
-      pattern_length := pat_line.length,
-      path_offset := path_line.offset,
-      path_length := path_line.length,
-      trust := int32_of_digit(in_buf[trust_line.offset])
-    };
-    i := i + 1;
+  // ---- 1. collect + validate @autoload rules from the entry file only
+  // (postulate_v1_language_reference.md SS6.2b: legal only in \Main) --
+  // pattern/path text sits between a STRING_LIT token's own quotes,
+  // hence the +1/-2 slice ----
+  child := (*programs_arr[0]).first_child;
+  while (child != null) {
+    if ((*child).kind == 105) {
+      pat_node := (*child).left;
+      path_node := (*child).right;
+      rules[rule_count] := AutoloadRule {
+        pattern_offset := (*pat_node).tok.offset + 1,
+        pattern_length := (*pat_node).tok.length - 2,
+        path_offset := (*path_node).tok.offset + 1,
+        path_length := (*path_node).tok.length - 2,
+        trust := int32_of_int_val((*child).int_val)
+      };
+      rule_count := rule_count + 1;
+    }
+    child := (*child).next_sibling;
   }
 
   i := 0;
-  while (i < rule_count && !had_error) {
-    vr := validate_pattern(&in_buf, rules[i].pattern_offset, rules[i].pattern_length);
+  while (i < rule_count && !autoload_error) {
+    vr := validate_pattern(&buffers_arr[0].bytes, rules[i].pattern_offset, rules[i].pattern_length);
     if (!vr.ok) {
-      had_error := true;
+      autoload_error := true;
+      err_pos := append_str_e(&err_buf, err_pos, &msg_dup_a, 44);
+      err_pos := append_snippet_e(&err_buf, err_pos, &buffers_arr[0].bytes, vr.dup_offset, vr.dup_length);
+      err_pos := append_str_e(&err_buf, err_pos, &msg_dup_b, 12);
+      err_pos := append_byte_e(&err_buf, err_pos, 10);
     }
     i := i + 1;
   }
 
-  if (had_error) {
-    exit_code := 1;
-    err_pos := append_str_e(&err_buf, err_pos, &msg_dup, 44);
-    err_pos := append_snippet_e(&err_buf, err_pos, &in_buf, vr.dup_offset, vr.dup_length);
-    err_pos := append_str_e(&err_buf, err_pos, &msg_dup_close, 12);
-    err_pos := append_byte_e(&err_buf, err_pos, 10);
+  if (autoload_error) {
     wrote_ok := write_all_small(2, &err_buf, err_pos);
-  } else {
-    resres := resolve_path(&in_buf, fqn_line.offset, fqn_line.length, &rules, rule_count, &out_buf);
-    out_buf[resres.length] := 10;
-    wrote_ok := write_all(1, &out_buf, resres.length + 1);
+    sys_exit(1);
+    return 0;
   }
 
+  // ---- 2. discover every transitively `use`d file (opens/reads/
+  // tokenizes/parses each one into its own buffers[] slot -- see
+  // discover_files' own header) ----
+  discover_files(&fs, &parser, &rules, rule_count);
+
+  if (fs.had_error) {
+    if (fs.err_kind == 5) {
+      err_pos := append_str_e(&err_buf, err_pos, &msg_toomany, 51);
+      err_pos := append_byte_e(&err_buf, err_pos, 10);
+    } else {
+      err_src := &buffers_arr[fs.err_path_idx].bytes;
+      if (fs.err_kind == 1) {
+        err_pos := append_str_e(&err_buf, err_pos, &msg_open, 27);
+        err_pos := append_snippet_e_512(&err_buf, err_pos, &(*fs.paths)[fs.err_path_idx].bytes, 0, (*fs.path_lens)[fs.err_path_idx]);
+        err_pos := append_byte_e(&err_buf, err_pos, 10);
+      } else {
+        if (fs.err_kind == 2) {
+          err_pos := append_str_e(&err_buf, err_pos, &msg_toolarge, 28);
+          err_pos := append_snippet_e_512(&err_buf, err_pos, &(*fs.paths)[fs.err_path_idx].bytes, 0, (*fs.path_lens)[fs.err_path_idx]);
+          err_pos := append_byte_e(&err_buf, err_pos, 10);
+        } else {
+          if (fs.err_kind == 3) {
+            lc := compute_line_col(err_src, lens_arr[fs.err_path_idx], parser.lex_error_tok.offset);
+            err_pos := append_str_e(&err_buf, err_pos, &msg_filelex, 25);
+          } else {
+            lc := compute_line_col(err_src, lens_arr[fs.err_path_idx], (*parser.toks_offset)[parser.err_tok_idx]);
+            err_pos := append_str_e(&err_buf, err_pos, &msg_fileparse, 27);
+          }
+          err_pos := append_snippet_e_512(&err_buf, err_pos, &(*fs.paths)[fs.err_path_idx].bytes, 0, (*fs.path_lens)[fs.err_path_idx]);
+          err_pos := append_str_e(&err_buf, err_pos, &msg_dupdecl_b, 10);
+          err_pos := append_uint_e(&err_buf, err_pos, lc.line);
+          err_pos := append_str_e(&err_buf, err_pos, &msg_col, 6);
+          err_pos := append_uint_e(&err_buf, err_pos, lc.col);
+          err_pos := append_byte_e(&err_buf, err_pos, 10);
+        }
+      }
+    }
+    wrote_ok := write_all_small(2, &err_buf, err_pos);
+    sys_exit(1);
+    return 0;
+  }
+
+  // ---- 3. resolve (again, purely for display) every file's own
+  // use_decls, reporting both the resolved path and any "would consume
+  // the whole name" warnings (this session's own refinement) ----
+  i := 0;
+  while (i < fs.count) {
+    child := (*programs_arr[i]).first_child;
+    while (child != null) {
+      if ((*child).kind == 103) {
+        fqn_count := segments_from_chain((*child).first_child, &fqn_segs);
+        resres := resolve_path(&buffers_arr[i].bytes, &fqn_segs, fqn_count, &rules, rule_count, &path_out, &warn_rules);
+
+        w := 0;
+        while (w < resres.warn_count) {
+          err_pos := append_str_e(&err_buf, err_pos, &msg_warn_a, 32);
+          err_pos := append_snippet_e(&err_buf, err_pos, &buffers_arr[0].bytes, rules[warn_rules[w]].pattern_offset, rules[warn_rules[w]].pattern_length);
+          err_pos := append_str_e(&err_buf, err_pos, &msg_warn_b, 26);
+          err_pos := append_fqn_e(&err_buf, err_pos, &buffers_arr[i].bytes, &fqn_segs, fqn_count);
+          err_pos := append_str_e(&err_buf, err_pos, &msg_warn_c, 45);
+          err_pos := append_byte_e(&err_buf, err_pos, 10);
+          w := w + 1;
+        }
+
+        out_pos := append_str(&out_buf, out_pos, &msg_use, 4);
+        out_pos := append_fqn(&out_buf, out_pos, &buffers_arr[i].bytes, &fqn_segs, fqn_count);
+        out_pos := append_str(&out_buf, out_pos, &msg_arrow, 4);
+        out_pos := append_from_512(&out_buf, out_pos, &path_out, 0, resres.length);
+        out_pos := append_byte(&out_buf, out_pos, 10);
+      }
+      child := (*child).next_sibling;
+    }
+    i := i + 1;
+  }
+
+  if (err_pos > 0) {
+    wrote_ok := write_all_small(2, &err_buf, err_pos);
+  }
+
+  // ---- 4. declare pass (every file) + struct layout ----
+  i := 0;
+  while (i < fs.count && !sema.had_error) {
+    declare_program(&sema, programs_arr[i], i);
+    i := i + 1;
+  }
+  if (!sema.had_error) {
+    compute_all_struct_sizes(&sema);
+  }
+
+  if (sema.had_error) {
+    err_src := &buffers_arr[sema.err_file_idx].bytes;
+    lc := compute_line_col(err_src, lens_arr[sema.err_file_idx], (*sema.err_node).tok.offset);
+    if (sema.err_kind == 1) {
+      err_pos := 0;
+      err_pos := append_str_e(&err_buf, err_pos, &msg_dupdecl_a, 35);
+      err_pos := append_snippet_e(&err_buf, err_pos, err_src, (*sema.err_node).tok.offset, (*sema.err_node).tok.length);
+      err_pos := append_str_e(&err_buf, err_pos, &msg_dupdecl_b, 10);
+    } else {
+      if (sema.err_kind == 2) {
+        err_pos := 0;
+        err_pos := append_str_e(&err_buf, err_pos, &msg_cycle_a, 20);
+        err_pos := append_snippet_e(&err_buf, err_pos, err_src, (*sema.err_node).tok.offset, (*sema.err_node).tok.length);
+        err_pos := append_str_e(&err_buf, err_pos, &msg_cycle_b, 56);
+      } else {
+        err_pos := 0;
+        err_pos := append_str_e(&err_buf, err_pos, &msg_unknown_a, 26);
+        err_pos := append_snippet_e(&err_buf, err_pos, err_src, (*sema.err_node).tok.offset, (*sema.err_node).tok.length);
+        err_pos := append_str_e(&err_buf, err_pos, &msg_unknown_b, 10);
+      }
+    }
+    err_pos := append_uint_e(&err_buf, err_pos, lc.line);
+    err_pos := append_str_e(&err_buf, err_pos, &msg_col, 6);
+    err_pos := append_uint_e(&err_buf, err_pos, lc.col);
+    err_pos := append_byte_e(&err_buf, err_pos, 10);
+    wrote_ok := write_all_small(2, &err_buf, err_pos);
+    sys_exit(1);
+    return 0;
+  }
+
+  // ---- 5. dump the symbol table (postulate_stage1_v1_0_6_edsger_
+  // design.md's own "dump the symbol table itself ... checked by
+  // hand" verification method) ----
+  i := 0;
+  while (i < sema.symbol_count) {
+    if (symbols_arr[i].kind == 1) {
+      out_pos := append_str(&out_buf, out_pos, &msg_sym_struct, 6);
+    } else {
+      if (symbols_arr[i].kind == 2) {
+        out_pos := append_str(&out_buf, out_pos, &msg_sym_func, 6);
+      } else {
+        out_pos := append_str(&out_buf, out_pos, &msg_sym_extern, 6);
+      }
+    }
+    out_pos := append_slice(&out_buf, out_pos, sym_src(&sema, i), (*sym_decl(&sema, i)).tok.offset, (*sym_decl(&sema, i)).tok.length);
+    if (symbols_arr[i].kind == 1) {
+      out_pos := append_str(&out_buf, out_pos, &msg_size, 6);
+      out_pos := append_uint(&out_buf, out_pos, symbols_arr[i].size);
+    }
+    out_pos := append_byte(&out_buf, out_pos, 10);
+    i := i + 1;
+  }
+
+  wrote_ok := wrote_ok && write_all(1, &out_buf, out_pos);
   if (!wrote_ok) {
     exit_code := 2;
   }

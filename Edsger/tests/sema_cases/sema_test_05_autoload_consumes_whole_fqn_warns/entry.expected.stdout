@@ -1,0 +1,3 @@
+USE \Vendor\Math -> Vendor/Math.ptl
+SYM F main
+SYM F math_noop

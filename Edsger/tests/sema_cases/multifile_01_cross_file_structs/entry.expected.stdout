@@ -1,0 +1,8 @@
+USE \Core\Math\Sqrt -> Core/Math/Sqrt.ptl
+USE \Vendor\Geo\Point -> libs/geo/src/Point.ptl
+USE \Core\Math\Sqrt -> Core/Math/Sqrt.ptl
+SYM S Wrapper size=16
+SYM F main
+SYM S Sqrt size=4
+SYM F compute
+SYM S Point size=12

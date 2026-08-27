@@ -1,0 +1,22 @@
+namespace \Main;
+
+struct Leaf {
+  v : int32;
+}
+
+struct Left {
+  l : Leaf;
+}
+
+struct Right {
+  r : Leaf;
+}
+
+struct Top {
+  a : Left;
+  b : Right;
+}
+
+function main() : int32 {
+  return 0;
+}
