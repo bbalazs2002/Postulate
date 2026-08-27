@@ -599,6 +599,24 @@ struct ASTNode {
   left : *ASTNode;
   right : *ASTNode;
   extra : *ASTNode;
+
+  // Filled in by Module 3 (sema.ptl), never by this module -- always
+  // null/false out of alloc_node here. `symbol_ref` is `*ASTNode`, not
+  // `*Symbol` as first sketched: `Symbol` is a Module-3-only concept
+  // this file never defines, and pointing straight at the declaring
+  // node (STRUCT_DECL/FUNCTION_DECL/PARAM_DECL/DECL_STMT) is what
+  // codegen actually wants anyway.
+  symbol_ref : *ASTNode;
+  is_constant : bool;
+
+  // Also Module 3 only, always 0 out of alloc_node here. `data_type`'s
+  // tok offsets are only meaningful relative to ONE file's buffer, and
+  // once decoration walks through a struct field or a called function
+  // declared in a different file than the expression using it, that
+  // file is no longer necessarily the current one -- this is that
+  // type node's own "which buffer do its offsets mean" tag, the same
+  // role Sema's own `Symbol.file_idx` plays for a whole declaration.
+  type_file_idx : uint64;
 }
 
 // Node kinds. Grouped by hundreds purely for readability; the language
@@ -623,10 +641,11 @@ struct ASTNode {
 // 130 BLOCK          first_child = statement chain (func_block's decl* stmt* flattened into one source-order chain)
 // 131 IF_STMT        left = cond; right = then BLOCK; extra = else BLOCK or nested IF_STMT (nullable)
 // 132 WHILE_STMT     left = cond; right = body BLOCK
-// 133 RETURN_STMT    left = expr (nullable)
+// 133 RETURN_STMT    tok = `return` keyword; left = expr (nullable)
 // 134 DECL_STMT      tok = name; is_mutable = true for mut; data_type = type node; left = initializer expr (nullable)
-// 135 ASSIGN_STMT    left = lvalue expr; right = rvalue expr
+// 135 ASSIGN_STMT    first_child = ASSIGN_PAIR chain (SS4.2 simultaneous assignment, one pair even for an ordinary single assignment)
 // 136 EXPR_STMT      left = expr
+// 137 ASSIGN_PAIR    left = lvalue expr; right = rvalue expr
 // 140 IDENT_EXPR     tok = identifier
 // 141 INT_LIT        tok = int token; int_val = parsed value
 // 142 CHAR_LIT       tok = char token
@@ -640,7 +659,7 @@ struct ASTNode {
 // 150 INDEX_EXPR     left = base; right = index expr
 // 151 FIELD_EXPR     left = base; tok = field name
 // 152 STRUCT_LIT     tok = struct name; first_child = FIELD_INIT chain
-// 153 ARRAY_LIT      first_child = element expr chain
+// 153 ARRAY_LIT      tok = opening `{`; first_child = element expr chain
 // 154 FIELD_INIT     tok = field name; left = value expr
 // 155 SIZEOF_EXPR    left = operand expr (nullable) XOR data_type = operand type (nullable)
 // 156 LENGTHOF_EXPR  same as SIZEOF_EXPR
@@ -810,6 +829,9 @@ function alloc_node(p: *Parser, kind: uint32) : *ASTNode {
   (*n).left := null;
   (*n).right := null;
   (*n).extra := null;
+  (*n).symbol_ref := null;
+  (*n).is_constant := false;
+  (*n).type_file_idx := 0;
   return n;
 }
 
@@ -1076,6 +1098,7 @@ function parse_array_literal(p: *Parser) : *ASTNode {
   mut prev : *ASTNode := null;
   mut item : *ASTNode := null;
 
+  (*n).tok := cur_tok(p);
   advance(p);
   first := parse_expr(p);
   if ((*p).had_error) { return null; }
@@ -1584,6 +1607,7 @@ function parse_return_stmt(p: *Parser) : *ASTNode {
   mut n : *ASTNode := alloc_node(p, 133);
   mut e : *ASTNode := null;
 
+  (*n).tok := cur_tok(p);
   advance(p);
   if (cur_kind(p) == 51) {
     advance(p);

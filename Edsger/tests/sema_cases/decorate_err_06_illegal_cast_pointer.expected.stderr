@@ -1,0 +1,1 @@
+sema error: illegal cast from '*int32' to 'int64' at line 5, col 20

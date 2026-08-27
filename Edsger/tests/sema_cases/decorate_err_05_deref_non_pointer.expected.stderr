@@ -1,0 +1,1 @@
+sema error: cannot dereference 'x' -- not a pointer at line 5, col 11

@@ -85,7 +85,7 @@
             #149
               L:
                 #140 noop
-        #133
+        #133 return
           L:
             #140 result
     T:

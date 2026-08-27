@@ -643,10 +643,22 @@ Python's `-(2**2)` = `-4`. This keeps `unary` doing what its name says
 gets a chance to — consistent with how v0 already treats `unary` as
 tighter than every binary level below it.
 
-Unary `-`/`!` unchanged from v0 (integer/`bool` operand respectively),
-except that unary `-` is now additionally valid for a signed-float
-operand (`float32`/`float64`) and specifically **not** valid for a
-`ufloat` operand (§2.4).
+Unary `-`/`!` mostly unchanged from v0 (integer/`bool` operand
+respectively), except:
+
+- Unary `-` is now additionally valid for a signed-float operand
+  (`float32`/`float64`) and specifically **not** valid for a `ufloat`
+  operand (§2.4) — same reasoning as the next point, stated there.
+- **Unary `-` on an integer now requires a *signed* integer type** —
+  v0 only ever required "an integer-typed operand," unsigned included
+  (v0 §3.2/§10). Negating an unsigned value doesn't produce "the usual"
+  negative result at all (there isn't one to produce); it silently
+  wraps via two's complement to some large positive value instead —
+  almost never what someone reaching for unary `-` actually meant. v1
+  now catches this at compile time as a type error rather than letting
+  it silently compute that value, the same "an operation that's always
+  wrong deserves a compile error, not defined-but-surprising behavior"
+  reasoning `ufloat`'s own restriction above already follows.
 
 **`_/` (root)**, same precedence and associativity as `**` (they're a
 pair): `n _/ x` — the *n*-th root of `x` — for `n`, `x` the same
@@ -790,6 +802,35 @@ to/from `bool` or `char`; anything to/from a
 struct or array type (composite values are never reinterpreted by
 `as` — copy/construct them structurally instead, as v0 already
 requires).
+
+**Diagnostics, new in this revision**: a handful of the table's own
+rows are legal but can still silently lose information, and the
+compiler now emits a **warning** for them (not an error — the cast is
+still legal, and the program still compiles and runs, the same
+"legal-but-suspicious" treatment §4.7 already gives a discarded
+non-`void` call result):
+
+- **Narrowing between two integer types** (`char` included — it behaves
+  exactly like an unsigned 8-bit integer for this rule) **of the same
+  signedness**, when the target is narrower than the source: `x as
+  int64 as int32` warns, `int32 as int64` doesn't.
+- **Signed to unsigned**, at *any* width, narrowing or widening alike:
+  a signed type's negative half is never representable in an unsigned
+  target, so `int32 as uint64` warns exactly like `int32 as uint8`
+  does.
+- **Unsigned to signed**, unless the signed target is *strictly* wider
+  than the unsigned source: `uint8 as int16` doesn't warn (every
+  `uint8` value fits), but `uint32 as int32` does (an equal-width
+  signed type can't represent the unsigned type's own top half).
+- **`float64`/`ufloat64` to `float32`/`ufloat32`** (§2.4) — the
+  table's own "nearest representable" narrowing case.
+
+Converting to/from `bool` never warns under this rule regardless of
+the other type's width or signedness — turning a value into a truth
+value is `as`'s own deliberate, well-defined reinterpretation (this
+table's own "nonzero → `true`" row), not an accidental narrowing.
+Pointer/`uintptr` conversions never warn either — reinterpreting an
+address carries no width or signedness of its own to lose.
 
 ### 3.8 Struct and array literals
 

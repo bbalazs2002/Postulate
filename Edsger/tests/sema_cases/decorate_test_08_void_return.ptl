@@ -1,0 +1,8 @@
+namespace \Main;
+function noop() : void {
+  return;
+}
+function main() : int32 {
+  noop();
+  return 0;
+}

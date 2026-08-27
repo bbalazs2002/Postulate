@@ -1,0 +1,7 @@
+namespace \Main;
+function get() : int32 {
+  return;
+}
+function main() : int32 {
+  return 0;
+}

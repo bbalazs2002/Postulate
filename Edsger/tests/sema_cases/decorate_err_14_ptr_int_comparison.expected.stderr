@@ -1,0 +1,1 @@
+sema error: type mismatch between '*int32' and 'int32' at line 5, col 19

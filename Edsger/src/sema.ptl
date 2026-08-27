@@ -599,6 +599,15 @@ struct ASTNode {
   left : *ASTNode;
   right : *ASTNode;
   extra : *ASTNode;
+
+  // Filled in by this module's own type-checking pass -- see
+  // parser.ptl's own copy of this struct for why `symbol_ref` is
+  // `*ASTNode`, not `*Symbol`.
+  symbol_ref : *ASTNode;
+  is_constant : bool;
+
+  // See parser.ptl's own copy of this struct for why this exists.
+  type_file_idx : uint64;
 }
 
 // Node kinds. Grouped by hundreds purely for readability; the language
@@ -623,10 +632,11 @@ struct ASTNode {
 // 130 BLOCK          first_child = statement chain (func_block's decl* stmt* flattened into one source-order chain)
 // 131 IF_STMT        left = cond; right = then BLOCK; extra = else BLOCK or nested IF_STMT (nullable)
 // 132 WHILE_STMT     left = cond; right = body BLOCK
-// 133 RETURN_STMT    left = expr (nullable)
+// 133 RETURN_STMT    tok = `return` keyword; left = expr (nullable)
 // 134 DECL_STMT      tok = name; is_mutable = true for mut; data_type = type node; left = initializer expr (nullable)
-// 135 ASSIGN_STMT    left = lvalue expr; right = rvalue expr
+// 135 ASSIGN_STMT    first_child = ASSIGN_PAIR chain (SS4.2 simultaneous assignment, one pair even for an ordinary single assignment)
 // 136 EXPR_STMT      left = expr
+// 137 ASSIGN_PAIR    left = lvalue expr; right = rvalue expr
 // 140 IDENT_EXPR     tok = identifier
 // 141 INT_LIT        tok = int token; int_val = parsed value
 // 142 CHAR_LIT       tok = char token
@@ -640,7 +650,7 @@ struct ASTNode {
 // 150 INDEX_EXPR     left = base; right = index expr
 // 151 FIELD_EXPR     left = base; tok = field name
 // 152 STRUCT_LIT     tok = struct name; first_child = FIELD_INIT chain
-// 153 ARRAY_LIT      first_child = element expr chain
+// 153 ARRAY_LIT      tok = opening `{`; first_child = element expr chain
 // 154 FIELD_INIT     tok = field name; left = value expr
 // 155 SIZEOF_EXPR    left = operand expr (nullable) XOR data_type = operand type (nullable)
 // 156 LENGTHOF_EXPR  same as SIZEOF_EXPR
@@ -810,6 +820,9 @@ function alloc_node(p: *Parser, kind: uint32) : *ASTNode {
   (*n).left := null;
   (*n).right := null;
   (*n).extra := null;
+  (*n).symbol_ref := null;
+  (*n).is_constant := false;
+  (*n).type_file_idx := 0;
   return n;
 }
 
@@ -1067,6 +1080,7 @@ function parse_array_literal(p: *Parser) : *ASTNode {
   mut prev : *ASTNode := null;
   mut item : *ASTNode := null;
 
+  (*n).tok := cur_tok(p);
   advance(p);
   first := parse_expr(p);
   if ((*p).had_error) { return null; }
@@ -1575,6 +1589,7 @@ function parse_return_stmt(p: *Parser) : *ASTNode {
   mut n : *ASTNode := alloc_node(p, 133);
   mut e : *ASTNode := null;
 
+  (*n).tok := cur_tok(p);
   advance(p);
   if (cur_kind(p) == 51) {
     advance(p);
@@ -2393,6 +2408,21 @@ struct Symbol {
   sizing_state : int32;   // structs only: 0 not started, 1 in progress, 2 done
 }
 
+// A cast that's legal but may lose or reinterpret its value (SS3.7a's
+// narrowing/sign-change cases) doesn't stop compilation -- just like
+// the autoload resolver's own "would consume the whole name" case
+// (main()'s own step 3), it's collected here and printed once
+// decoration finishes cleanly, never folded into Sema's own single-slot
+// had_error/err_node pair. `node` is the CAST_EXPR itself: both
+// endpoints' type text (source type from `(*node).left`'s own
+// data_type/type_file_idx, target type from `(*node).data_type` in
+// THIS entry's own `file_idx`) are still reachable through it at print
+// time, so no separate type/file fields are needed here.
+struct CastWarning {
+  node : *ASTNode;
+  file_idx : uint64;
+}
+
 // `buffers` replaces the first slice's single `src` -- once more than one
 // file is in play, every offset/length pair only means something
 // relative to ITS OWN file's buffer, so every place that used to read
@@ -2405,7 +2435,54 @@ struct Sema {
   had_error : bool;
   err_node : *ASTNode;
   err_file_idx : uint64;
-  err_kind : int32;       // 1 duplicate declaration, 2 struct value cycle, 3 unknown type
+  err_kind : int32;       // 1 dup decl, 2 struct value cycle, 3 unknown type,
+                          // 4 unknown identifier, 5 field access on non-struct,
+                          // 6 unknown field, 7 index/deref-by-index on a
+                          // non-array/non-pointer type, 8 `*` on a non-pointer,
+                          // 9 illegal `as` cast (SS3.7a's conversion table),
+                          // 10 binary operand type mismatch, 11 arithmetic/
+                          // bitwise/shift requires two same-type integer
+                          // operands, 12 operator/condition requires a bool
+                          // operand, 13 unary `-` requires a signed integer
+                          // operand, 14 invalid pointer arithmetic, 15
+                          // expected-type mismatch (decl-init/assignment/
+                          // return/call-argument/if-while-condition -- see
+                          // err_expected_type/file below), 16 non-void
+                          // function missing its return value, 17 call to a
+                          // non-function/-extern value, 18 wrong argument
+                          // count, 19 struct literal field already
+                          // initialized, 20 struct literal missing a field,
+                          // 21 wrong array-literal element count, 22 array
+                          // literal with no array type in context
+
+  // Only meaningful when err_kind == 15: the type (and its own file,
+  // exactly like type_file_idx elsewhere) that err_node's already-
+  // resolved data_type didn't match. Every other err_kind derives
+  // both sides of its own message structurally off err_node itself
+  // (e.g. kind 9/10 read straight off a CAST_EXPR/BINARY_EXPR's own
+  // children) -- kind 15 can't, since err_node here is often a bare
+  // literal or an arbitrary sub-expression with no structural link
+  // back to whatever context imposed the requirement on it (a decl's
+  // own type, a function's return type, a callee's param type), so
+  // that "expected" side has to be carried separately.
+  err_expected_type : *ASTNode;
+  err_expected_file : uint64;
+
+  // Synthesized TYPE_BASE/TYPE_POINTER nodes for literals that have no
+  // type annotation of their own in the source -- see init_canonical_
+  // types. Each one's own tok is empty (offset/length 0, exactly like
+  // any node alloc_node produces before a caller fills tok in), which
+  // is fine: nothing ever needs to slice source text out of a literal's
+  // own type, only compare/report through it.
+  canon_int32 : *ASTNode;
+  canon_int64 : *ASTNode;
+  canon_char : *ASTNode;
+  canon_bool : *ASTNode;
+  canon_cstr : *ASTNode;
+  canon_null : *ASTNode;
+
+  cast_warnings : *(CastWarning[64]);
+  cast_warning_count : uint64;
 }
 
 function sym_decl(s: *Sema, i: uint64) : *ASTNode {
@@ -2580,6 +2657,962 @@ function compute_all_struct_sizes(s: *Sema) : void {
       compute_struct_size(s, i);
     }
     i := i + 1;
+  }
+}
+
+// ---------------------------------------------------------------------
+// AST decoration (Module 3, part 3): local-scope construction,
+// identifier/field/call resolution, and expression type inference,
+// writing `data_type`/`type_file_idx`/`symbol_ref` onto every
+// expression node. Deliberately NOT attempted here (left for a later
+// increment, per this step's own agreed scope): validating an `as`
+// cast against a conversion table, context-sensitive struct-/array-
+// literal typing, and statement-level checks (if-condition-must-be-
+// bool, assignment-type-compatibility, return-type-matching).
+//
+// Scope is a flat list, not a nested-block stack: v0/v1 both only
+// allow `mut`/`const` declarations directly in a function's own top-
+// level body (postulate_v1_language_reference.md's own carry-over of
+// v0 SS3.3's rule), so a function's params plus its body BLOCK's own
+// immediate DECL_STMT children are every local name that can ever
+// exist -- nested IF_STMT/WHILE_STMT BLOCKs are walked for their
+// *expressions* but never scanned for new bindings.
+// ---------------------------------------------------------------------
+
+struct LocalBinding {
+  decl : *ASTNode;   // PARAM_DECL or DECL_STMT
+}
+
+struct Scope {
+  bindings : *(LocalBinding[64]);
+  count : uint64;
+
+  // The enclosing function's own declared return type/file -- carried
+  // here (rather than as its own separate parameter threaded through
+  // decorate_block/decorate_stmt) since Scope already reaches every
+  // place a RETURN_STMT can turn up, and a function's return type
+  // never changes mid-body the way locals accumulate one at a time.
+  ret_type : *ASTNode;
+  ret_file : uint64;
+}
+
+function scope_add(sc: *Scope, decl: *ASTNode) : void {
+  (*(*sc).bindings)[(*sc).count] := LocalBinding { decl := decl };
+  (*sc).count := (*sc).count + 1;
+}
+
+// Last-declared-wins would matter for shadowing; it can't come up here
+// since v0/v1's flat function-local scope has no nested re-declaration
+// to shadow, so first-match-found is just as correct and simpler.
+function scope_find(sc: *Scope, s: *Sema, file_idx: uint64, name_off: uint64, name_len: uint64) : *ASTNode {
+  mut i : uint64 := 0;
+  mut found : *ASTNode := null;
+  mut b : *ASTNode := null;
+
+  while (i < (*sc).count) {
+    b := (*(*sc).bindings)[i].decl;
+    if (found == null) {
+      if (bytes_equal(&(*(*s).buffers)[file_idx].bytes, (*b).tok.offset, (*b).tok.length, name_off, name_len)) {
+        found := b;
+      }
+    }
+    i := i + 1;
+  }
+  return found;
+}
+
+function build_scope(sc: *Scope, func_decl: *ASTNode) : void {
+  mut param : *ASTNode := (*func_decl).first_child;
+  mut body : *ASTNode := (*func_decl).extra;
+  mut stmt : *ASTNode := null;
+
+  while (param != null) {
+    scope_add(sc, param);
+    param := (*param).next_sibling;
+  }
+
+  if (body != null) {
+    stmt := (*body).first_child;
+    while (stmt != null) {
+      if ((*stmt).kind == 134) {
+        scope_add(sc, stmt);
+      }
+      stmt := (*stmt).next_sibling;
+    }
+  }
+}
+
+// Like find_struct_symbol but not filtered to kind == 1 -- for
+// resolving an IDENT_EXPR against the global table, where the name
+// might equally well be a function or an extern.
+function find_any_symbol(s: *Sema, query_src: *(uint8[65536]), name_off: uint64, name_len: uint64) : LookupResult {
+  mut i : uint64 := 0;
+  mut found : bool := false;
+  mut idx : uint64 := 0;
+
+  while (i < (*s).symbol_count) {
+    if (bytes_equal_cross(sym_src(s, i), (*sym_decl(s, i)).tok.offset, (*sym_decl(s, i)).tok.length, query_src, name_off, name_len)) {
+      found := true;
+      idx := i;
+    }
+    i := i + 1;
+  }
+  return LookupResult { found := found, index := idx };
+}
+
+// A real declared type node's tok always has non-zero length (it was
+// sliced out of actual source text); alloc_node always zeroes a fresh
+// node's tok to length 0. So "empty tok, has a left child" uniquely
+// picks out exactly the synthetic/positionless expression kinds this
+// module builds or that the parser builds without a tok of their own
+// (INDEX_EXPR, CALL_EXPR, UNARY_EXPR, BINARY_EXPR, CAST_EXPR) --
+// walking `.left` from any of those always reaches a real token
+// eventually, since every expression bottoms out at a literal, an
+// IDENT_EXPR, or a FIELD_EXPR (all tok-bearing).
+function expr_pos_tok(n: *ASTNode) : Token {
+  if ((*n).tok.length == 0 && (*n).left != null) {
+    return expr_pos_tok((*n).left);
+  }
+  return (*n).tok;
+}
+
+function make_type_base(p: *Parser, tok_kind: int32) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 120);
+  (*n).tok := Token { kind := tok_kind, offset := 0, length := 0 };
+  return n;
+}
+
+function make_type_pointer(p: *Parser, inner: *ASTNode) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 121);
+  (*n).left := inner;
+  return n;
+}
+
+// int32/char/bool/uint8 keyword kinds are lex_next's own classify_word
+// values (25, 36, 32, 27 respectively -- see base_type_size's own
+// comment for the full table); `canon_null`'s "pointer to nothing"
+// shape (TYPE_POINTER with a null `left`) marks a value assignable to
+// any pointer type, deliberately left unresolved here since actually
+// checking that against a target type is one of this increment's own
+// explicitly deferred statement-level checks.
+function init_canonical_types(s: *Sema, p: *Parser) : void {
+  mut u8 : *ASTNode := make_type_base(p, 27);
+  (*s).canon_int32 := make_type_base(p, 25);
+  (*s).canon_int64 := make_type_base(p, 26);
+  (*s).canon_char := make_type_base(p, 36);
+  (*s).canon_bool := make_type_base(p, 32);
+  (*s).canon_cstr := make_type_pointer(p, u8);
+  (*s).canon_null := make_type_pointer(p, null);
+}
+
+function is_comparison_op(op: int32) : bool {
+  return op == 71 || op == 72 || op == 73 || op == 74 || op == 86 || op == 87;
+}
+
+function is_logical_op(op: int32) : bool {
+  return op == 77 || op == 78;
+}
+
+function set_error(s: *Sema, node: *ASTNode, file_idx: uint64, kind: int32) : void {
+  (*s).had_error := true;
+  (*s).err_node := node;
+  (*s).err_file_idx := file_idx;
+  (*s).err_kind := kind;
+}
+
+// ---------------------------------------------------------------------
+// `as`-cast legality + narrowing warnings (postulate_v1_language_
+// reference.md SS3.7a's own conversion table). NOT attempted here: the
+// grammar-level "as's left operand must be an lvalue" restriction --
+// this file's parse_cast, like Stage1's own established choice, parses
+// permissively and leaves semantic rejection to this module, but that
+// specific rejection is still future work, tracked alongside the other
+// deferrals this section's own header already lists.
+//
+// 1 = integer (any of the 8 integer types, or `uintptr`), 2 = bool,
+// 3 = char, 4 = pointer, 0 = not castable at all (struct, array, or
+// anything else). `char` is its own category, not folded into 1 --
+// SS3.7a's table lists "integer type -> char"/"char -> integer type"
+// as their own rows, distinct from "bool -> char"/"char -> bool" (which
+// aren't in the table at all, hence illegal) -- so category alone must
+// keep char and bool from ever pairing with EACH OTHER, even though
+// integer<->char and integer<->bool are both fine. char still behaves
+// exactly like an unsigned 8-bit integer for the narrowing math below
+// (matching the table's own "low 8 bits" / "zero-extends" wording).
+// ---------------------------------------------------------------------
+
+function cast_category(ty: *ASTNode) : int32 {
+  if (ty == null) { return 0; }
+  if ((*ty).kind == 121) { return 4; }
+  if ((*ty).kind != 120) { return 0; }
+  if ((*ty).tok.kind == 32) { return 2; }
+  if ((*ty).tok.kind == 36) { return 3; }
+  if (base_type_size((*ty).tok.kind) > 0) { return 1; }
+  return 0;
+}
+
+function is_numeric_cast_cat(cat: int32) : bool {
+  return cat == 1 || cat == 3;
+}
+
+// Only `uintptr` itself pairs with a pointer (SS3.7a: "`*T` | `uintptr`
+// | the raw address" -- not `uint64`/`int64`, even though `uintptr` is
+// "not a distinct type, exactly like int/uint" and so happens to BE
+// uint64 on this platform; the table only lists the one spelling).
+function casts_legal(src_cat: int32, dst_cat: int32, src_ty: *ASTNode, dst_ty: *ASTNode) : bool {
+  if (src_cat == 0 || dst_cat == 0) { return false; }
+  if (src_cat == 4 && dst_cat == 4) { return true; }
+  if (src_cat == 4 && dst_cat == 1) { return (*dst_ty).tok.kind == 43; }
+  if (src_cat == 1 && dst_cat == 4) { return (*src_ty).tok.kind == 43; }
+  if (src_cat == 4 || dst_cat == 4) { return false; }
+  if (src_cat == 2 && dst_cat == 3) { return false; }
+  if (src_cat == 3 && dst_cat == 2) { return false; }
+  return true;
+}
+
+function is_unsigned_for_cast(tok_kind: int32) : bool {
+  return tok_kind == 27 || tok_kind == 28 || tok_kind == 29 || tok_kind == 30 || tok_kind == 31 || tok_kind == 43 || tok_kind == 36;
+}
+
+// Whether converting src_ty -> dst_ty (both already known cast_category
+// == 1, "numeric") can lose information or reinterpret the value:
+// same signedness needs dst at least as wide; unsigned -> signed needs
+// dst STRICTLY wider (equal width never fits -- an N-bit unsigned's max
+// always exceeds an N-bit signed's max); signed -> unsigned never fits
+// at any width, since a signed type's negative half is never
+// representable in an unsigned target.
+function cast_narrows(src_ty: *ASTNode, dst_ty: *ASTNode) : bool {
+  mut su : bool := is_unsigned_for_cast((*src_ty).tok.kind);
+  mut du : bool := is_unsigned_for_cast((*dst_ty).tok.kind);
+  mut sw : uint64 := base_type_size((*src_ty).tok.kind);
+  mut dw : uint64 := base_type_size((*dst_ty).tok.kind);
+
+  if (su == du) {
+    return dw < sw;
+  }
+  if (!su && du) {
+    return true;
+  }
+  return !(dw > sw);
+}
+
+// ---------------------------------------------------------------------
+// Structural type equality (postulate_v1_language_reference.md SS2.10:
+// "every operation involving two typed values still requires those
+// values to be of exactly the same type") plus untyped-constant
+// anchoring (SS3.7/v0 SS3.7): a bare int/bool/null literal has no type
+// of its own -- whichever binary operand ISN'T a literal resolves
+// first and lends its type to the literal side. Scoped, for now, to
+// binary-expression operand pairs only: decl-initializer/assignment/
+// return/call-argument anchoring and checking is real, separate,
+// still-deferred work (it needs an "expected type" threaded top-down
+// through statements, which nothing here does yet) -- adding equality
+// CHECKS at those sites without ALSO adding their own anchoring would
+// misfire on completely ordinary code (`mut x: int64 := 5;` would
+// wrongly look like an int32/int64 mismatch), so neither is attempted
+// outside a binary expression's own two operands, where both halves
+// are already right there to reason about together.
+// ---------------------------------------------------------------------
+
+function canonical_base_kind(k: int32) : int32 {
+  if (k == 24) { return 25; }
+  if (k == 29) { return 30; }
+  if (k == 43) { return 31; }
+  return k;
+}
+
+// `ty1`/`ty2` may come from different files (a struct field's type
+// declared in one file, compared against a local variable's type
+// declared in another) -- `file1`/`file2` are which buffer each one's
+// own tok is relative to, exactly like type_file_idx everywhere else.
+// A null `ty`/inner (canon_null's own "adopts any pointer" shape, or a
+// decoration that already failed elsewhere) is treated as trivially
+// equal to anything rather than compared -- this function only ever
+// runs on nodes that already decorated without error, so a null here
+// is this module's own under-resolution, not a real user type error.
+function types_equal(s: *Sema, ty1: *ASTNode, file1: uint64, ty2: *ASTNode, file2: uint64) : bool {
+  mut lr1 : LookupResult := LookupResult { found := false, index := 0 };
+  mut lr2 : LookupResult := LookupResult { found := false, index := 0 };
+
+  if (ty1 == null || ty2 == null) { return true; }
+  if ((*ty1).kind != (*ty2).kind) { return false; }
+
+  if ((*ty1).kind == 121) {
+    if ((*ty1).left == null || (*ty2).left == null) { return true; }
+    return types_equal(s, (*ty1).left, file1, (*ty2).left, file2);
+  }
+  if ((*ty1).kind == 122) {
+    if ((*ty1).int_val != (*ty2).int_val) { return false; }
+    return types_equal(s, (*ty1).left, file1, (*ty2).left, file2);
+  }
+  if ((*ty1).kind != 120) { return false; }
+
+  if ((*ty1).tok.kind == 32 || (*ty2).tok.kind == 32) {
+    return (*ty1).tok.kind == 32 && (*ty2).tok.kind == 32;
+  }
+  if ((*ty1).tok.kind == 36 || (*ty2).tok.kind == 36) {
+    return (*ty1).tok.kind == 36 && (*ty2).tok.kind == 36;
+  }
+  if ((*ty1).tok.kind == 33 || (*ty2).tok.kind == 33) {
+    return (*ty1).tok.kind == 33 && (*ty2).tok.kind == 33;
+  }
+  if (base_type_size((*ty1).tok.kind) > 0) {
+    if (base_type_size((*ty2).tok.kind) == 0) { return false; }
+    return canonical_base_kind((*ty1).tok.kind) == canonical_base_kind((*ty2).tok.kind);
+  }
+  if (base_type_size((*ty2).tok.kind) > 0) { return false; }
+
+  lr1 := find_struct_symbol(s, &(*(*s).buffers)[file1].bytes, (*ty1).tok.offset, (*ty1).tok.length);
+  lr2 := find_struct_symbol(s, &(*(*s).buffers)[file2].bytes, (*ty2).tok.offset, (*ty2).tok.length);
+  if (!lr1.found || !lr2.found) { return false; }
+  return lr1.index == lr2.index;
+}
+
+// `sizeof`/`lengthof` (postulate_v1_language_reference.md SS2.7a) are
+// explicitly "usable anywhere an integer constant would be, adapting
+// to context the same way a literal does" -- untyped constants in
+// exactly INT_LIT's own sense, not just int/bool/null (SS3.7's own
+// list). Missing this originally would have made e.g. `mut n: uint64
+// := sizeof(Foo);` a false type-mismatch once decl-init checking
+// (check_expected, below) existed, since SIZEOF_EXPR/LENGTHOF_EXPR
+// otherwise always defaults to `int32` regardless of context.
+//
+// ARRAY_LIT (153) is here for a different reason than the other five:
+// not because it's untyped-constant-adjacent, but because it's
+// "expected-type-or-nothing" the same way NULL_LIT is -- `{1, 2, 3}`
+// has no type name anywhere in it (unlike STRUCT_LIT, whose struct
+// name IS right there, decorated directly in decorate_expr instead),
+// so check_expected's "route literal-shaped nodes through
+// decorate_literal_with_expected" dispatch is exactly the mechanism
+// it also needs.
+function is_literal_kind(k: uint32) : bool {
+  return k == 141 || k == 144 || k == 145 || k == 153 || k == 155 || k == 156;
+}
+
+// `expected`/`expected_file` describe whatever context this literal
+// (or untyped `sizeof`/`lengthof`) sits in -- the OTHER operand in a
+// binary expression, a decl's own declared type, an lvalue being
+// assigned into, a function's return type, or a callee's parameter
+// type (check_expected's own callers, below, and BINARY_EXPR's own
+// anchoring inside decorate_expr). An int literal (or sizeof/lengthof)
+// adopts it only for another genuine integer type (category 1, SS3.7's
+// "the same way an integer literal adapts among the eight integer
+// types" -- NOT `char`, by this project's own deliberate choice: `char`
+// stays reachable from an integer literal only through an explicit
+// `as`, same as it would be from an already-typed integer value,
+// exactly because it never structurally blends with one, SS2.10 --
+// `c == 97` is a type error, `c == 97 as char` is the only legal
+// spelling). `null` only ever adopts a pointer type (v0 SS3.7's own
+// line on this). Anything else (no usable expected type, or the wrong
+// category) falls back to this module's ordinary context-free default
+// -- `bool` never needs anchoring at all, since it's the only type a
+// bool literal could ever sensibly become.
+function decorate_literal_with_expected(s: *Sema, p: *Parser, sc: *Scope, file_idx: uint64, e: *ASTNode, expected: *ASTNode, expected_file: uint64) : void {
+  mut k : uint32 := (*e).kind;
+  mut elem_ty : *ASTNode := null;
+  mut count : uint64 := 0;
+  mut child : *ASTNode := null;
+
+  if (k == 153) {
+    if (expected == null || (*expected).kind != 122) {
+      child := (*e).first_child;
+      while (child != null) {
+        decorate_expr(s, p, sc, file_idx, child);
+        if ((*s).had_error) { return; }
+        child := (*child).next_sibling;
+      }
+      set_error(s, e, file_idx, 22);
+      return;
+    }
+    elem_ty := (*expected).left;
+    child := (*e).first_child;
+    while (child != null && !(*s).had_error) {
+      check_expected(s, p, sc, file_idx, child, elem_ty, expected_file);
+      count := count + 1;
+      child := (*child).next_sibling;
+    }
+    if ((*s).had_error) { return; }
+    if (count != int64_to_uint64((*expected).int_val)) {
+      set_error(s, e, file_idx, 21);
+      return;
+    }
+    (*e).data_type := expected;
+    (*e).type_file_idx := expected_file;
+    return;
+  }
+
+  if (k == 155 || k == 156) {
+    if ((*e).left != null) {
+      decorate_expr(s, p, sc, file_idx, (*e).left);
+      if ((*s).had_error) { return; }
+    }
+    if (expected != null && cast_category(expected) == 1) {
+      (*e).data_type := expected;
+      (*e).type_file_idx := expected_file;
+      return;
+    }
+    (*e).data_type := (*s).canon_int32;
+    (*e).type_file_idx := 0;
+    return;
+  }
+  if (k == 141) {
+    if (expected != null && cast_category(expected) == 1) {
+      (*e).data_type := expected;
+      (*e).type_file_idx := expected_file;
+      return;
+    }
+    (*e).data_type := (*s).canon_int32;
+    (*e).type_file_idx := 0;
+    return;
+  }
+  if (k == 145) {
+    if (expected != null && cast_category(expected) == 4) {
+      (*e).data_type := expected;
+      (*e).type_file_idx := expected_file;
+      return;
+    }
+    (*e).data_type := (*s).canon_null;
+    (*e).type_file_idx := 0;
+    return;
+  }
+  (*e).data_type := (*s).canon_bool;
+  (*e).type_file_idx := 0;
+}
+
+function set_expected_mismatch(s: *Sema, node: *ASTNode, file_idx: uint64, expected: *ASTNode, expected_file: uint64) : void {
+  (*s).had_error := true;
+  (*s).err_node := node;
+  (*s).err_file_idx := file_idx;
+  (*s).err_kind := 15;
+  (*s).err_expected_type := expected;
+  (*s).err_expected_file := expected_file;
+}
+
+// The shared "does this expression have the type this context
+// requires" primitive: decl-initializers, assignment right-hand sides,
+// return values, if/while conditions, and call arguments all reduce to
+// exactly this same check, just with a different `expected`/
+// `expected_file` pair supplied by each call site (decorate_stmt/
+// decorate_expr, below). Untyped constants (is_literal_kind) get
+// anchored to `expected` first via decorate_literal_with_expected, so
+// they never spuriously mismatch; a null `expected` (no requirement to
+// check against, e.g. an operand this module doesn't yet impose one on)
+// just decorates normally and skips the comparison entirely.
+function check_expected(s: *Sema, p: *Parser, sc: *Scope, file_idx: uint64, e: *ASTNode, expected: *ASTNode, expected_file: uint64) : void {
+  if (is_literal_kind((*e).kind)) {
+    decorate_literal_with_expected(s, p, sc, file_idx, e, expected, expected_file);
+  } else {
+    decorate_expr(s, p, sc, file_idx, e);
+  }
+  if ((*s).had_error) { return; }
+  if (expected != null && !types_equal(s, (*e).data_type, (*e).type_file_idx, expected, expected_file)) {
+    set_expected_mismatch(s, e, file_idx, expected, expected_file);
+  }
+}
+
+function add_cast_warning(s: *Sema, node: *ASTNode, file_idx: uint64) : void {
+  if ((*s).cast_warning_count < 64) {
+    (*(*s).cast_warnings)[(*s).cast_warning_count] := CastWarning { node := node, file_idx := file_idx };
+    (*s).cast_warning_count := (*s).cast_warning_count + 1;
+  }
+}
+
+// Sets e's own data_type/type_file_idx/symbol_ref (as applicable) and
+// recurses into every child expression, stopping the moment any call
+// anywhere in the tree sets had_error (mirrors declare_program's own
+// "!(*s).had_error" short-circuit pattern throughout this file).
+function decorate_expr(s: *Sema, p: *Parser, sc: *Scope, file_idx: uint64, e: *ASTNode) : void {
+  mut k : uint32 := (*e).kind;
+  mut local : *ASTNode := null;
+  mut lr : LookupResult := LookupResult { found := false, index := 0 };
+  mut base_ty : *ASTNode := null;
+  mut base_file : uint64 := 0;
+  mut field : *ASTNode := null;
+  mut found_field : bool := false;
+  mut arg : *ASTNode := null;
+  mut op : int32 := 0;
+  mut left_lit : bool := false;
+  mut right_lit : bool := false;
+  mut lcat : int32 := 0;
+  mut rcat : int32 := 0;
+  mut ptr_side : *ASTNode := null;
+  mut ptr_file : uint64 := 0;
+  mut void_chk : *ASTNode := null;
+  mut callee_decl : *ASTNode := null;
+  mut callee_file : uint64 := 0;
+  mut decl_field : *ASTNode := null;
+  mut field_idx : uint64 := 0;
+  mut seen_arr : bool[64] := false;
+  mut struct_ty : *ASTNode := null;
+
+  if (k == 140) {
+    local := scope_find(sc, s, file_idx, (*e).tok.offset, (*e).tok.length);
+    if (local != null) {
+      (*e).symbol_ref := local;
+      (*e).data_type := (*local).data_type;
+      (*e).type_file_idx := file_idx;
+      return;
+    }
+    lr := find_any_symbol(s, &(*(*s).buffers)[file_idx].bytes, (*e).tok.offset, (*e).tok.length);
+    if (lr.found) {
+      (*e).symbol_ref := sym_decl(s, lr.index);
+      (*e).data_type := (*sym_decl(s, lr.index)).data_type;
+      (*e).type_file_idx := (*(*s).symbols)[lr.index].file_idx;
+      return;
+    }
+    set_error(s, e, file_idx, 4);
+    return;
+  }
+
+  if (k == 141) { (*e).data_type := (*s).canon_int32; (*e).type_file_idx := 0; return; }
+  if (k == 142) { (*e).data_type := (*s).canon_char; (*e).type_file_idx := 0; return; }
+  if (k == 143) { (*e).data_type := (*s).canon_cstr; (*e).type_file_idx := 0; return; }
+  if (k == 144) { (*e).data_type := (*s).canon_bool; (*e).type_file_idx := 0; return; }
+  if (k == 145) { (*e).data_type := (*s).canon_null; (*e).type_file_idx := 0; return; }
+
+  if (k == 146) {
+    op := (*e).op_type;
+    left_lit := is_literal_kind((*(*e).left).kind);
+    right_lit := is_literal_kind((*(*e).right).kind);
+
+    // Untyped-constant anchoring (SS3.7): decorate whichever side ISN'T
+    // a bare literal first, then let its resolved type anchor the
+    // literal side. If both (or neither) are literals, no anchoring is
+    // needed -- two literals never mismatch each other (both take
+    // their ordinary context-free default), and two non-literals are
+    // already concretely typed on their own.
+    if (left_lit && !right_lit) {
+      decorate_expr(s, p, sc, file_idx, (*e).right);
+      if ((*s).had_error) { return; }
+      decorate_literal_with_expected(s, p, sc, file_idx, (*e).left, (*(*e).right).data_type, (*(*e).right).type_file_idx);
+    } else {
+      if (right_lit && !left_lit) {
+        decorate_expr(s, p, sc, file_idx, (*e).left);
+        if ((*s).had_error) { return; }
+        decorate_literal_with_expected(s, p, sc, file_idx, (*e).right, (*(*e).left).data_type, (*(*e).left).type_file_idx);
+      } else {
+        decorate_expr(s, p, sc, file_idx, (*e).left);
+        if ((*s).had_error) { return; }
+        decorate_expr(s, p, sc, file_idx, (*e).right);
+      }
+    }
+    if ((*s).had_error) { return; }
+
+    lcat := cast_category((*(*e).left).data_type);
+    rcat := cast_category((*(*e).right).data_type);
+
+    if (is_logical_op(op)) {
+      if (lcat != 2 || rcat != 2) {
+        set_error(s, e, file_idx, 12);
+        return;
+      }
+      (*e).data_type := (*s).canon_bool;
+      (*e).type_file_idx := 0;
+      return;
+    }
+
+    if (is_comparison_op(op)) {
+      // Pointer operands are SS3.4's own sole exception to "same type
+      // both sides" -- any two pointer types compare, regardless of
+      // pointee.
+      if (lcat == 4 && rcat == 4) {
+        (*e).data_type := (*s).canon_bool;
+        (*e).type_file_idx := 0;
+        return;
+      }
+      if (lcat == 0 || rcat == 0 || !types_equal(s, (*(*e).left).data_type, (*(*e).left).type_file_idx, (*(*e).right).data_type, (*(*e).right).type_file_idx)) {
+        set_error(s, e, file_idx, 10);
+        return;
+      }
+      (*e).data_type := (*s).canon_bool;
+      (*e).type_file_idx := 0;
+      return;
+    }
+
+    // Arithmetic (+ - * / %) and bitwise/shift (& | ^ << >>). Pointer
+    // arithmetic (SS2.5) only ever applies to `+`/`-` with at least one
+    // pointer operand -- everything else here is ordinary same-integer-
+    // type arithmetic/bitwise, `char`/`bool`/pointer excluded from it
+    // exactly like v0 always excluded them.
+    if ((op == 80 || op == 85) && (lcat == 4 || rcat == 4)) {
+      if (op == 85) {
+        if (lcat == 4 && rcat == 4) {
+          set_error(s, e, file_idx, 14);
+          return;
+        }
+        if (lcat == 4) {
+          ptr_side := (*(*e).left).data_type;
+          ptr_file := (*(*e).left).type_file_idx;
+          if (rcat != 1) { set_error(s, e, file_idx, 14); return; }
+        } else {
+          ptr_side := (*(*e).right).data_type;
+          ptr_file := (*(*e).right).type_file_idx;
+          if (lcat != 1) { set_error(s, e, file_idx, 14); return; }
+        }
+        void_chk := (*ptr_side).left;
+        if (void_chk != null && (*void_chk).kind == 120 && (*void_chk).tok.kind == 33) {
+          set_error(s, e, file_idx, 14);
+          return;
+        }
+        (*e).data_type := ptr_side;
+        (*e).type_file_idx := ptr_file;
+        return;
+      }
+      // op == 80 ('-'): `p - n` and `p1 - p2` are legal; `n - p` is not
+      // (SS2.5 only ever documents pointer-minus-something, never the
+      // reverse).
+      if (lcat != 4) {
+        set_error(s, e, file_idx, 14);
+        return;
+      }
+      void_chk := (*(*(*e).left).data_type).left;
+      if (void_chk != null && (*void_chk).kind == 120 && (*void_chk).tok.kind == 33) {
+        set_error(s, e, file_idx, 14);
+        return;
+      }
+      if (rcat == 4) {
+        if (!types_equal(s, (*(*(*e).left).data_type).left, (*(*e).left).type_file_idx, (*(*(*e).right).data_type).left, (*(*e).right).type_file_idx)) {
+          set_error(s, e, file_idx, 14);
+          return;
+        }
+        (*e).data_type := (*s).canon_int64;
+        (*e).type_file_idx := 0;
+        return;
+      }
+      if (rcat != 1) {
+        set_error(s, e, file_idx, 14);
+        return;
+      }
+      (*e).data_type := (*(*e).left).data_type;
+      (*e).type_file_idx := (*(*e).left).type_file_idx;
+      return;
+    }
+
+    if (lcat != 1 || rcat != 1) {
+      set_error(s, e, file_idx, 11);
+      return;
+    }
+    if (!types_equal(s, (*(*e).left).data_type, (*(*e).left).type_file_idx, (*(*e).right).data_type, (*(*e).right).type_file_idx)) {
+      set_error(s, e, file_idx, 10);
+      return;
+    }
+    (*e).data_type := (*(*e).left).data_type;
+    (*e).type_file_idx := (*(*e).left).type_file_idx;
+    return;
+  }
+
+  if (k == 147) {
+    decorate_expr(s, p, sc, file_idx, (*e).left);
+    if ((*s).had_error) { return; }
+    op := (*e).op_type;
+    if (op == 81) {
+      base_ty := (*(*e).left).data_type;
+      if (base_ty == null || (*base_ty).kind != 121) {
+        set_error(s, e, file_idx, 8);
+        return;
+      }
+      (*e).data_type := (*base_ty).left;
+      (*e).type_file_idx := (*(*e).left).type_file_idx;
+      return;
+    }
+    if (op == 82) {
+      (*e).data_type := make_type_pointer(p, (*(*e).left).data_type);
+      (*e).type_file_idx := (*(*e).left).type_file_idx;
+      return;
+    }
+    if (op == 79) {
+      if (cast_category((*(*e).left).data_type) != 2) {
+        set_error(s, e, file_idx, 12);
+        return;
+      }
+      (*e).data_type := (*s).canon_bool;
+      (*e).type_file_idx := 0;
+      return;
+    }
+    // op == 80, unary '-': a SIGNED integer operand only. v0 SS3.2/SS10
+    // just says "requires an integer-typed operand" (no signedness
+    // restriction) -- this project's own deliberate v1 tightening
+    // (postulate_v1_language_reference.md SS3.2's own note): negating
+    // an unsigned value always wraps via two's complement to a huge
+    // positive result, never the "usual" negation someone reaching for
+    // unary `-` actually means, so the compiler now rejects it as a
+    // type error instead of silently producing that value.
+    lcat := cast_category((*(*e).left).data_type);
+    if (lcat != 1 || is_unsigned_for_cast((*(*(*e).left).data_type).tok.kind)) {
+      set_error(s, e, file_idx, 13);
+      return;
+    }
+    (*e).data_type := (*(*e).left).data_type;
+    (*e).type_file_idx := (*(*e).left).type_file_idx;
+    return;
+  }
+
+  if (k == 148) {
+    decorate_expr(s, p, sc, file_idx, (*e).left);
+    if ((*s).had_error) { return; }
+    (*e).type_file_idx := file_idx;
+    if (!casts_legal(cast_category((*(*e).left).data_type), cast_category((*e).data_type), (*(*e).left).data_type, (*e).data_type)) {
+      set_error(s, e, file_idx, 9);
+      return;
+    }
+    if (is_numeric_cast_cat(cast_category((*(*e).left).data_type)) && is_numeric_cast_cat(cast_category((*e).data_type))) {
+      if (cast_narrows((*(*e).left).data_type, (*e).data_type)) {
+        add_cast_warning(s, e, file_idx);
+      }
+    }
+    return;
+  }
+
+  if (k == 149) {
+    decorate_expr(s, p, sc, file_idx, (*e).left);
+    if ((*s).had_error) { return; }
+    callee_decl := (*(*e).left).symbol_ref;
+    if (callee_decl == null || ((*callee_decl).kind != 112 && (*callee_decl).kind != 113)) {
+      set_error(s, e, file_idx, 17);
+      return;
+    }
+    callee_file := (*(*e).left).type_file_idx;
+    field := (*callee_decl).first_child;
+    arg := (*e).first_child;
+    while (arg != null && field != null && !(*s).had_error) {
+      check_expected(s, p, sc, file_idx, arg, (*field).data_type, callee_file);
+      arg := (*arg).next_sibling;
+      field := (*field).next_sibling;
+    }
+    if ((*s).had_error) { return; }
+    if (arg != null || field != null) {
+      set_error(s, e, file_idx, 18);
+      return;
+    }
+    (*e).data_type := (*(*e).left).data_type;
+    (*e).type_file_idx := (*(*e).left).type_file_idx;
+    return;
+  }
+
+  if (k == 150) {
+    decorate_expr(s, p, sc, file_idx, (*e).left);
+    if ((*s).had_error) { return; }
+    decorate_expr(s, p, sc, file_idx, (*e).right);
+    if ((*s).had_error) { return; }
+    base_ty := (*(*e).left).data_type;
+    if (base_ty == null || !((*base_ty).kind == 121 || (*base_ty).kind == 122)) {
+      set_error(s, e, file_idx, 7);
+      return;
+    }
+    (*e).data_type := (*base_ty).left;
+    (*e).type_file_idx := (*(*e).left).type_file_idx;
+    return;
+  }
+
+  if (k == 151) {
+    decorate_expr(s, p, sc, file_idx, (*e).left);
+    if ((*s).had_error) { return; }
+    base_ty := (*(*e).left).data_type;
+    base_file := (*(*e).left).type_file_idx;
+    if (base_ty != null && (*base_ty).kind == 121) {
+      base_ty := (*base_ty).left;
+    }
+    // A struct name and a scalar keyword (int32, bool, ...) are both
+    // TYPE_BASE (120) nodes, distinguished only by whether tok.kind is
+    // one of the scalar keyword kinds -- same test field_type_size
+    // already uses to tell "builtin" from "struct name reference"
+    // apart, reused here for the same reason.
+    if (base_ty == null || (*base_ty).kind != 120 || base_type_size((*base_ty).tok.kind) > 0) {
+      set_error(s, e, file_idx, 5);
+      return;
+    }
+    lr := find_struct_symbol(s, &(*(*s).buffers)[base_file].bytes, (*base_ty).tok.offset, (*base_ty).tok.length);
+    if (!lr.found) {
+      set_error(s, base_ty, base_file, 3);
+      return;
+    }
+    field := (*sym_decl(s, lr.index)).first_child;
+    while (field != null && !found_field) {
+      if (bytes_equal_cross(sym_src(s, lr.index), (*field).tok.offset, (*field).tok.length, &(*(*s).buffers)[file_idx].bytes, (*e).tok.offset, (*e).tok.length)) {
+        found_field := true;
+      } else {
+        field := (*field).next_sibling;
+      }
+    }
+    if (!found_field) {
+      set_error(s, e, file_idx, 6);
+      return;
+    }
+    (*e).symbol_ref := field;
+    (*e).data_type := (*field).data_type;
+    (*e).type_file_idx := (*(*s).symbols)[lr.index].file_idx;
+    return;
+  }
+
+  // STRUCT_LIT (postulate_v0_language_reference.md SS3.8): unlike
+  // ARRAY_LIT (below), its own type is never ambiguous -- the struct
+  // name sits right there in `(*e).tok` -- so it decorates in the
+  // ordinary bottom-up way, no `expected` context needed at all. Every
+  // field must be named exactly once (a missing, unknown, or repeated
+  // field is a compile error, no partial/default-initialized struct
+  // value exists) -- `seen_arr`, indexed by the field's own position in
+  // the struct's declaration, tracks that; each field's value is
+  // checked against that field's declared type via check_expected,
+  // which is also what lets a nested struct/array literal as a field's
+  // own value resolve correctly (SS3.8's own "nest freely").
+  if (k == 152) {
+    lr := find_struct_symbol(s, &(*(*s).buffers)[file_idx].bytes, (*e).tok.offset, (*e).tok.length);
+    if (!lr.found) {
+      set_error(s, e, file_idx, 3);
+      return;
+    }
+    base_file := (*(*s).symbols)[lr.index].file_idx;
+
+    field := (*e).first_child;
+    while (field != null && !(*s).had_error) {
+      decl_field := (*sym_decl(s, lr.index)).first_child;
+      field_idx := 0;
+      found_field := false;
+      while (decl_field != null && !found_field) {
+        if (bytes_equal_cross(sym_src(s, lr.index), (*decl_field).tok.offset, (*decl_field).tok.length, &(*(*s).buffers)[file_idx].bytes, (*field).tok.offset, (*field).tok.length)) {
+          found_field := true;
+        } else {
+          decl_field := (*decl_field).next_sibling;
+          field_idx := field_idx + 1;
+        }
+      }
+      if (!found_field) {
+        set_error(s, field, file_idx, 6);
+        return;
+      }
+      if (seen_arr[field_idx]) {
+        set_error(s, field, file_idx, 19);
+        return;
+      }
+      seen_arr[field_idx] := true;
+      check_expected(s, p, sc, file_idx, (*field).left, (*decl_field).data_type, base_file);
+      if ((*s).had_error) { return; }
+      field := (*field).next_sibling;
+    }
+
+    decl_field := (*sym_decl(s, lr.index)).first_child;
+    field_idx := 0;
+    while (decl_field != null) {
+      if (!seen_arr[field_idx]) {
+        set_error(s, e, file_idx, 20);
+        return;
+      }
+      decl_field := (*decl_field).next_sibling;
+      field_idx := field_idx + 1;
+    }
+
+    struct_ty := alloc_node(p, 120);
+    (*struct_ty).tok := (*e).tok;
+    (*e).data_type := struct_ty;
+    (*e).type_file_idx := file_idx;
+    return;
+  }
+
+  // ARRAY_LIT (153): unlike STRUCT_LIT, it has no type name of its own
+  // anywhere in the source (`{1, 2, 3}` alone never says what array
+  // type it is) -- it can only ever be resolved with an `expected`
+  // array type in hand, so it's handled through the SAME literal-
+  // anchoring path as an untyped int/bool/null constant, not here
+  // (decorate_literal_with_expected, with a null `expected` for the
+  // context-free case reached by calling it directly from here).
+  if (k == 153) {
+    decorate_literal_with_expected(s, p, sc, file_idx, e, null, 0);
+    return;
+  }
+
+  if (k == 155 || k == 156) {
+    decorate_literal_with_expected(s, p, sc, file_idx, e, null, 0);
+    return;
+  }
+}
+
+function decorate_block(s: *Sema, p: *Parser, sc: *Scope, file_idx: uint64, block: *ASTNode) : void {
+  mut stmt : *ASTNode := (*block).first_child;
+  while (stmt != null && !(*s).had_error) {
+    decorate_stmt(s, p, sc, file_idx, stmt);
+    stmt := (*stmt).next_sibling;
+  }
+}
+
+function decorate_stmt(s: *Sema, p: *Parser, sc: *Scope, file_idx: uint64, stmt: *ASTNode) : void {
+  mut k : uint32 := (*stmt).kind;
+  mut pair : *ASTNode := null;
+
+  if (k == 131) {
+    check_expected(s, p, sc, file_idx, (*stmt).left, (*s).canon_bool, 0);
+    if ((*s).had_error) { return; }
+    decorate_block(s, p, sc, file_idx, (*stmt).right);
+    if ((*s).had_error) { return; }
+    if ((*stmt).extra != null) {
+      if ((*(*stmt).extra).kind == 131) {
+        decorate_stmt(s, p, sc, file_idx, (*stmt).extra);
+      } else {
+        decorate_block(s, p, sc, file_idx, (*stmt).extra);
+      }
+    }
+    return;
+  }
+  if (k == 132) {
+    check_expected(s, p, sc, file_idx, (*stmt).left, (*s).canon_bool, 0);
+    if ((*s).had_error) { return; }
+    decorate_block(s, p, sc, file_idx, (*stmt).right);
+    return;
+  }
+  if (k == 133) {
+    if ((*stmt).left != null) {
+      check_expected(s, p, sc, file_idx, (*stmt).left, (*sc).ret_type, (*sc).ret_file);
+      return;
+    }
+    // A bare `return;`: legal only from a `void`-returning function
+    // (the reverse case -- `return expr;` from a `void` function --
+    // needs no special handling of its own, since check_expected's own
+    // "expected 'void', found whatever expr resolved to" already
+    // reports it as an ordinary mismatch above).
+    if ((*sc).ret_type == null || (*(*sc).ret_type).kind != 120 || (*(*sc).ret_type).tok.kind != 33) {
+      set_error(s, stmt, file_idx, 16);
+    }
+    return;
+  }
+  if (k == 134) {
+    if ((*stmt).left != null) {
+      check_expected(s, p, sc, file_idx, (*stmt).left, (*stmt).data_type, file_idx);
+    }
+    return;
+  }
+  if (k == 135) {
+    pair := (*stmt).first_child;
+    while (pair != null && !(*s).had_error) {
+      decorate_expr(s, p, sc, file_idx, (*pair).left);
+      if ((*s).had_error) { return; }
+      check_expected(s, p, sc, file_idx, (*pair).right, (*(*pair).left).data_type, (*(*pair).left).type_file_idx);
+      pair := (*pair).next_sibling;
+    }
+    return;
+  }
+  if (k == 136) {
+    decorate_expr(s, p, sc, file_idx, (*stmt).left);
+    return;
+  }
+}
+
+function decorate_function(s: *Sema, p: *Parser, func_decl: *ASTNode, file_idx: uint64) : void {
+  mut bindings_arr : LocalBinding[64];
+  mut sc : Scope := Scope { bindings := &bindings_arr, count := 0, ret_type := (*func_decl).data_type, ret_file := file_idx };
+  mut body : *ASTNode := (*func_decl).extra;
+
+  build_scope(&sc, func_decl);
+  if (body != null) {
+    decorate_block(s, p, &sc, file_idx, body);
+  }
+}
+
+function decorate_program(s: *Sema, p: *Parser, program: *ASTNode, file_idx: uint64) : void {
+  mut child : *ASTNode := (*program).first_child;
+  while (child != null && !(*s).had_error) {
+    if ((*child).kind == 113) {
+      decorate_function(s, p, child, file_idx);
+    }
+    child := (*child).next_sibling;
   }
 }
 
@@ -3023,6 +4056,72 @@ function append_fqn_e(out: *(uint8[256]), pos: uint64, src: *(uint8[65536]), seg
   return new_pos;
 }
 
+// A synthesized TYPE_BASE (init_canonical_types' own canon_int32/
+// canon_char/canon_bool -- see Sema's own comment on those) has an
+// empty tok, exactly like any other node fresh out of alloc_node,
+// since there is no source text to point at for a literal's default
+// type. append_type_e still needs a real name for one when a cast-
+// warning/type-mismatch message lands on a literal's own default-typed
+// side (e.g. `97 as char`'s `97`, or `c == 97`'s now-rejected `97`) --
+// this is that lookup, by the same lexer keyword kind base_type_size
+// already keys off of, freshly declared every call exactly like
+// lex_next's own small local lookup tables.
+function append_base_keyword_e(out: *(uint8[256]), pos: uint64, tok_kind: int32) : uint64 {
+  mut kw_int8 : uint8[100] := {105, 110, 116, 56, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut kw_int16 : uint8[100] := {105, 110, 116, 49, 54, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut kw_int32 : uint8[100] := {105, 110, 116, 51, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut kw_int64 : uint8[100] := {105, 110, 116, 54, 52, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut kw_uint8 : uint8[100] := {117, 105, 110, 116, 56, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut kw_uint16 : uint8[100] := {117, 105, 110, 116, 49, 54, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut kw_uint32 : uint8[100] := {117, 105, 110, 116, 51, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut kw_uint64 : uint8[100] := {117, 105, 110, 116, 54, 52, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut kw_bool : uint8[100] := {98, 111, 111, 108, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut kw_char : uint8[100] := {99, 104, 97, 114, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut kw_void : uint8[100] := {118, 111, 105, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+
+  if (tok_kind == 22) { return append_str_e(out, pos, &kw_int8, 4); }
+  if (tok_kind == 23) { return append_str_e(out, pos, &kw_int16, 5); }
+  if (tok_kind == 24 || tok_kind == 25) { return append_str_e(out, pos, &kw_int32, 5); }
+  if (tok_kind == 26) { return append_str_e(out, pos, &kw_int64, 5); }
+  if (tok_kind == 27) { return append_str_e(out, pos, &kw_uint8, 5); }
+  if (tok_kind == 28) { return append_str_e(out, pos, &kw_uint16, 6); }
+  if (tok_kind == 29 || tok_kind == 30) { return append_str_e(out, pos, &kw_uint32, 6); }
+  if (tok_kind == 31 || tok_kind == 43) { return append_str_e(out, pos, &kw_uint64, 6); }
+  if (tok_kind == 32) { return append_str_e(out, pos, &kw_bool, 4); }
+  if (tok_kind == 36) { return append_str_e(out, pos, &kw_char, 4); }
+  if (tok_kind == 33) { return append_str_e(out, pos, &kw_void, 4); }
+  return pos;
+}
+
+// A TYPE_POINTER/TYPE_ARRAY node's own tok is always empty (only a
+// TYPE_BASE leaf ever carries real source text) -- for a cast-error/
+// -warning message naming a possibly-composite type, this walks down
+// to and past every wrapping layer, printing `*`/`[N]` along the way,
+// instead of the single flat snippet append_snippet_e alone would give
+// (which would print nothing at all for e.g. `*int32`). Every layer of
+// a single type node belongs to the same file, so one `src` covers the
+// whole recursion. A TYPE_BASE leaf with an empty tok of its OWN is a
+// synthesized canonical type (a literal's default type, never sliced
+// from real source) -- append_base_keyword_e names it instead.
+function append_type_e(out: *(uint8[256]), pos: uint64, src: *(uint8[65536]), ty: *ASTNode) : uint64 {
+  mut new_pos : uint64 := pos;
+  if (ty == null) { return new_pos; }
+  if ((*ty).kind == 121) {
+    new_pos := append_byte_e(out, new_pos, 42);
+    return append_type_e(out, new_pos, src, (*ty).left);
+  }
+  if ((*ty).kind == 122) {
+    new_pos := append_type_e(out, new_pos, src, (*ty).left);
+    new_pos := append_byte_e(out, new_pos, 91);
+    new_pos := append_uint_e(out, new_pos, int64_to_uint64((*ty).int_val));
+    return append_byte_e(out, new_pos, 93);
+  }
+  if ((*ty).tok.length == 0) {
+    return append_base_keyword_e(out, new_pos, (*ty).tok.kind);
+  }
+  return append_snippet_e(out, new_pos, src, (*ty).tok.offset, (*ty).tok.length);
+}
+
 function append_uint_e(out: *(uint8[256]), pos: uint64, value: uint64) : uint64 {
   mut digits : uint8[24] := 0;
   mut count : uint64 := 0;
@@ -3140,6 +4239,7 @@ function main() : int32 {
   };
 
   mut symbols_arr : Symbol[256];
+  mut cast_warnings_arr : CastWarning[64];
   mut sema : Sema := Sema {
     buffers := &buffers_arr,
     symbols := &symbols_arr,
@@ -3147,7 +4247,17 @@ function main() : int32 {
     had_error := false,
     err_node := null,
     err_file_idx := 0,
-    err_kind := 0
+    err_kind := 0,
+    err_expected_type := null,
+    err_expected_file := 0,
+    canon_int32 := null,
+    canon_int64 := null,
+    canon_char := null,
+    canon_bool := null,
+    canon_cstr := null,
+    canon_null := null,
+    cast_warnings := &cast_warnings_arr,
+    cast_warning_count := 0
   };
 
   mut rules : AutoloadRule[32];
@@ -3172,6 +4282,7 @@ function main() : int32 {
   mut err_buf : uint8[256] := 0;
   mut err_pos : uint64 := 0;
   mut lc : LineCol := LineCol { line := 0, col := 0 };
+  mut err_pos_tok : Token := Token { kind := 0, offset := 0, length := 0 };
   mut exit_code : int64 := 0;
   mut wrote_ok : bool := true;
   mut err_src : *(uint8[65536]) := &buffers_arr[0].bytes;
@@ -3201,6 +4312,39 @@ function main() : int32 {
   mut msg_toomany : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 116, 111, 111, 32, 109, 97, 110, 121, 32, 102, 105, 108, 101, 115, 32, 114, 101, 97, 99, 104, 101, 100, 32, 119, 104, 105, 108, 101, 32, 114, 101, 115, 111, 108, 118, 105, 110, 103, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
   mut msg_filelex : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 108, 101, 120, 32, 101, 114, 114, 111, 114, 32, 105, 110, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
   mut msg_fileparse : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 112, 97, 114, 115, 101, 32, 101, 114, 114, 111, 114, 32, 105, 110, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_unknownident_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 117, 110, 107, 110, 111, 119, 110, 32, 105, 100, 101, 110, 116, 105, 102, 105, 101, 114, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_unknownident_b : uint8[100] := {39, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_notstruct_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 102, 105, 101, 108, 100, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_notstruct_b : uint8[100] := {39, 32, 97, 99, 99, 101, 115, 115, 101, 100, 32, 111, 110, 32, 97, 32, 110, 111, 110, 45, 115, 116, 114, 117, 99, 116, 32, 118, 97, 108, 117, 101, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_unknownfield_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 115, 116, 114, 117, 99, 116, 32, 104, 97, 115, 32, 110, 111, 32, 102, 105, 101, 108, 100, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_unknownfield_b : uint8[100] := {39, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_notindex_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 99, 97, 110, 110, 111, 116, 32, 105, 110, 100, 101, 120, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_notindex_b : uint8[100] := {39, 32, 45, 45, 32, 110, 111, 116, 32, 97, 110, 32, 97, 114, 114, 97, 121, 32, 111, 114, 32, 112, 111, 105, 110, 116, 101, 114, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_notptr_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 99, 97, 110, 110, 111, 116, 32, 100, 101, 114, 101, 102, 101, 114, 101, 110, 99, 101, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_notptr_b : uint8[100] := {39, 32, 45, 45, 32, 110, 111, 116, 32, 97, 32, 112, 111, 105, 110, 116, 101, 114, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_illegalcast_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 105, 108, 108, 101, 103, 97, 108, 32, 99, 97, 115, 116, 32, 102, 114, 111, 109, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_to_b : uint8[100] := {39, 32, 116, 111, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_illegalcast_c : uint8[100] := {39, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_castwarn_a : uint8[100] := {115, 101, 109, 97, 32, 119, 97, 114, 110, 105, 110, 103, 58, 32, 99, 97, 115, 116, 32, 102, 114, 111, 109, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_castwarn_c : uint8[100] := {39, 32, 109, 97, 121, 32, 108, 111, 115, 101, 32, 111, 114, 32, 114, 101, 105, 110, 116, 101, 114, 112, 114, 101, 116, 32, 105, 116, 115, 32, 118, 97, 108, 117, 101, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_mismatch_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 116, 121, 112, 101, 32, 109, 105, 115, 109, 97, 116, 99, 104, 32, 98, 101, 116, 119, 101, 101, 110, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_and_b : uint8[100] := {39, 32, 97, 110, 100, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_mismatch_c : uint8[100] := {39, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_intop_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 111, 112, 101, 114, 97, 116, 111, 114, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 116, 119, 111, 32, 111, 112, 101, 114, 97, 110, 100, 115, 32, 111, 102, 32, 116, 104, 101, 32, 115, 97, 109, 101, 32, 105, 110, 116, 101, 103, 101, 114, 32, 116, 121, 112, 101, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_boolop_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 111, 112, 101, 114, 97, 116, 111, 114, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 97, 32, 98, 111, 111, 108, 32, 111, 112, 101, 114, 97, 110, 100, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_unaryneg_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 117, 110, 97, 114, 121, 32, 39, 45, 39, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 97, 32, 115, 105, 103, 110, 101, 100, 32, 105, 110, 116, 101, 103, 101, 114, 32, 111, 112, 101, 114, 97, 110, 100, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_ptrarith_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 105, 110, 118, 97, 108, 105, 100, 32, 112, 111, 105, 110, 116, 101, 114, 32, 97, 114, 105, 116, 104, 109, 101, 116, 105, 99, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_expected_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 101, 120, 112, 101, 99, 116, 101, 100, 32, 116, 121, 112, 101, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_expected_b : uint8[100] := {39, 44, 32, 102, 111, 117, 110, 100, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_expected_c : uint8[100] := {39, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_missingret_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 109, 105, 115, 115, 105, 110, 103, 32, 114, 101, 116, 117, 114, 110, 32, 118, 97, 108, 117, 101, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_notcallable_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 118, 97, 108, 117, 101, 32, 105, 115, 32, 110, 111, 116, 32, 99, 97, 108, 108, 97, 98, 108, 101, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_argcount_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 119, 114, 111, 110, 103, 32, 110, 117, 109, 98, 101, 114, 32, 111, 102, 32, 97, 114, 103, 117, 109, 101, 110, 116, 115, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_dupfield_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 102, 105, 101, 108, 100, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_dupfield_b : uint8[100] := {39, 32, 97, 108, 114, 101, 97, 100, 121, 32, 105, 110, 105, 116, 105, 97, 108, 105, 122, 101, 100, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_missingfield_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 115, 116, 114, 117, 99, 116, 32, 108, 105, 116, 101, 114, 97, 108, 32, 105, 115, 32, 109, 105, 115, 115, 105, 110, 103, 32, 111, 110, 101, 32, 111, 114, 32, 109, 111, 114, 101, 32, 102, 105, 101, 108, 100, 115, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_arrcount_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 119, 114, 111, 110, 103, 32, 110, 117, 109, 98, 101, 114, 32, 111, 102, 32, 97, 114, 114, 97, 121, 32, 108, 105, 116, 101, 114, 97, 108, 32, 101, 108, 101, 109, 101, 110, 116, 115, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_arrctx_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 97, 114, 114, 97, 121, 32, 108, 105, 116, 101, 114, 97, 108, 32, 117, 115, 101, 100, 32, 119, 104, 101, 114, 101, 32, 110, 111, 32, 97, 114, 114, 97, 121, 32, 116, 121, 112, 101, 32, 105, 115, 32, 101, 120, 112, 101, 99, 116, 101, 100, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
   // ---- 0. read the entry file from stdin into slot 0, then tokenize +
   // parse it exactly like any other slot (process_file doesn't care
@@ -3336,14 +4480,23 @@ function main() : int32 {
         fqn_count := segments_from_chain((*child).first_child, &fqn_segs);
         resres := resolve_path(&buffers_arr[i].bytes, &fqn_segs, fqn_count, &rules, rule_count, &path_out, &warn_rules);
 
+        // Flushed and reset PER WARNING (not accumulated across every
+        // use_decl in every file before one flush at the end, as this
+        // loop used to) -- err_buf is only 256 bytes, and enough
+        // matched patterns/fqns across a real multi-file build can
+        // exceed that before ever being written out; the cast-warning
+        // loop below (step 4c) hit exactly this once its own message
+        // count passed 2, which is what surfaced the bug here too.
         w := 0;
         while (w < resres.warn_count) {
+          err_pos := 0;
           err_pos := append_str_e(&err_buf, err_pos, &msg_warn_a, 32);
           err_pos := append_snippet_e(&err_buf, err_pos, &buffers_arr[0].bytes, rules[warn_rules[w]].pattern_offset, rules[warn_rules[w]].pattern_length);
           err_pos := append_str_e(&err_buf, err_pos, &msg_warn_b, 26);
           err_pos := append_fqn_e(&err_buf, err_pos, &buffers_arr[i].bytes, &fqn_segs, fqn_count);
           err_pos := append_str_e(&err_buf, err_pos, &msg_warn_c, 45);
           err_pos := append_byte_e(&err_buf, err_pos, 10);
+          wrote_ok := write_all_small(2, &err_buf, err_pos);
           w := w + 1;
         }
 
@@ -3356,10 +4509,6 @@ function main() : int32 {
       child := (*child).next_sibling;
     }
     i := i + 1;
-  }
-
-  if (err_pos > 0) {
-    wrote_ok := write_all_small(2, &err_buf, err_pos);
   }
 
   // ---- 4. declare pass (every file) + struct layout ----
@@ -3400,6 +4549,173 @@ function main() : int32 {
     wrote_ok := write_all_small(2, &err_buf, err_pos);
     sys_exit(1);
     return 0;
+  }
+
+  // ---- 4b. AST decoration (Module 3, part 3): local scope, identifier/
+  // field/call resolution, and expression type inference -- see this
+  // pass's own header comment above decorate_program for exactly what
+  // it does and does not check yet ----
+  init_canonical_types(&sema, &parser);
+  i := 0;
+  while (i < fs.count && !sema.had_error) {
+    decorate_program(&sema, &parser, programs_arr[i], i);
+    i := i + 1;
+  }
+
+  if (sema.had_error) {
+    err_src := &buffers_arr[sema.err_file_idx].bytes;
+    err_pos_tok := expr_pos_tok(sema.err_node);
+    lc := compute_line_col(err_src, lens_arr[sema.err_file_idx], err_pos_tok.offset);
+    err_pos := 0;
+    if (sema.err_kind == 4) {
+      err_pos := append_str_e(&err_buf, err_pos, &msg_unknownident_a, 32);
+      err_pos := append_snippet_e(&err_buf, err_pos, err_src, err_pos_tok.offset, err_pos_tok.length);
+      err_pos := append_str_e(&err_buf, err_pos, &msg_unknownident_b, 10);
+    } else {
+      if (sema.err_kind == 5) {
+        err_pos := append_str_e(&err_buf, err_pos, &msg_notstruct_a, 19);
+        err_pos := append_snippet_e(&err_buf, err_pos, err_src, err_pos_tok.offset, err_pos_tok.length);
+        err_pos := append_str_e(&err_buf, err_pos, &msg_notstruct_b, 41);
+      } else {
+        if (sema.err_kind == 3) {
+          err_pos := append_str_e(&err_buf, err_pos, &msg_unknown_a, 26);
+          err_pos := append_snippet_e(&err_buf, err_pos, err_src, err_pos_tok.offset, err_pos_tok.length);
+          err_pos := append_str_e(&err_buf, err_pos, &msg_unknown_b, 10);
+        } else {
+          if (sema.err_kind == 6) {
+            err_pos := append_str_e(&err_buf, err_pos, &msg_unknownfield_a, 33);
+            err_pos := append_snippet_e(&err_buf, err_pos, err_src, err_pos_tok.offset, err_pos_tok.length);
+            err_pos := append_str_e(&err_buf, err_pos, &msg_unknownfield_b, 10);
+          } else {
+            if (sema.err_kind == 7) {
+              err_pos := append_str_e(&err_buf, err_pos, &msg_notindex_a, 26);
+              err_pos := append_snippet_e(&err_buf, err_pos, err_src, err_pos_tok.offset, err_pos_tok.length);
+              err_pos := append_str_e(&err_buf, err_pos, &msg_notindex_b, 37);
+            } else {
+              if (sema.err_kind == 8) {
+                err_pos := append_str_e(&err_buf, err_pos, &msg_notptr_a, 32);
+                err_pos := append_snippet_e(&err_buf, err_pos, err_src, err_pos_tok.offset, err_pos_tok.length);
+                err_pos := append_str_e(&err_buf, err_pos, &msg_notptr_b, 27);
+              } else {
+                if (sema.err_kind == 9) {
+                  // err_node is always the CAST_EXPR itself here
+                  // (set_error's own call site), so its `.left`'s
+                  // data_type/type_file_idx (the source type, wherever
+                  // it was actually declared) and its own data_type
+                  // (the target type, always in THIS file -- err_src)
+                  // are both still reachable straight off it.
+                  err_pos := append_str_e(&err_buf, err_pos, &msg_illegalcast_a, 31);
+                  err_pos := append_type_e(&err_buf, err_pos, &buffers_arr[(*(*sema.err_node).left).type_file_idx].bytes, (*(*sema.err_node).left).data_type);
+                  err_pos := append_str_e(&err_buf, err_pos, &msg_to_b, 6);
+                  err_pos := append_type_e(&err_buf, err_pos, err_src, (*sema.err_node).data_type);
+                  err_pos := append_str_e(&err_buf, err_pos, &msg_illegalcast_c, 10);
+                } else {
+                  if (sema.err_kind == 10) {
+                    // err_node is always the BINARY_EXPR itself -- same
+                    // trick as kind 9, its own `.left`/`.right` are the
+                    // two operands, each already carrying its own
+                    // resolved data_type/type_file_idx.
+                    err_pos := append_str_e(&err_buf, err_pos, &msg_mismatch_a, 35);
+                    err_pos := append_type_e(&err_buf, err_pos, &buffers_arr[(*(*sema.err_node).left).type_file_idx].bytes, (*(*sema.err_node).left).data_type);
+                    err_pos := append_str_e(&err_buf, err_pos, &msg_and_b, 7);
+                    err_pos := append_type_e(&err_buf, err_pos, &buffers_arr[(*(*sema.err_node).right).type_file_idx].bytes, (*(*sema.err_node).right).data_type);
+                    err_pos := append_str_e(&err_buf, err_pos, &msg_mismatch_c, 10);
+                  } else {
+                    if (sema.err_kind == 11) {
+                      err_pos := append_str_e(&err_buf, err_pos, &msg_intop_a, 76);
+                    } else {
+                      if (sema.err_kind == 12) {
+                        err_pos := append_str_e(&err_buf, err_pos, &msg_boolop_a, 53);
+                      } else {
+                        if (sema.err_kind == 13) {
+                          err_pos := append_str_e(&err_buf, err_pos, &msg_unaryneg_a, 64);
+                        } else {
+                          if (sema.err_kind == 14) {
+                            err_pos := append_str_e(&err_buf, err_pos, &msg_ptrarith_a, 47);
+                          } else {
+                            if (sema.err_kind == 15) {
+                              // err_node's own data_type/type_file_idx
+                              // is the "found" side; err_expected_
+                              // type/file (set only for this kind) is
+                              // the "expected" side.
+                              err_pos := append_str_e(&err_buf, err_pos, &msg_expected_a, 27);
+                              err_pos := append_type_e(&err_buf, err_pos, &buffers_arr[sema.err_expected_file].bytes, sema.err_expected_type);
+                              err_pos := append_str_e(&err_buf, err_pos, &msg_expected_b, 10);
+                              err_pos := append_type_e(&err_buf, err_pos, &buffers_arr[(*sema.err_node).type_file_idx].bytes, (*sema.err_node).data_type);
+                              err_pos := append_str_e(&err_buf, err_pos, &msg_expected_c, 10);
+                            } else {
+                              if (sema.err_kind == 16) {
+                                err_pos := append_str_e(&err_buf, err_pos, &msg_missingret_a, 41);
+                              } else {
+                                if (sema.err_kind == 17) {
+                                  err_pos := append_str_e(&err_buf, err_pos, &msg_notcallable_a, 42);
+                                } else {
+                                  if (sema.err_kind == 18) {
+                                    err_pos := append_str_e(&err_buf, err_pos, &msg_argcount_a, 46);
+                                  } else {
+                                    if (sema.err_kind == 19) {
+                                      err_pos := append_str_e(&err_buf, err_pos, &msg_dupfield_a, 19);
+                                      err_pos := append_snippet_e(&err_buf, err_pos, err_src, err_pos_tok.offset, err_pos_tok.length);
+                                      err_pos := append_str_e(&err_buf, err_pos, &msg_dupfield_b, 30);
+                                    } else {
+                                      if (sema.err_kind == 20) {
+                                        err_pos := append_str_e(&err_buf, err_pos, &msg_missingfield_a, 65);
+                                      } else {
+                                        if (sema.err_kind == 21) {
+                                          err_pos := append_str_e(&err_buf, err_pos, &msg_arrcount_a, 59);
+                                        } else {
+                                          err_pos := append_str_e(&err_buf, err_pos, &msg_arrctx_a, 71);
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    err_pos := append_uint_e(&err_buf, err_pos, lc.line);
+    err_pos := append_str_e(&err_buf, err_pos, &msg_col, 6);
+    err_pos := append_uint_e(&err_buf, err_pos, lc.col);
+    err_pos := append_byte_e(&err_buf, err_pos, 10);
+    wrote_ok := write_all_small(2, &err_buf, err_pos);
+    sys_exit(1);
+    return 0;
+  }
+
+  // ---- 4c. print any collected `as`-cast narrowing/sign-loss warnings
+  // (SS3.7a) -- advisory only, doesn't stop compilation, same "warn but
+  // continue" shape step 3 already uses for autoload-pattern warnings.
+  // Flushed and reset PER WARNING, unlike step 3's own loop (which
+  // shares one err_buf/err_pos across every warning it finds before a
+  // single flush at the end) -- err_buf is only 256 bytes, and this
+  // message is long enough that three of them already overflow it, so
+  // accumulating an unbounded count into it first isn't safe here. ----
+  w := 0;
+  while (w < sema.cast_warning_count) {
+    err_pos := 0;
+    err_pos := append_str_e(&err_buf, err_pos, &msg_castwarn_a, 25);
+    err_pos := append_type_e(&err_buf, err_pos, &buffers_arr[(*(*cast_warnings_arr[w].node).left).type_file_idx].bytes, (*(*cast_warnings_arr[w].node).left).data_type);
+    err_pos := append_str_e(&err_buf, err_pos, &msg_to_b, 6);
+    err_pos := append_type_e(&err_buf, err_pos, &buffers_arr[cast_warnings_arr[w].file_idx].bytes, (*cast_warnings_arr[w].node).data_type);
+    err_pos := append_str_e(&err_buf, err_pos, &msg_castwarn_c, 44);
+    lc := compute_line_col(&buffers_arr[cast_warnings_arr[w].file_idx].bytes, lens_arr[cast_warnings_arr[w].file_idx], expr_pos_tok(cast_warnings_arr[w].node).offset);
+    err_pos := append_uint_e(&err_buf, err_pos, lc.line);
+    err_pos := append_str_e(&err_buf, err_pos, &msg_col, 6);
+    err_pos := append_uint_e(&err_buf, err_pos, lc.col);
+    err_pos := append_byte_e(&err_buf, err_pos, 10);
+    wrote_ok := write_all_small(2, &err_buf, err_pos);
+    w := w + 1;
   }
 
   // ---- 5. dump the symbol table (postulate_stage1_v1_0_6_edsger_

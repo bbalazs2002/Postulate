@@ -1,0 +1,7 @@
+namespace \Main;
+
+function main() : int32 {
+  mut c : char := 'a';
+  mut r : bool := c == 97;
+  return 0;
+}
