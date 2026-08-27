@@ -1,0 +1,17 @@
+namespace \Main;
+
+function a() : int32 {
+  return 1;
+}
+
+function b() : int32 {
+  return 2;
+}
+
+function combine(x: int32, y: int32) : int32 {
+  return x - y;
+}
+
+function main() : int32 {
+  return combine(a(), b());
+}

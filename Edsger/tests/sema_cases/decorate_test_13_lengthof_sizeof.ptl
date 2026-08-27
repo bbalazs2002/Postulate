@@ -1,0 +1,7 @@
+namespace \Main;
+function main() : int32 {
+  mut arr : int32[5];
+  mut n : int32 := lengthof(arr) as int32;
+  mut m : int32 := lengthof(int32[3]) as int32;
+  return 0;
+}

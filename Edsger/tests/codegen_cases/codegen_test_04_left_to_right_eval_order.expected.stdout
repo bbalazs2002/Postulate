@@ -1,0 +1,30 @@
+define i32 @a() {
+entry:
+  ret i32 1
+}
+
+define i32 @b() {
+entry:
+  ret i32 2
+}
+
+define i32 @combine(i32 %p0, i32 %p1) {
+entry:
+  %r0 = alloca i32
+  store i32 %p0, ptr %r0
+  %r1 = alloca i32
+  store i32 %p1, ptr %r1
+  %r2 = load i32, ptr %r0
+  %r3 = load i32, ptr %r1
+  %r4 = sub i32 %r2, %r3
+  ret i32 %r4
+}
+
+define i32 @main() {
+entry:
+  %r5 = call i32 @a()
+  %r6 = call i32 @b()
+  %r7 = call i32 @combine(i32 %r5, i32 %r6)
+  ret i32 %r7
+}
+

@@ -1,0 +1,101 @@
+define i64 @widenSigned(i8 %p0) {
+entry:
+  %r0 = alloca i8
+  store i8 %p0, ptr %r0
+  %r1 = load i8, ptr %r0
+  %r2 = sext i8 %r1 to i64
+  ret i64 %r2
+}
+
+define i64 @widenUnsigned(i8 %p0) {
+entry:
+  %r3 = alloca i8
+  store i8 %p0, ptr %r3
+  %r4 = load i8, ptr %r3
+  %r5 = zext i8 %r4 to i64
+  ret i64 %r5
+}
+
+define i32 @narrow(i64 %p0) {
+entry:
+  %r6 = alloca i64
+  store i64 %p0, ptr %r6
+  %r7 = load i64, ptr %r6
+  %r8 = trunc i64 %r7 to i32
+  ret i32 %r8
+}
+
+define i32 @sameWidth(i32 %p0) {
+entry:
+  %r9 = alloca i32
+  store i32 %p0, ptr %r9
+  %r10 = load i32, ptr %r9
+  ret i32 %r10
+}
+
+define i1 @toBool(i32 %p0) {
+entry:
+  %r11 = alloca i32
+  store i32 %p0, ptr %r11
+  %r12 = load i32, ptr %r11
+  %r13 = icmp ne i32 %r12, 0
+  ret i1 %r13
+}
+
+define i32 @fromBool(i1 %p0) {
+entry:
+  %r14 = alloca i1
+  store i1 %p0, ptr %r14
+  %r15 = load i1, ptr %r14
+  %r16 = zext i1 %r15 to i32
+  ret i32 %r16
+}
+
+define i64 @ptrToUintptr(ptr %p0) {
+entry:
+  %r17 = alloca ptr
+  store ptr %p0, ptr %r17
+  %r18 = load ptr, ptr %r17
+  %r19 = ptrtoint ptr %r18 to i64
+  ret i64 %r19
+}
+
+define ptr @uintptrToPtr(i64 %p0) {
+entry:
+  %r20 = alloca i64
+  store i64 %p0, ptr %r20
+  %r21 = load i64, ptr %r20
+  %r22 = inttoptr i64 %r21 to ptr
+  ret ptr %r22
+}
+
+define ptr @ptrToPtr(ptr %p0) {
+entry:
+  %r23 = alloca ptr
+  store ptr %p0, ptr %r23
+  %r24 = load ptr, ptr %r23
+  ret ptr %r24
+}
+
+define i64 @sizes(i32 %p0) {
+entry:
+  %r25 = alloca i32
+  store i32 %p0, ptr %r25
+  %r26 = alloca i64
+  %r27 = alloca i64
+  %r28 = alloca i64
+  %r29 = sext i32 8 to i64
+  store i64 %r29, ptr %r26
+  %r30 = sext i32 40 to i64
+  store i64 %r30, ptr %r27
+  %r31 = sext i32 7 to i64
+  store i64 %r31, ptr %r28
+  %r32 = load i64, ptr %r26
+  ret i64 %r32
+}
+
+define i32 @main() {
+entry:
+  ret i32 0
+}
+

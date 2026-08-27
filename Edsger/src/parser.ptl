@@ -661,7 +661,12 @@ struct ASTNode {
 // 152 STRUCT_LIT     tok = struct name; first_child = FIELD_INIT chain
 // 153 ARRAY_LIT      tok = opening `{`; first_child = element expr chain
 // 154 FIELD_INIT     tok = field name; left = value expr
-// 155 SIZEOF_EXPR    left = operand expr (nullable) XOR data_type = operand type (nullable)
+// 155 SIZEOF_EXPR    tok = `sizeof`/`lengthof` keyword; left = operand expr (nullable) XOR extra = operand
+//                    type (nullable, set here by the parser); data_type
+//                    is NOT this node's own operand-type slot -- Module
+//                    3 fills it with the whole expression's OWN result
+//                    type (like every other node), so `extra` is where
+//                    the measured type actually still lives afterward
 // 156 LENGTHOF_EXPR  same as SIZEOF_EXPR
 
 struct Parser {
@@ -1030,13 +1035,14 @@ function parse_sizeof_or_lengthof(p: *Parser, node_kind: uint32) : *ASTNode {
   mut ty : *ASTNode := null;
   mut ex : *ASTNode := null;
 
+  (*n).tok := cur_tok(p);
   advance(p);
   if (!expect(p, 54)) { return null; }
 
   save := mark(p);
   ty := parse_type(p);
   if (!(*p).had_error && cur_kind(p) == 55) {
-    (*n).data_type := ty;
+    (*n).extra := ty;
     advance(p);
     return n;
   }

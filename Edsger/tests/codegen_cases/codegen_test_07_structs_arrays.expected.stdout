@@ -1,0 +1,72 @@
+%Point = type <{ i32, i32 }>
+define i32 @makeSum(%Point %p0) {
+entry:
+  %r0 = alloca %Point
+  store %Point %p0, ptr %r0
+  %r1 = getelementptr %Point, ptr %r0, i32 0, i32 0
+  %r2 = load i32, ptr %r1
+  %r3 = getelementptr %Point, ptr %r0, i32 0, i32 1
+  %r4 = load i32, ptr %r3
+  %r5 = add i32 %r2, %r4
+  ret i32 %r5
+}
+
+define void @bump(ptr %p0) {
+entry:
+  %r6 = alloca ptr
+  store ptr %p0, ptr %r6
+  %r7 = load ptr, ptr %r6
+  %r8 = getelementptr %Point, ptr %r7, i32 0, i32 0
+  %r9 = load ptr, ptr %r6
+  %r10 = getelementptr %Point, ptr %r9, i32 0, i32 0
+  %r11 = load i32, ptr %r10
+  %r12 = add i32 %r11, 1
+  store i32 %r12, ptr %r8
+  ret void
+}
+
+define i32 @structDemo() {
+entry:
+  %r13 = alloca %Point
+  %r14 = getelementptr %Point, ptr %r13, i32 0, i32 0
+  store i32 3, ptr %r14
+  %r15 = getelementptr %Point, ptr %r13, i32 0, i32 1
+  store i32 4, ptr %r15
+  call void @bump(ptr %r13)
+  %r16 = load %Point, ptr %r13
+  %r17 = call i32 @makeSum(%Point %r16)
+  ret i32 %r17
+}
+
+define i32 @arrayDemo() {
+entry:
+  %r18 = alloca [3 x i32]
+  %r19 = alloca i32
+  store i32 0, ptr %r19
+  %r20 = getelementptr [3 x i32], ptr %r18, i32 0, i32 0
+  store i32 10, ptr %r20
+  %r21 = getelementptr [3 x i32], ptr %r18, i32 0, i32 1
+  store i32 20, ptr %r21
+  %r22 = getelementptr [3 x i32], ptr %r18, i32 0, i32 2
+  store i32 30, ptr %r22
+  store i32 1, ptr %r19
+  %r23 = getelementptr [3 x i32], ptr %r18, i32 0, i32 0
+  %r24 = load i32, ptr %r23
+  %r25 = load i32, ptr %r19
+  %r26 = getelementptr [3 x i32], ptr %r18, i32 0, i32 %r25
+  %r27 = load i32, ptr %r26
+  %r28 = add i32 %r24, %r27
+  %r29 = getelementptr [3 x i32], ptr %r18, i32 0, i32 2
+  %r30 = load i32, ptr %r29
+  %r31 = add i32 %r28, %r30
+  ret i32 %r31
+}
+
+define i32 @main() {
+entry:
+  %r32 = call i32 @structDemo()
+  %r33 = call i32 @arrayDemo()
+  %r34 = add i32 %r32, %r33
+  ret i32 %r34
+}
+

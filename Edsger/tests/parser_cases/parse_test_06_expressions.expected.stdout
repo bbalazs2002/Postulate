@@ -232,16 +232,16 @@
                 L:
                   #148
                     L:
-                      #155
-                        T:
+                      #155 sizeof
+                        X:
                           #120 Point
                     T:
                       #120 int32
                 R:
                   #148
                     L:
-                      #155
-                        T:
+                      #155 sizeof
+                        X:
                           #120 a
                     T:
                       #120 int32
@@ -254,16 +254,16 @@
                 L:
                   #148
                     L:
-                      #156
-                        T:
+                      #156 lengthof
+                        X:
                           #120 list
                     T:
                       #120 int32
                 R:
                   #148
                     L:
-                      #156
-                        T:
+                      #156 lengthof
+                        X:
                           #120 arr
                     T:
                       #120 int32

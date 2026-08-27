@@ -1,0 +1,48 @@
+namespace \Main;
+
+function widenSigned(x: int8) : int64 {
+  return x as int64;
+}
+
+function widenUnsigned(x: uint8) : int64 {
+  return x as int64;
+}
+
+function narrow(x: int64) : int32 {
+  return x as int32;
+}
+
+function sameWidth(x: int32) : uint32 {
+  return x as uint32;
+}
+
+function toBool(x: int32) : bool {
+  return x as bool;
+}
+
+function fromBool(x: bool) : int32 {
+  return x as int32;
+}
+
+function ptrToUintptr(p: *int32) : uintptr {
+  return p as uintptr;
+}
+
+function uintptrToPtr(u: uintptr) : *int32 {
+  return u as *int32;
+}
+
+function ptrToPtr(p: *int32) : *int64 {
+  return p as *int64;
+}
+
+function sizes(x: int32) : int64 {
+  mut n : int64 := sizeof(int64) as int64;
+  mut m : int64 := sizeof(int32[10]) as int64;
+  mut l : int64 := lengthof(int32[7]) as int64;
+  return n;
+}
+
+function main() : int32 {
+  return 0;
+}

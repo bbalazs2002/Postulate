@@ -1,0 +1,11 @@
+namespace \Main;
+
+function add(a: int32, b: int32) : int32 {
+  return a + b;
+}
+
+function main() : int32 {
+  mut x : int32 := 5;
+  mut y : int32 := 3;
+  return add(x, y);
+}

@@ -1,0 +1,2 @@
+sema warning: cast from 'int64' to 'int32' may lose or reinterpret its value at line 12, col 10
+sema warning: cast from 'int32' to 'uint32' may lose or reinterpret its value at line 16, col 10
