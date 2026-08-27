@@ -845,6 +845,27 @@ function append_uint_e(out: *(uint8[256]), pos: uint64, value: uint64) : uint64 
   return new_pos;
 }
 
+// Appends src[off .. off+ln) straight into the (small) error buffer --
+// the "offending code part" of a diagnostic, sourced generically from
+// whatever offset/length the failing token already carries, rather
+// than a separately captured single-byte variable. Currently only
+// kind 254 (unexpected character) has a non-zero tok.length by the
+// time a diagnostic is built (every other error kind's token spans
+// zero bytes -- see lex_next), so this is a no-op append for those,
+// not a behavior change; the mechanism is what's new; more error
+// kinds start showing a snippet automatically if their token ever
+// gains a real length, with nothing here needing to change.
+function append_snippet_e(out: *(uint8[256]), pos: uint64, src: *(uint8[65536]), off: uint64, ln: uint64) : uint64 {
+  mut i : uint64 := 0;
+  mut new_pos : uint64 := pos;
+  while (i < ln) {
+    (*out)[new_pos] := (*src)[off + i];
+    new_pos := new_pos + 1;
+    i := i + 1;
+  }
+  return new_pos;
+}
+
 function append_hex_byte_e(out: *(uint8[256]), pos: uint64, b: uint8) : uint64 {
   mut hi : uint8 := b / 16;
   mut lo : uint8 := b % 16;
@@ -889,7 +910,6 @@ function main() : int32 {
   mut reader : SourceReader := SourceReader { buffer := &src_buf, length := 0, cursor := 0 };
   mut tok : Token := Token { kind := 0, offset := 0, length := 0 };
   mut got_error : bool := false;
-  mut err_byte : uint8 := 0;
   mut lc : LineCol := LineCol { line := 0, col := 0 };
   mut exit_code : int64 := 0;
   mut wrote_ok : bool := true;
@@ -979,9 +999,6 @@ function main() : int32 {
     } else {
       if (tok.kind >= 247 && tok.kind <= 254) {
         got_error := true;
-        if (tok.kind == 254 && tok.length == 1 && tok.offset < src_len) {
-          err_byte := src_buf[tok.offset];
-        }
         lexing := false;
       } else {
         if (tok.kind == 1) {
@@ -1091,9 +1108,9 @@ function main() : int32 {
                    err_pos := append_str_e(&err_buf, err_pos, &err_at_line_bare, 9);
                  } else {
                   err_pos := append_str_e(&err_buf, err_pos, &err1_a, 33);
-                  err_pos := append_byte_e(&err_buf, err_pos, err_byte);
+                  err_pos := append_snippet_e(&err_buf, err_pos, &src_buf, tok.offset, tok.length);
                   err_pos := append_str_e(&err_buf, err_pos, &err1_c, 5);
-                  err_pos := append_hex_byte_e(&err_buf, err_pos, err_byte);
+                  err_pos := append_hex_byte_e(&err_buf, err_pos, src_buf[tok.offset]);
                   err_pos := append_str_e(&err_buf, err_pos, &err_at_line, 10);
                  }
                 }

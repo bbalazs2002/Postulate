@@ -1,0 +1,9 @@
+namespace \Main;
+
+@autoload("\Vendor\Math\", "libs/math/src");
+@autoload("\Plugin\:module\", "plugins/:module/src", verified);
+@autoload("\Std\", "stdlib/src", unverified);
+
+function main() : int32 {
+  return 0;
+}

@@ -1,0 +1,597 @@
+// Edsger -- semantic analyzer module, v1.0.6 (Module 3), FIRST SLICE.
+// Written in Postulate v0, compiled by Hoare (Stage 0).
+//
+// Module 3's full scope (docs/postulate_stage1_v1_0_6_edsger_design.md,
+// "Module 3") is symbol-table construction, use/@autoload resolution,
+// and type checking/decoration -- built as a two-pass, worklist-driven
+// whole-program analysis (declare every top-level declaration across
+// every reachable file first, THEN check every function body, since by
+// then every symbol any body could reference already exists -- no
+// topological ordering, no deadlock on mutually-`use`-ing namespaces).
+// That whole design is agreed but not yet implemented here.
+//
+// This file is the FIRST, self-contained slice: the @autoload pattern-
+// matching / path-resolution algorithm (postulate_v1_language_
+// reference.md SS6.2b) on its own, built and unit-tested standalone
+// before the rest of Module 3 (symbol table, two-pass declare-then-
+// check, type rules, struct value-cycle detection) is added in a
+// follow-up step -- same module-by-module, incrementally-verified
+// discipline as lexer.ptl/parser.ptl. This was called out explicitly
+// for thorough testing, independent of everything else Module 3 will
+// eventually need.
+//
+// Algorithm:
+//   - A pattern/path string's content is a "\"-separated (pattern) or
+//     "/"-separated (path) sequence of literal segments and
+//     ":label" placeholders -- a pattern segment starting with ":"
+//     binds whatever fqn segment sits in the same position; a path
+//     segment starting with ":" is replaced by that binding's value.
+//   - resolve(fqn, rules[]): try each rule in declaration order; a
+//     rule matches if its pattern's segments are a strict PREFIX of
+//     the fqn's own segments (at least one fqn segment must remain
+//     unconsumed -- a match with nothing left over has no filename to
+//     resolve to). On the first match, substitute every ":label" in
+//     the rule's path string with its bound segment, then append the
+//     fqn's remaining segments the same way the default rule would
+//     (directories for all but the last, ".ptl" on the last). No rule
+//     matching falls back to the default 1:1 rule over the WHOLE fqn.
+//   - A pattern that defines the same ":label" twice is a compile
+//     error, flagged at the SECOND occurrence only (not both) -- this
+//     session's own explicit refinement, mirroring how the struct
+//     value-cycle check (not yet implemented -- needs the symbol table
+//     this slice doesn't have yet) will also flag only the second
+//     encounter of a struct already being sized, not every node in the
+//     cycle.
+//
+// Test harness (main(), below): a plain line-based protocol, NOT the
+// real "extract a pure_string_literal's content" path (STRING_LIT
+// tokens carry their surrounding quotes in their own offset/length --
+// whoever wires this into the real multi-file driver later must slice
+// (offset+1, length-2) to drop them; this harness's input lines have no
+// quotes at all, since the algorithm under test only ever deals with
+// raw byte spans regardless of how they were obtained):
+//   line 1:        the fqn, e.g. \Plugin\Foo\Bar
+//   line 2:        rule count N
+//   next N groups of 3 lines: pattern, path, trust digit (0/1/2)
+// stdout: the resolved path + newline, on success.
+// stderr + exit 1: a duplicate-placeholder diagnostic, if any rule's
+// own pattern is malformed -- checked for ALL rules before any
+// resolution is attempted, matching how a real compiler would reject
+// the whole program rather than resolve against a half-validated rule
+// set.
+
+extern function sys_read(fd: int64, buf: *uint8, count: uint64) : int64;
+extern function sys_write(fd: int64, buf: *uint8, count: uint64) : int64;
+extern function sys_exit(code: int64) : void;
+
+struct Segment {
+  offset : uint64;
+  length : uint64;
+}
+
+struct Binding {
+  label_offset : uint64;
+  label_length : uint64;
+  value_offset : uint64;
+  value_length : uint64;
+}
+
+struct AutoloadRule {
+  pattern_offset : uint64;
+  pattern_length : uint64;
+  path_offset : uint64;
+  path_length : uint64;
+  trust : int32;
+}
+
+struct ValidateResult {
+  ok : bool;
+  dup_offset : uint64;
+  dup_length : uint64;
+}
+
+struct MatchResult {
+  matched : bool;
+  binding_count : uint64;
+  consumed : uint64;
+}
+
+struct ResolveResult {
+  length : uint64;
+  matched_rule : int64;
+}
+
+struct LookupResult {
+  found : bool;
+  index : uint64;
+}
+
+struct LineResult {
+  offset : uint64;
+  length : uint64;
+  next : uint64;
+  has_line : bool;
+}
+
+function bytes_equal(src: *(uint8[65536]), off1: uint64, len1: uint64, off2: uint64, len2: uint64) : bool {
+  mut i : uint64 := 0;
+  mut eq : bool := true;
+
+  if (len1 != len2) {
+    return false;
+  }
+  while (i < len1) {
+    if ((*src)[off1 + i] != (*src)[off2 + i]) {
+      eq := false;
+    }
+    i := i + 1;
+  }
+  return eq;
+}
+
+// Splits src[off..off+len) on `sep`, skipping one leading `sep` (a
+// pattern/fqn's own leading "\") and one trailing `sep` (a pattern
+// like "\Vendor\Math\" ends on one -- that's a delimiter, not an empty
+// final segment) -- everything else between separators is a segment,
+// empty ones included, since a genuinely empty segment (two separators
+// back to back) is a malformed pattern this deliberately doesn't paper
+// over.
+function split_path(src: *(uint8[65536]), off: uint64, len: uint64, sep: uint8, out: *(Segment[16])) : uint64 {
+  mut count : uint64 := 0;
+  mut i : uint64 := off;
+  mut end : uint64 := off + len;
+  mut seg_start : uint64 := off;
+
+  if (i < end && (*src)[i] == sep) {
+    i := i + 1;
+    seg_start := i;
+  }
+
+  while (i < end) {
+    if ((*src)[i] == sep) {
+      (*out)[count] := Segment { offset := seg_start, length := i - seg_start };
+      count := count + 1;
+      i := i + 1;
+      seg_start := i;
+    } else {
+      i := i + 1;
+    }
+  }
+  if (end > seg_start) {
+    (*out)[count] := Segment { offset := seg_start, length := end - seg_start };
+    count := count + 1;
+  }
+  return count;
+}
+
+// Every ":label" a pattern defines must be unique WITHIN that pattern
+// -- flags the SECOND occurrence's own position, not the first (the
+// first is a legitimate definition; only a repeat is the error).
+function validate_pattern(src: *(uint8[65536]), pat_off: uint64, pat_len: uint64) : ValidateResult {
+  mut segs : Segment[16];
+  mut seg_count : uint64 := split_path(src, pat_off, pat_len, 92, &segs);
+  mut seen : Segment[16];
+  mut seen_count : uint64 := 0;
+  mut i : uint64 := 0;
+  mut j : uint64 := 0;
+  mut label_off : uint64 := 0;
+  mut label_len : uint64 := 0;
+  mut dup : bool := false;
+  mut dup_off : uint64 := 0;
+  mut dup_len : uint64 := 0;
+
+  while (i < seg_count && !dup) {
+    if (segs[i].length > 0 && (*src)[segs[i].offset] == 58) {
+      label_off := segs[i].offset + 1;
+      label_len := segs[i].length - 1;
+      j := 0;
+      while (j < seen_count && !dup) {
+        if (bytes_equal(src, label_off, label_len, seen[j].offset, seen[j].length)) {
+          dup := true;
+          dup_off := segs[i].offset;
+          dup_len := segs[i].length;
+        }
+        j := j + 1;
+      }
+      if (!dup) {
+        seen[seen_count] := Segment { offset := label_off, length := label_len };
+        seen_count := seen_count + 1;
+      }
+    }
+    i := i + 1;
+  }
+
+  return ValidateResult { ok := !dup, dup_offset := dup_off, dup_length := dup_len };
+}
+
+// A rule's pattern matches iff every one of its own segments lines up
+// against the fqn's leading segments (a ":label" segment matches any
+// one fqn segment and binds it; a literal segment must match exactly)
+// AND at least one fqn segment is left over afterward -- a match that
+// consumes the whole fqn has no filename left to resolve to.
+function match_pattern(src: *(uint8[65536]), fqn_segs: *(Segment[16]), fqn_count: uint64, pat_off: uint64, pat_len: uint64, out_bindings: *(Binding[16])) : MatchResult {
+  mut pat_segs : Segment[16];
+  mut pat_count : uint64 := split_path(src, pat_off, pat_len, 92, &pat_segs);
+  mut i : uint64 := 0;
+  mut ok : bool := true;
+  mut bcount : uint64 := 0;
+
+  if (pat_count >= fqn_count) {
+    return MatchResult { matched := false, binding_count := 0, consumed := 0 };
+  }
+
+  while (i < pat_count && ok) {
+    if (pat_segs[i].length > 0 && (*src)[pat_segs[i].offset] == 58) {
+      (*out_bindings)[bcount] := Binding {
+        label_offset := pat_segs[i].offset + 1,
+        label_length := pat_segs[i].length - 1,
+        value_offset := (*fqn_segs)[i].offset,
+        value_length := (*fqn_segs)[i].length
+      };
+      bcount := bcount + 1;
+    } else {
+      if (!bytes_equal(src, pat_segs[i].offset, pat_segs[i].length, (*fqn_segs)[i].offset, (*fqn_segs)[i].length)) {
+        ok := false;
+      }
+    }
+    i := i + 1;
+  }
+
+  return MatchResult { matched := ok, binding_count := bcount, consumed := pat_count };
+}
+
+function lookup_binding(src: *(uint8[65536]), bindings: *(Binding[16]), bcount: uint64, label_off: uint64, label_len: uint64) : LookupResult {
+  mut i : uint64 := 0;
+  mut found : bool := false;
+  mut idx : uint64 := 0;
+
+  while (i < bcount) {
+    if (!found && bytes_equal(src, label_off, label_len, (*bindings)[i].label_offset, (*bindings)[i].label_length)) {
+      found := true;
+      idx := i;
+    }
+    i := i + 1;
+  }
+  return LookupResult { found := found, index := idx };
+}
+
+function append_path_slice(out: *(uint8[512]), pos: uint64, src: *(uint8[65536]), off: uint64, ln: uint64) : uint64 {
+  mut i : uint64 := 0;
+  mut new_pos : uint64 := pos;
+  while (i < ln) {
+    (*out)[new_pos] := (*src)[off + i];
+    new_pos := new_pos + 1;
+    i := i + 1;
+  }
+  return new_pos;
+}
+
+function append_path_byte(out: *(uint8[512]), pos: uint64, b: uint8) : uint64 {
+  (*out)[pos] := b;
+  return pos + 1;
+}
+
+// Appends fqn segments [start, total) as the default 1:1 mapping would
+// -- "/"-joined directories for all but the last, ".ptl" glued onto
+// the last. `need_leading_slash` is true when these segments continue
+// an already-written rule path (need a "/" even before the very first
+// one here); false when this call is building the whole default path
+// from nothing (no leading "/" on a from-scratch relative path).
+function append_remaining_segments(out: *(uint8[512]), pos: uint64, src: *(uint8[65536]), segs: *(Segment[16]), start: uint64, total: uint64, need_leading_slash: bool) : uint64 {
+  mut new_pos : uint64 := pos;
+  mut i : uint64 := start;
+
+  while (i < total) {
+    if (i > start || need_leading_slash) {
+      new_pos := append_path_byte(out, new_pos, 47);
+    }
+    new_pos := append_path_slice(out, new_pos, src, (*segs)[i].offset, (*segs)[i].length);
+    if (i == total - 1) {
+      new_pos := append_path_byte(out, new_pos, 46);
+      new_pos := append_path_byte(out, new_pos, 112);
+      new_pos := append_path_byte(out, new_pos, 116);
+      new_pos := append_path_byte(out, new_pos, 108);
+    }
+    i := i + 1;
+  }
+  return new_pos;
+}
+
+function uint64_to_int64(n: uint64) : int64 {
+  mut result : int64 := 0;
+  mut steps : uint64 := n;
+  while (steps > 0) {
+    result := result + 1;
+    steps := steps - 1;
+  }
+  return result;
+}
+
+// First-match-wins, checked top-to-bottom (postulate_v1_language_
+// reference.md SS6.2b); no match falls back to the plain default rule
+// over the whole fqn. Caller is expected to have already validated
+// every rule's own pattern (validate_pattern) -- this function assumes
+// well-formed rules, it doesn't re-check them.
+function resolve_path(src: *(uint8[65536]), fqn_off: uint64, fqn_len: uint64, rules: *(AutoloadRule[32]), rule_count: uint64, out: *(uint8[512])) : ResolveResult {
+  mut fqn_segs : Segment[16];
+  mut fqn_count : uint64 := split_path(src, fqn_off, fqn_len, 92, &fqn_segs);
+  mut r : uint64 := 0;
+  mut bindings : Binding[16];
+  mut mr : MatchResult := MatchResult { matched := false, binding_count := 0, consumed := 0 };
+  mut matched_rule : int64 := -1;
+  mut pos : uint64 := 0;
+  mut path_segs : Segment[16];
+  mut path_count : uint64 := 0;
+  mut i : uint64 := 0;
+  mut lb : LookupResult := LookupResult { found := false, index := 0 };
+
+  while (r < rule_count && !mr.matched) {
+    mr := match_pattern(src, &fqn_segs, fqn_count, (*rules)[r].pattern_offset, (*rules)[r].pattern_length, &bindings);
+    if (!mr.matched) {
+      r := r + 1;
+    }
+  }
+
+  if (mr.matched) {
+    matched_rule := uint64_to_int64(r);
+    path_count := split_path(src, (*rules)[r].path_offset, (*rules)[r].path_length, 47, &path_segs);
+    i := 0;
+    while (i < path_count) {
+      if (i > 0) {
+        pos := append_path_byte(out, pos, 47);
+      }
+      if (path_segs[i].length > 0 && (*src)[path_segs[i].offset] == 58) {
+        lb := lookup_binding(src, &bindings, mr.binding_count, path_segs[i].offset + 1, path_segs[i].length - 1);
+        if (lb.found) {
+          pos := append_path_slice(out, pos, src, bindings[lb.index].value_offset, bindings[lb.index].value_length);
+        }
+      } else {
+        pos := append_path_slice(out, pos, src, path_segs[i].offset, path_segs[i].length);
+      }
+      i := i + 1;
+    }
+    pos := append_remaining_segments(out, pos, src, &fqn_segs, mr.consumed, fqn_count, true);
+  } else {
+    pos := append_remaining_segments(out, pos, src, &fqn_segs, 0, fqn_count, false);
+  }
+
+  return ResolveResult { length := pos, matched_rule := matched_rule };
+}
+
+// ---------------------------------------------------------------------
+// Line-based test harness -- see the file header for the exact
+// protocol. Not the real multi-file driver (which doesn't exist yet);
+// a focused unit-test rig for the resolution algorithm above.
+// ---------------------------------------------------------------------
+
+function read_line(buf: *(uint8[65536]), len: uint64, cursor: uint64) : LineResult {
+  mut i : uint64 := cursor;
+  mut next_cursor : uint64 := 0;
+
+  if (cursor >= len) {
+    return LineResult { offset := cursor, length := 0, next := cursor, has_line := false };
+  }
+  while (i < len && (*buf)[i] != 10) {
+    i := i + 1;
+  }
+  if (i < len) {
+    next_cursor := i + 1;
+  } else {
+    next_cursor := i;
+  }
+  return LineResult { offset := cursor, length := i - cursor, next := next_cursor, has_line := true };
+}
+
+function uint64_of_digit(b: uint8) : uint64 {
+  mut r : uint64 := 0;
+  if (b == 49) { r := 1; }
+  if (b == 50) { r := 2; }
+  if (b == 51) { r := 3; }
+  if (b == 52) { r := 4; }
+  if (b == 53) { r := 5; }
+  if (b == 54) { r := 6; }
+  if (b == 55) { r := 7; }
+  if (b == 56) { r := 8; }
+  if (b == 57) { r := 9; }
+  return r;
+}
+
+function int32_of_digit(b: uint8) : int32 {
+  mut r : int32 := 0;
+  if (b == 49) { r := 1; }
+  if (b == 50) { r := 2; }
+  return r;
+}
+
+function parse_uint_line(buf: *(uint8[65536]), off: uint64, len: uint64) : uint64 {
+  mut i : uint64 := 0;
+  mut v : uint64 := 0;
+  while (i < len) {
+    v := v * 10 + uint64_of_digit((*buf)[off + i]);
+    i := i + 1;
+  }
+  return v;
+}
+
+function int64_to_uint64(n: int64) : uint64 {
+  mut result : uint64 := 0;
+  mut steps : int64 := n;
+  while (steps > 0) {
+    result := result + 1;
+    steps := steps - 1;
+  }
+  return result;
+}
+
+function write_all(fd: int64, buf: *(uint8[512]), total: uint64) : bool {
+  mut pos : uint64 := 0;
+  mut n : int64 := 0;
+  mut ok : bool := true;
+  mut looping : bool := true;
+
+  while (looping) {
+    if (pos >= total) {
+      looping := false;
+    } else {
+      n := sys_write(fd, &(*buf)[pos], total - pos);
+      if (n < 0) {
+        ok := false;
+        looping := false;
+      } else {
+        pos := pos + int64_to_uint64(n);
+      }
+    }
+  }
+  return ok;
+}
+
+function append_str_e(out: *(uint8[256]), pos: uint64, s: *(uint8[80]), s_len: uint64) : uint64 {
+  mut i : uint64 := 0;
+  mut new_pos : uint64 := pos;
+  while (i < s_len) {
+    (*out)[new_pos] := (*s)[i];
+    new_pos := new_pos + 1;
+    i := i + 1;
+  }
+  return new_pos;
+}
+
+function append_snippet_e(out: *(uint8[256]), pos: uint64, src: *(uint8[65536]), off: uint64, ln: uint64) : uint64 {
+  mut i : uint64 := 0;
+  mut new_pos : uint64 := pos;
+  while (i < ln) {
+    (*out)[new_pos] := (*src)[off + i];
+    new_pos := new_pos + 1;
+    i := i + 1;
+  }
+  return new_pos;
+}
+
+function append_byte_e(out: *(uint8[256]), pos: uint64, b: uint8) : uint64 {
+  (*out)[pos] := b;
+  return pos + 1;
+}
+
+function write_all_small(fd: int64, buf: *(uint8[256]), total: uint64) : bool {
+  mut pos : uint64 := 0;
+  mut n : int64 := 0;
+  mut ok : bool := true;
+  mut looping : bool := true;
+
+  while (looping) {
+    if (pos >= total) {
+      looping := false;
+    } else {
+      n := sys_write(fd, &(*buf)[pos], total - pos);
+      if (n < 0) {
+        ok := false;
+        looping := false;
+      } else {
+        pos := pos + int64_to_uint64(n);
+      }
+    }
+  }
+  return ok;
+}
+
+function main() : int32 {
+  mut in_buf : uint8[65536] := 0;
+  mut in_len : uint64 := 0;
+  mut reading : bool := true;
+  mut n : int64 := 0;
+  mut cursor : uint64 := 0;
+
+  mut fqn_line : LineResult := LineResult { offset := 0, length := 0, next := 0, has_line := false };
+  mut count_line : LineResult := LineResult { offset := 0, length := 0, next := 0, has_line := false };
+  mut rule_count : uint64 := 0;
+  mut i : uint64 := 0;
+  mut pat_line : LineResult := LineResult { offset := 0, length := 0, next := 0, has_line := false };
+  mut path_line : LineResult := LineResult { offset := 0, length := 0, next := 0, has_line := false };
+  mut trust_line : LineResult := LineResult { offset := 0, length := 0, next := 0, has_line := false };
+
+  mut rules : AutoloadRule[32];
+  mut vr : ValidateResult := ValidateResult { ok := true, dup_offset := 0, dup_length := 0 };
+  mut had_error : bool := false;
+
+  mut out_buf : uint8[512] := 0;
+  mut resres : ResolveResult := ResolveResult { length := 0, matched_rule := -1 };
+
+  mut err_buf : uint8[256] := 0;
+  mut err_pos : uint64 := 0;
+  mut wrote_ok : bool := true;
+  mut exit_code : int64 := 0;
+
+  mut msg_dup : uint8[80] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 100, 117, 112, 108, 105, 99, 97, 116, 101, 32, 97, 117, 116, 111, 108, 111, 97, 100, 32, 112, 108, 97, 99, 101, 104, 111, 108, 100, 101, 114, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_dup_close : uint8[80] := {39, 32, 105, 110, 32, 112, 97, 116, 116, 101, 114, 110, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+
+  while (reading) {
+    if (in_len >= 65536) {
+      reading := false;
+    } else {
+      n := sys_read(0, &in_buf[in_len], 65536 - in_len);
+      if (n < 0) {
+        reading := false;
+      } else {
+        if (n == 0) {
+          reading := false;
+        } else {
+          in_len := in_len + int64_to_uint64(n);
+        }
+      }
+    }
+  }
+
+  fqn_line := read_line(&in_buf, in_len, cursor);
+  cursor := fqn_line.next;
+  count_line := read_line(&in_buf, in_len, cursor);
+  cursor := count_line.next;
+  rule_count := parse_uint_line(&in_buf, count_line.offset, count_line.length);
+
+  i := 0;
+  while (i < rule_count) {
+    pat_line := read_line(&in_buf, in_len, cursor);
+    cursor := pat_line.next;
+    path_line := read_line(&in_buf, in_len, cursor);
+    cursor := path_line.next;
+    trust_line := read_line(&in_buf, in_len, cursor);
+    cursor := trust_line.next;
+
+    rules[i] := AutoloadRule {
+      pattern_offset := pat_line.offset,
+      pattern_length := pat_line.length,
+      path_offset := path_line.offset,
+      path_length := path_line.length,
+      trust := int32_of_digit(in_buf[trust_line.offset])
+    };
+    i := i + 1;
+  }
+
+  i := 0;
+  while (i < rule_count && !had_error) {
+    vr := validate_pattern(&in_buf, rules[i].pattern_offset, rules[i].pattern_length);
+    if (!vr.ok) {
+      had_error := true;
+    }
+    i := i + 1;
+  }
+
+  if (had_error) {
+    exit_code := 1;
+    err_pos := append_str_e(&err_buf, err_pos, &msg_dup, 44);
+    err_pos := append_snippet_e(&err_buf, err_pos, &in_buf, vr.dup_offset, vr.dup_length);
+    err_pos := append_str_e(&err_buf, err_pos, &msg_dup_close, 12);
+    err_pos := append_byte_e(&err_buf, err_pos, 10);
+    wrote_ok := write_all_small(2, &err_buf, err_pos);
+  } else {
+    resres := resolve_path(&in_buf, fqn_line.offset, fqn_line.length, &rules, rule_count, &out_buf);
+    out_buf[resres.length] := 10;
+    wrote_ok := write_all(1, &out_buf, resres.length + 1);
+  }
+
+  if (!wrote_ok) {
+    exit_code := 2;
+  }
+
+  sys_exit(exit_code);
+  return 0;
+}

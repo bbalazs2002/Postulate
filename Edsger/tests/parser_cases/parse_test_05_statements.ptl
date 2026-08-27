@@ -1,0 +1,26 @@
+namespace \Main;
+
+extern function noop() : void;
+
+function classify(x : int32) : int32 {
+  mut a : int32 := 1;
+  mut c : int32 := 2;
+  const b : int32 := 2;
+  mut result : int32 := 0;
+
+  if (x > 0) {
+    result := 1;
+  } else {
+    result := 0;
+  }
+
+  while (a < 10) {
+    a := a + 1;
+  }
+
+  a := c, c := a;
+
+  noop();
+
+  return result;
+}

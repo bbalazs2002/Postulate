@@ -1,0 +1,5 @@
+\Plugin\Foo\Bar
+1
+\Plugin\:module\:module\
+plugins/:module/src
+0
