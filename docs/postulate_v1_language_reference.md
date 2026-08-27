@@ -878,7 +878,17 @@ indexing.
 
 ### 4.1 Declarations (`decl`)
 
-Unchanged from v0 (§4.1 there).
+Unchanged from v0 (§4.1 there): `mut`/`const` grammar, mandatory-vs-
+optional initialization by type, and the fixed "every `decl` precedes
+every statement in a `func_block`" placement rule all carry over as-is.
+Restated here rather than left to the cross-reference alone, since it's
+easy to miss and is not a v0-only affordance dropped in v1: for an
+array-typed `mut`/`const`, a single scalar expression (not an array
+literal) is a valid initializer and is **broadcast** to every element —
+`mut arr : int32[10] := 0;` sets all 10 elements to `0`. An array
+literal (§3.8) initializes each element individually instead; the two
+are mutually exclusive shapes for the same initializer position, not a
+literal-with-a-broadcast-fallback.
 
 ### 4.2 Assignment (`assign_stmt`)
 
@@ -912,6 +922,20 @@ semantics exactly like a plain `:=` pair would — `total :+ x, x := 0;`
 computes `total + x` from the state *before* the statement runs (same
 rule as any other pair's right-hand side), then performs both
 assignments together.
+
+**Also unchanged from v0 (§4.2 there), restated explicitly since §4.2's
+own rewrite above is easy to misread as replacing rather than
+extending it:** for a plain `:=` pair, the right-hand side may still be
+a plain expression, a struct/array literal, a plain-copy source of the
+same composite type (`p2 := p1;`), or — for an array-typed `lvalue` —
+a scalar **broadcast** source, matching the same shapes and rules as a
+`decl` initializer (§4.1): `arr := 0;` overwrites every element of an
+already-declared array `arr` with `0`, exactly like its initializer
+form would have. This broadcast permission is specific to `:=` — the
+four compound forms above are pure sugar for the *scalar* form of their
+underlying binary operator (§3.2), which has no array-operand shape at
+all, so `arr :+ 1;` for an array-typed `arr` is a plain type error, not
+an element-wise broadcast-add.
 
 **Resolution: context-sensitive lexing, not a spacing convention.** `:*`
 can look like it collides with a *type* — a pointer type also starts

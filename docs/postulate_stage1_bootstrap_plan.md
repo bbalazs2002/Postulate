@@ -353,7 +353,8 @@ its job.
 | `v1.1.9` | Verification contracts, part 2: the opt-in checked-build codegen mode (§7.3–§7.5) — runtime assertions at every specified checkpoint, halt-with-diagnostic on failure. | Split from `v1.1.8` deliberately: parsing/checking a contract correctly and *emitting code* for one are separably testable, and this is the riskier of the two. |
 | `v1.1.10` | Static verification: the Why3/WhyML translation path and `postulate verify` tool (§7.8) — modular, axiom-per-`use`d-contract, `verified`-prefix-aware, incremental per `v1.1.1`'s own cache. Also where the cache's own remaining open questions (`.proof` validity relative to `unverified`-trusted axioms; a compiler-generation/build-identity component in the cache key, so an Edsger upgrade can't silently serve stale `.pto`/`.proof` entries) get resolved. | Needs `v1.1.8`'s contract grammar/semantics and `v1.1.1`'s incremental-compilation machinery (reused, not reinvented, for verification caching); entirely optional and separate from the default build (§7.5/§7.8), so it can land after everything the default pipeline needs. |
 | `v1.1.11` | Bounds-checking diagnostic build (§2.7b) — array indexing checked against `lengthof` in an opt-in build. | Same opt-in-diagnostic-build mechanism `v1.1.9` already built; reuses it rather than inventing a second one. |
-| `v1.1.12` | Self-hosting closure: Edsger compiles itself (Hoare → Edsger₁ from source; Edsger₁ → Edsger₂ from the same source; Edsger₂'s output agrees with Edsger₁'s). | The actual bootstrap goal (`Stage1/README.md`'s opening line) — only meaningful once the full v1.0 surface exists, since Edsger's own source will by then use most of it. |
+| `v1.1.12` | Array **broadcast-init and broadcast-assignment** (reference §4.1/§4.2): a single scalar expression as a `decl` initializer or a plain `:=` right-hand side, targeting an array-typed `mut`/`const`/`lvalue`, sets every element to that one value. Already real, working v1 behavior once — Stage 1's own pre-rewrite proof of concept implements it (`v1.0.3`'s own composite work, table row above) — but never carried into Edsger's Sema/Codegen: `v1.0.6`'s composite-type round (types, locals, parameters/return, field/index access, whole-value copy, struct/array literals) has no scalar-to-array broadcast path at all, in either `check_expected`/`decorate_literal_with_expected` (Sema) or the codegen side. Found during that round and deliberately left unfixed there rather than touched after the round had already shipped and passed its own test suite. | Small and fully self-contained — depends only on `v1.0.6`'s existing array-type support, nothing from `v1.1.1`–`v1.1.11`. Sequenced last among the ordinary feature steps (immediately before self-hosting closure) simply because it was found after this list was already drafted, not because anything here actually depends on the rest of generation `1`. |
+| `v1.1.13` | Self-hosting closure: Edsger compiles itself (Hoare → Edsger₁ from source; Edsger₁ → Edsger₂ from the same source; Edsger₂'s output agrees with Edsger₁'s). | The actual bootstrap goal (`Stage1/README.md`'s opening line) — only meaningful once the full v1.0 surface exists, since Edsger's own source will by then use most of it. |
 
 ### Tracked checkpoint: struct-field layout, before `v1.0.6`
 
@@ -382,7 +383,7 @@ language generation.
 
 ## Beyond this plan
 
-Once `v1.1.12` closes the self-hosting loop, Hoare (Stage 0) becomes
+Once `v1.1.13` closes the self-hosting loop, Hoare (Stage 0) becomes
 historical — every future change targets Edsger's own source, compiled
 by itself, and further Edsger work continues as `v1.2.n`, `v1.3.n`, and
 so on — new compiler generations, still targeting v1, numbered exactly

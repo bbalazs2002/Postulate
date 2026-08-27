@@ -1,0 +1,105 @@
+%Point = type <{ i32, i32 }>
+%Line = type <{ %Point, %Point }>
+define i32 @sumPoint(%Point %p0) {
+entry:
+  %r0 = alloca %Point
+  store %Point %p0, ptr %r0
+  %r1 = getelementptr %Point, ptr %r0, i32 0, i32 0
+  %r2 = load i32, ptr %r1
+  %r3 = getelementptr %Point, ptr %r0, i32 0, i32 1
+  %r4 = load i32, ptr %r3
+  %r5 = add i32 %r2, %r4
+  ret i32 %r5
+}
+
+define i32 @structLitDemo() {
+entry:
+  %r6 = alloca %Point
+  %r7 = alloca %Line
+  %r8 = alloca %Point
+  %r9 = getelementptr %Point, ptr %r8, i32 0, i32 1
+  store i32 4, ptr %r9
+  %r10 = getelementptr %Point, ptr %r8, i32 0, i32 0
+  store i32 3, ptr %r10
+  %r11 = load %Point, ptr %r8
+  store %Point %r11, ptr %r6
+  %r12 = alloca %Line
+  %r13 = alloca %Point
+  %r14 = getelementptr %Point, ptr %r13, i32 0, i32 0
+  store i32 1, ptr %r14
+  %r15 = getelementptr %Point, ptr %r13, i32 0, i32 1
+  store i32 2, ptr %r15
+  %r16 = load %Point, ptr %r13
+  %r17 = getelementptr %Line, ptr %r12, i32 0, i32 0
+  store %Point %r16, ptr %r17
+  %r18 = load %Point, ptr %r6
+  %r19 = getelementptr %Line, ptr %r12, i32 0, i32 1
+  store %Point %r18, ptr %r19
+  %r20 = load %Line, ptr %r12
+  store %Line %r20, ptr %r7
+  %r21 = getelementptr %Line, ptr %r7, i32 0, i32 0
+  %r22 = load %Point, ptr %r21
+  %r23 = call i32 @sumPoint(%Point %r22)
+  %r24 = getelementptr %Line, ptr %r7, i32 0, i32 1
+  %r25 = load %Point, ptr %r24
+  %r26 = call i32 @sumPoint(%Point %r25)
+  %r27 = add i32 %r23, %r26
+  ret i32 %r27
+}
+
+define i32 @arrayLitDemo() {
+entry:
+  %r28 = alloca [3 x i32]
+  %r29 = alloca [3 x i32]
+  %r30 = getelementptr [3 x i32], ptr %r29, i32 0, i32 0
+  store i32 10, ptr %r30
+  %r31 = getelementptr [3 x i32], ptr %r29, i32 0, i32 1
+  store i32 20, ptr %r31
+  %r32 = getelementptr [3 x i32], ptr %r29, i32 0, i32 2
+  store i32 30, ptr %r32
+  %r33 = load [3 x i32], ptr %r29
+  store [3 x i32] %r33, ptr %r28
+  %r34 = getelementptr [3 x i32], ptr %r28, i32 0, i32 0
+  %r35 = load i32, ptr %r34
+  %r36 = getelementptr [3 x i32], ptr %r28, i32 0, i32 1
+  %r37 = load i32, ptr %r36
+  %r38 = add i32 %r35, %r37
+  %r39 = getelementptr [3 x i32], ptr %r28, i32 0, i32 2
+  %r40 = load i32, ptr %r39
+  %r41 = add i32 %r38, %r40
+  ret i32 %r41
+}
+
+define i32 @addressOfMember() {
+entry:
+  %r42 = alloca %Point
+  %r43 = alloca ptr
+  %r44 = alloca %Point
+  %r45 = getelementptr %Point, ptr %r44, i32 0, i32 0
+  store i32 5, ptr %r45
+  %r46 = getelementptr %Point, ptr %r44, i32 0, i32 1
+  store i32 6, ptr %r46
+  %r47 = load %Point, ptr %r44
+  store %Point %r47, ptr %r42
+  %r48 = getelementptr %Point, ptr %r42, i32 0, i32 0
+  store ptr %r48, ptr %r43
+  %r49 = load ptr, ptr %r43
+  %r50 = load ptr, ptr %r43
+  %r51 = load i32, ptr %r50
+  %r52 = add i32 %r51, 1
+  store i32 %r52, ptr %r49
+  %r53 = getelementptr %Point, ptr %r42, i32 0, i32 0
+  %r54 = load i32, ptr %r53
+  ret i32 %r54
+}
+
+define i32 @main() {
+entry:
+  %r55 = call i32 @structLitDemo()
+  %r56 = call i32 @arrayLitDemo()
+  %r57 = add i32 %r55, %r56
+  %r58 = call i32 @addressOfMember()
+  %r59 = add i32 %r57, %r58
+  ret i32 %r59
+}
+

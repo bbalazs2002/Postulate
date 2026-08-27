@@ -1,0 +1,37 @@
+namespace \Main;
+
+struct Point {
+  x : int32;
+  y : int32;
+}
+
+struct Line {
+  a : Point;
+  b : Point;
+}
+
+function sumPoint(p: Point) : int32 {
+  return p.x + p.y;
+}
+
+function structLitDemo() : int32 {
+  mut p : Point := Point { y := 4, x := 3 };
+  mut l : Line := Line { a := Point { x := 1, y := 2 }, b := p };
+  return sumPoint(l.a) + sumPoint(l.b);
+}
+
+function arrayLitDemo() : int32 {
+  mut arr : int32[3] := { 10, 20, 30 };
+  return arr[0] + arr[1] + arr[2];
+}
+
+function addressOfMember() : int32 {
+  mut p : Point := Point { x := 5, y := 6 };
+  mut px : *int32 := &p.x;
+  *px := *px + 1;
+  return p.x;
+}
+
+function main() : int32 {
+  return structLitDemo() + arrayLitDemo() + addressOfMember();
+}

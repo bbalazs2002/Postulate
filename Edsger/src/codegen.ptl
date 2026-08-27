@@ -5094,6 +5094,19 @@ function gen_expr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
   mut is_unsigned : bool := false;
   mut lcat : int32 := 0;
   mut rcat : int32 := 0;
+  mut lit_lr : LookupResult := LookupResult { found := false, index := 0 };
+  mut lit_struct_decl : *ASTNode := null;
+  mut lit_struct_file : uint64 := 0;
+  mut lit_field : *ASTNode := null;
+  mut lit_decl_field : *ASTNode := null;
+  mut lit_field_idx : uint64 := 0;
+  mut lit_found : bool := false;
+  mut lit_val_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut lit_addr : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut lit_base_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut lit_slot : uint64 := 0;
+  mut lit_elem_ty : *ASTNode := null;
+  mut lit_elem_file : uint64 := 0;
 
   if (k == 140) {
     slot := scope_reg_for_decl(sc, (*e).symbol_ref);
@@ -5166,11 +5179,11 @@ function gen_expr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
 
   if (k == 147) {
     if ((*e).op_type == 82) {
-      // Address-of: the inner lvalue's OWN alloca slot register already
-      // IS its address -- never call gen_expr (which would instead
-      // LOAD its current value) on the operand here.
-      r := scope_reg_for_decl(sc, (*(*e).left).symbol_ref);
-      return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+      // Address-of: the inner lvalue's own ADDRESS (an ordinary local's
+      // own alloca slot register, or a freshly-computed `getelementptr`
+      // for `&x.field`/`&arr[i]`) -- never call gen_expr (which would
+      // instead LOAD its current value) on the operand here.
+      return gen_addr(cg, s, sc, file_idx, (*e).left);
     }
     left_op := gen_expr(cg, s, sc, file_idx, (*e).left);
     if ((*e).op_type == 81) {
@@ -5237,6 +5250,92 @@ function gen_expr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
     return Operand { is_reg := false, reg := 0, imm := (*(*e).extra).int_val, is_null := false };
   }
 
+  // STRUCT_LIT/ARRAY_LIT (postulate_v0_language_reference.md SS3.8): no
+  // single LLVM instruction builds an aggregate constant from runtime
+  // values, so this uses the same technique as any other composite
+  // write -- a fresh temporary `alloca`, one `getelementptr`+`store`
+  // per member (evaluated in the literal's own left-to-right written
+  // order), then a whole-value `load` back out, exactly mirroring the
+  // existing alloca+load/store convention everywhere else in this file
+  // rather than inventing a literal-specific shape.
+  if (k == 152) {
+    lit_slot := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, lit_slot); cg_piece(cg, 2); cg_piece(cg, 6);
+    cg_type(cg, s, (*e).type_file_idx, (*e).data_type);
+    cg_piece(cg, 0);
+
+    lit_lr := find_struct_symbol(s, &(*(*s).buffers)[file_idx].bytes, (*e).tok.offset, (*e).tok.length);
+    if (!lit_lr.found) {
+      (*cg).had_error := true;
+      return Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+    }
+    lit_struct_decl := sym_decl(s, lit_lr.index);
+    lit_struct_file := (*(*s).symbols)[lit_lr.index].file_idx;
+    lit_base_op := Operand { is_reg := true, reg := lit_slot, imm := 0, is_null := false };
+
+    lit_field := (*e).first_child;
+    while (lit_field != null) {
+      lit_decl_field := (*lit_struct_decl).first_child;
+      lit_field_idx := 0;
+      lit_found := false;
+      while (lit_decl_field != null && !lit_found) {
+        if (bytes_equal_cross(&(*(*s).buffers)[lit_struct_file].bytes, (*lit_decl_field).tok.offset, (*lit_decl_field).tok.length, &(*(*s).buffers)[file_idx].bytes, (*lit_field).tok.offset, (*lit_field).tok.length)) {
+          lit_found := true;
+        } else {
+          lit_decl_field := (*lit_decl_field).next_sibling;
+          lit_field_idx := lit_field_idx + 1;
+        }
+      }
+      lit_val_op := gen_expr(cg, s, sc, file_idx, (*lit_field).left);
+      lit_addr := gen_member_addr(cg, s, (*e).type_file_idx, (*e).data_type, lit_base_op, lit_field_idx);
+      cg_piece(cg, 1); cg_piece(cg, 9);
+      cg_type(cg, s, lit_struct_file, (*lit_decl_field).data_type);
+      cg_byte(cg, 32);
+      cg_operand(cg, lit_val_op);
+      cg_piece(cg, 8); cg_operand(cg, lit_addr); cg_piece(cg, 0);
+
+      lit_field := (*lit_field).next_sibling;
+    }
+
+    r := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 7);
+    cg_type(cg, s, (*e).type_file_idx, (*e).data_type);
+    cg_piece(cg, 8); cg_reg_ref(cg, lit_slot); cg_piece(cg, 0);
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+  }
+
+  if (k == 153) {
+    lit_slot := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, lit_slot); cg_piece(cg, 2); cg_piece(cg, 6);
+    cg_type(cg, s, (*e).type_file_idx, (*e).data_type);
+    cg_piece(cg, 0);
+
+    lit_elem_ty := (*(*e).data_type).left;
+    lit_elem_file := (*e).type_file_idx;
+    lit_base_op := Operand { is_reg := true, reg := lit_slot, imm := 0, is_null := false };
+
+    lit_field := (*e).first_child;
+    lit_field_idx := 0;
+    while (lit_field != null) {
+      lit_val_op := gen_expr(cg, s, sc, file_idx, lit_field);
+      lit_addr := gen_member_addr(cg, s, (*e).type_file_idx, (*e).data_type, lit_base_op, lit_field_idx);
+      cg_piece(cg, 1); cg_piece(cg, 9);
+      cg_type(cg, s, lit_elem_file, lit_elem_ty);
+      cg_byte(cg, 32);
+      cg_operand(cg, lit_val_op);
+      cg_piece(cg, 8); cg_operand(cg, lit_addr); cg_piece(cg, 0);
+
+      lit_field := (*lit_field).next_sibling;
+      lit_field_idx := lit_field_idx + 1;
+    }
+
+    r := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 7);
+    cg_type(cg, s, (*e).type_file_idx, (*e).data_type);
+    cg_piece(cg, 8); cg_reg_ref(cg, lit_slot); cg_piece(cg, 0);
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+  }
+
   if (k == 150 || k == 151) {
     left_op := gen_addr(cg, s, sc, file_idx, e);
     r := new_reg(cg);
@@ -5266,6 +5365,31 @@ function find_field_index(struct_decl: *ASTNode, field_decl: *ASTNode) : uint64 
     idx := idx + 1;
   }
   return idx;
+}
+
+// `%r = getelementptr <container_ty>, ptr <base>, i32 0, i32 <index>` --
+// the leading `i32 0` selects "the one container object at `base`"
+// (GEP's own pointer-arithmetic-over-an-array-of-container_ty
+// interpretation), the second selects a compile-time-known struct
+// field or array element position within it. Shared by FIELD_EXPR's
+// own address computation and by STRUCT_LIT/ARRAY_LIT's own per-
+// member store address (gen_addr and gen_expr, below) -- NOT used for
+// a runtime-VARIABLE array index (gen_addr's own INDEX_EXPR case),
+// since that one's second GEP operand has to keep the index
+// expression's own natural type, not a hardcoded `i32` constant.
+function gen_member_addr(cg: *Codegen, s: *Sema, container_file: uint64, container_ty: *ASTNode, base: Operand, index: uint64) : Operand {
+  mut r : uint64 := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 52);
+  cg_type(cg, s, container_file, container_ty);
+  cg_piece(cg, 3);
+  cg_piece(cg, 51); cg_byte(cg, 32);
+  cg_operand(cg, base);
+  cg_piece(cg, 3);
+  cg_byte(cg, 105); cg_uint(cg, 32); cg_byte(cg, 32); cg_byte(cg, 48);
+  cg_piece(cg, 3);
+  cg_byte(cg, 105); cg_uint(cg, 32); cg_byte(cg, 32); cg_uint(cg, index);
+  cg_piece(cg, 0);
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
 }
 
 // The lvalue's own "address" operand -- used both to STORE through
@@ -5318,18 +5442,7 @@ function gen_addr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
     }
     struct_decl := sym_decl(s, lr.index);
     field_idx := find_field_index(struct_decl, (*e).symbol_ref);
-    r := new_reg(cg);
-    cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 52);
-    cg_type(cg, s, struct_file, struct_ty);
-    cg_piece(cg, 3);
-    cg_piece(cg, 51); cg_byte(cg, 32);
-    cg_operand(cg, base_addr);
-    cg_piece(cg, 3);
-    cg_byte(cg, 105); cg_uint(cg, 32); cg_byte(cg, 32); cg_byte(cg, 48);
-    cg_piece(cg, 3);
-    cg_byte(cg, 105); cg_uint(cg, 32); cg_byte(cg, 32); cg_uint(cg, field_idx);
-    cg_piece(cg, 0);
-    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+    return gen_member_addr(cg, s, struct_file, struct_ty, base_addr, field_idx);
   }
 
   if ((*e).kind == 150) {
