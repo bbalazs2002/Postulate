@@ -817,10 +817,16 @@ function alloc_node(p: *Parser, kind: uint32) : *ASTNode {
 // Types. Mirrors Stage1/src/parser.ptl's own PEG-style precedence
 // (postulate_v0_language_reference.md SS2.5) exactly, plus `*void`
 // (postulate_v1_language_reference.md SS2.6, terminal -- no `[N]`, no
-// further nesting) and `uintptr` as an ordinary base_type keyword.
-// `void` is deliberately NOT in parse_base_type's own keyword range --
-// same exclusion Stage1/src/parser.ptl already had -- so it can only
-// be reached through the `*void` special case here or through
+// further nesting), `uintptr` as an ordinary base_type keyword, and
+// chained `T[N][M]...` real nested-array declarations (postulate_v1_
+// language_reference.md SS2.7, new in v1 -- v0/Hoare's own type parser
+// only ever applies one `[N]` suffix per base type, confirmed against
+// Hoare/src/type_parser.asm directly; `int32[3][4]` there is a plain
+// syntax error, not a 3x4 array, despite an earlier draft of the v0
+// reference incorrectly claiming this already worked). `void` is
+// deliberately NOT in parse_base_type's own keyword range -- same
+// exclusion Stage1/src/parser.ptl already had -- so it can only be
+// reached through the `*void` special case here or through
 // parse_return_type's own direct check, matching the reference's
 // grammar-level restriction, not just a semantic one.
 // ---------------------------------------------------------------------
@@ -925,7 +931,24 @@ function parse_type(p: *Parser) : *ASTNode {
   if ((*p).had_error) {
     return null;
   }
-  if (cur_kind(p) == 58) {
+  return parse_array_suffixes(p, base);
+}
+
+// ("[" integer_literal "]")* -- new in v1 (see parse_type's own header
+// for why this needs its own loop rather than the single `if` v0's
+// actual grammar has): every bracket is collected in SOURCE order
+// first, then wrapped from the LAST one outward, so `int32[3][4]`
+// reads the familiar C way -- "3 elements, each an int32[4]" -- not
+// "4 elements, each an int32[3]".
+function parse_array_suffixes(p: *Parser, base: *ASTNode) : *ASTNode {
+  mut sizes : *ASTNode[8];
+  mut dim_count : uint64 := 0;
+  mut size : *ASTNode := null;
+  mut result : *ASTNode := base;
+  mut n : *ASTNode := null;
+  mut j : uint64 := 0;
+
+  while (cur_kind(p) == 58) {
     advance(p);
     size := parse_array_size(p);
     if ((*p).had_error) {
@@ -934,12 +957,19 @@ function parse_type(p: *Parser) : *ASTNode {
     if (!expect(p, 59)) {
       return null;
     }
-    n := alloc_node(p, 122);
-    (*n).left := base;
-    (*n).int_val := (*size).int_val;
-    return n;
+    sizes[dim_count] := size;
+    dim_count := dim_count + 1;
   }
-  return base;
+
+  j := dim_count;
+  while (j > 0) {
+    j := j - 1;
+    n := alloc_node(p, 122);
+    (*n).left := result;
+    (*n).int_val := (*sizes[j]).int_val;
+    result := n;
+  }
+  return result;
 }
 
 // return_type ::= type | "void"

@@ -925,7 +925,21 @@ function parse_type(p: *Parser) : *ASTNode {
   if ((*p).had_error) {
     return null;
   }
-  if (cur_kind(p) == 58) {
+  return parse_array_suffixes(p, base);
+}
+
+// ("[" integer_literal "]")* -- kept in sync with parser.ptl's own copy
+// (see that file's parse_type header for the full "why v0/Hoare never
+// actually supported chained brackets" story).
+function parse_array_suffixes(p: *Parser, base: *ASTNode) : *ASTNode {
+  mut sizes : *ASTNode[8];
+  mut dim_count : uint64 := 0;
+  mut size : *ASTNode := null;
+  mut result : *ASTNode := base;
+  mut n : *ASTNode := null;
+  mut j : uint64 := 0;
+
+  while (cur_kind(p) == 58) {
     advance(p);
     size := parse_array_size(p);
     if ((*p).had_error) {
@@ -934,12 +948,19 @@ function parse_type(p: *Parser) : *ASTNode {
     if (!expect(p, 59)) {
       return null;
     }
-    n := alloc_node(p, 122);
-    (*n).left := base;
-    (*n).int_val := (*size).int_val;
-    return n;
+    sizes[dim_count] := size;
+    dim_count := dim_count + 1;
   }
-  return base;
+
+  j := dim_count;
+  while (j > 0) {
+    j := j - 1;
+    n := alloc_node(p, 122);
+    (*n).left := result;
+    (*n).int_val := (*sizes[j]).int_val;
+    result := n;
+  }
+  return result;
 }
 
 // return_type ::= type | "void"

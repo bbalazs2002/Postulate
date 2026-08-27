@@ -209,8 +209,23 @@ expression.
   run time). Out-of-bounds access through a computed index is
   undefined behavior — the same "no hidden runtime cost" principle
   that keeps `T[N]` free of any length/capacity header.
-- Array element type may be any type, including another array (nested
-  arrays, `int32[3][4]`-style via `T[N]` composition) or a struct.
+- Array element type may be any type, including a struct.
+- **`T[N][M]` (a second array-size suffix chained directly onto the
+  first) is not valid syntax.** `type`'s own grammar (§2.5) applies at
+  most one `"[" integer_literal "]"` to a given `base_type` — there is
+  no loop over further suffixes, so `int32[3][4]` is a compile error,
+  not a 3-by-4 nested array. A genuinely nested/multi-dimensional array
+  is still expressible, just through an explicit intermediate struct
+  rather than direct chaining: wrap the inner array in a one-field
+  struct, then declare an array of that struct —
+  ```postulate
+  struct Row { cells : int32[4]; }
+  mut grid : Row[3];       // a 3x4 grid of int32, addressed as grid[i].cells[j]
+  ```
+  This compiles to the exact same flat, packed layout a real `T[N][M]`
+  would (the wrapper struct has no overhead — see §2.6's zero-padding
+  guarantee), so nothing is lost at the machine level; only the syntax
+  for reaching into it changes (`grid[i].cells[j]`, not `grid[i][j]`).
 
 ### 2.5 The `*T[N]` / `*(T[N])` distinction
 

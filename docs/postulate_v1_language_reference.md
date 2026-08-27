@@ -453,11 +453,33 @@ cast (§3.7a) before recovering a concrete pointer type.
 
 ### 2.7 Arrays
 
-Unchanged from v0 (§2.4–§2.5 there): `T[N]` fixed-size, `N` a literal,
-the `*T[N]` vs. `*(T[N])` first-match rule unchanged. Bounds checking:
-see §2.7b (this changes from v0's plain "no runtime check" — the
-compile-time literal-index check v0 already does is unaffected either
-way).
+Mostly unchanged from v0 (§2.4–§2.5 there): `T[N]` fixed-size, `N` a
+literal, the `*T[N]` vs. `*(T[N])` first-match rule unchanged. Bounds
+checking: see §2.7b (this changes from v0's plain "no runtime check" —
+the compile-time literal-index check v0 already does is unaffected
+either way).
+
+**New in v1: chained `T[N][M]...` nested-array declarations.**
+v0's own `type` grammar applies at most one `"[" integer_literal "]"`
+suffix to a `base_type` — `int32[3][4]` is a plain syntax error there
+(confirmed directly against `Hoare/src/type_parser.asm`; an earlier
+draft of the v0 reference incorrectly claimed this already worked, now
+corrected). v1 adds real support for chaining any number of size
+suffixes (§9's own grammar: `base_type ("[" integer_literal "]")+`),
+read the familiar way — leftmost is outermost:
+
+```postulate
+mut grid : int32[3][4];   // 3 elements, each an int32[4] -- grid[i][j]
+```
+
+Indexing composes the ordinary way (`arr[i][j]`, §2.4's own indexing
+rule applied twice) — nothing new there, only the *declaration* syntax
+is new. v0 programs never needed this: the workaround they already had
+(an explicit one-field wrapper struct around the inner array, then an
+array of that struct — §2.4's own note on the topic) still works
+identically in v1 and compiles to the exact same flat layout; the new
+syntax is purely a convenience for the common case, not a new
+capability at the machine level.
 
 ### 2.7a Compile-time size and length: `sizeof`, `lengthof`, `uintptr`
 
@@ -2524,7 +2546,7 @@ base_type            ::= "int8" | "int16" | "int" | "int32" | "int64"
 type                 ::= "*" base_type "[" integer_literal "]"
                         | "*" "void"
                         | "*" type
-                        | base_type "[" integer_literal "]"
+                        | base_type ("[" integer_literal "]")+
                         | "(" type ")"
                         | base_type
 

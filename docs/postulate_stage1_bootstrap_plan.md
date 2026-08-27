@@ -218,6 +218,13 @@ two, unlike `#include`, don't need reworking, only reusing.
 - **Pointer arithmetic, `*void`, `uintptr`, cross-type pointer
   comparison, `sizeof`/`lengthof`** (reference §2.5–§2.7a) — pulled
   forward from the old `v1.0.10`.
+- **Chained `T[N][M]...` nested-array declarations** (reference §2.7) —
+  not part of either retired step; found and added during this step's
+  own implementation, once Module 3's multi-file buffer table needed a
+  real 2D array and v0/Hoare turned out never to have supported chained
+  array-size suffixes at all (confirmed against `Hoare/src/type_
+  parser.asm`; the v0 reference's own claim to the contrary was wrong
+  and has been corrected).
 - **The architecture rewrite itself**: the lexer/parser/codegen trio
   becomes real, separately-compiled modules — a lexer module, an AST
   module, a parser module, a **semantic analyzer / type checker
