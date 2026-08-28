@@ -25,13 +25,20 @@ jobs:
       # Builds all four binaries and runs every fixture suite as part
       # of the image build itself (Hoare/Dockerfile's own RUN steps) --
       # a failing test fails this step, gating the release on it.
+      # --provenance=false: without it, GitHub-hosted runners' Docker
+      # emits a multi-manifest (attestation) image even for a plain
+      # `docker build`, and a later `docker run` against it can pick the
+      # non-runnable attestation manifest instead of the real one --
+      # "cannot execute binary file" / exit 126 when running e.g. bash
+      # inside it (hit for real in scripts/bundle_release.sh's own
+      # `docker run --entrypoint bash ...`, same root cause as Edsger's).
       - name: Build and test the dev image
-        run: docker build -t postulate-hoare Hoare
+        run: docker build --provenance=false -t postulate-hoare Hoare
 
       # Re-packages the already-tested binaries above; see
       # Hoare/Dockerfile.release's own header comment.
       - name: Build the release image
-        run: docker build -f Hoare/Dockerfile.release -t postulate-hoare-release .
+        run: docker build --provenance=false -f Hoare/Dockerfile.release -t postulate-hoare-release .
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3

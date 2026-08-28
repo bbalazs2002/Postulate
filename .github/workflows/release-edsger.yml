@@ -25,8 +25,15 @@ jobs:
       # Builds Hoare inside the image so Edsger's own two-stage
       # bootstrap (Edsger_v0/scripts/build.sh) has something to compile
       # with -- see Edsger_v0/Dockerfile's own header comment.
+      # --provenance=false: without it, GitHub-hosted runners' Docker
+      # emits a multi-manifest (attestation) image even for a plain
+      # `docker build`, and a later `docker run` against it can pick the
+      # non-runnable attestation manifest instead of the real one --
+      # "cannot execute binary file" / exit 126 when running e.g. bash
+      # inside it (hit for real both here, in the very next step's
+      # `docker run ... bash -c ...`, and in scripts/bundle_release.sh).
       - name: Build the dev image
-        run: docker build -f Edsger_v0/Dockerfile -t postulate-edsger .
+        run: docker build --provenance=false -f Edsger_v0/Dockerfile -t postulate-edsger .
 
       # Runs Edsger_v0/scripts/build.sh's own two-stage bootstrap
       # (codegen_selfhost, then the real src/modular/ source) inside
@@ -35,7 +42,7 @@ jobs:
       # build or fixture fails this step, gating the release on it.
       - name: Build and test the release image
         run: |
-          docker build -f Edsger_v0/Dockerfile.release -t postulate-edsger-release .
+          docker build --provenance=false -f Edsger_v0/Dockerfile.release -t postulate-edsger-release .
           docker run --rm -v "$PWD/Edsger_v0:/workspace/Edsger" postulate-edsger bash -c "
             set -e
             for f in tests/codegen_cases/*.ptl; do
