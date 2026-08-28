@@ -1,6 +1,7 @@
 # Edsger — the Postulate Stage 1 compiler
 
-Edsger compiles [Postulate v1.0](../docs/postulate_v1_0_language_reference.md)
+Named in honor of Edsger Wybe Dijkstra. Edsger compiles
+[Postulate v1.0](../docs/postulate_v1_0_language_reference.md)
 — v0 plus namespaces/`use`, `char`, `as`, pointer arithmetic, `*void`,
 `uintptr`, `sizeof`/`lengthof`, and the twelve-syscall `extern function`
 whitelist — into real, linked, runnable ELF binaries. It is itself

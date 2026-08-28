@@ -1,7 +1,8 @@
 # Hoare — the Postulate Stage 0 bootstrap compiler
 
 Four standalone, Docker-built, Docker-tested x86_64 NASM binaries — this
-directory *is* the Stage 0 compiler, named **Hoare** — plus the unified
+directory *is* the Stage 0 compiler, named **Hoare** in honor of
+Sir Tony Hoare — plus the unified
 **`./hoare`** CLI (see "Compiling a program" below) that wraps them all
 into one command:
 
