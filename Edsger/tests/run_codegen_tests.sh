@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Runs Edsger/src/codegen.ptl (v1.0.6, Module 4 -- FIRST SLICE: scalar
-# types only, see codegen.ptl's own header comment above its "Module 4:
-# Codegen" section for exactly what's in and out of scope) against
-# every fixture in codegen_cases/, comparing stdout (the emitted LLVM
-# IR text)/stderr/exit code against the recorded .expected.* files --
-# same convention run_lexer_tests.sh/run_parser_tests.sh/run_sema_
-# tests.sh already use.
+# Runs Edsger/src/codegen.ptl (Module 4 -- see codegen.ptl's own header
+# comment above its "Module 4: Codegen" section for exactly what's in
+# and out of scope) against every fixture in codegen_cases/, comparing
+# stdout (the emitted LLVM IR text)/stderr/exit code against the
+# recorded .expected.* files -- same convention run_lexer_tests.sh/
+# run_parser_tests.sh/run_sema_tests.sh already use.
 #
-# This module's own stdout is meant to eventually be assembled with
-# `llc` and actually run (postulate_stage1_v1_0_6_edsger_design.md's
-# own Module 4 verification method) -- this script only checks the
-# emitted text itself, no `llc`/`opt`/`ld` involved, per this round's
-# own agreed scope; a later increment can add that once more of
-# codegen exists.
+# This script only checks the emitted LLVM IR TEXT itself, no `llc`/
+# `opt`/`ld` involved -- the `edsger` CLI script (Edsger/edsger, at the
+# repo root of this module) is what actually assembles and links that
+# text into a real, runnable ELF binary via `llc`/`ld`, now that
+# gen_start/gen_syscall_extern (codegen.ptl) emit a real entry point and
+# working syscall wrappers (docs/postulate_stage1_bootstrap_plan.md's
+# own "Tracked checkpoint: extern/syscall calls and `_start`").
 #
 # Run from inside Edsger/Dockerfile's own image (see docker-compose.yml's
 # "edsger-dev" service -- `hoare` is already built and on PATH there),

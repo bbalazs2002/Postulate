@@ -4814,7 +4814,7 @@ function gen_call(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
   mut r : uint64 := 0;
   mut is_void : bool := false;
 
-  if (callee_decl == null || (*callee_decl).kind != 113) {
+  if (callee_decl == null || ((*callee_decl).kind != 113 && (*callee_decl).kind != 112)) {
     (*cg).had_error := true;
     return Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
   }
@@ -5773,40 +5773,295 @@ function gen_struct_types(cg: *Codegen, s: *Sema) : void {
   }
 }
 
+// Linux x86-64 syscall numbers for exactly the twelve `extern
+// function` names postulate_v1_language_reference.md SS5.2 whitelists.
+// Any OTHER extern function name still only gets a bare `declare`
+// (gen_program's own fallback, unchanged below) -- there is no way to
+// back an arbitrary extern symbol with a real implementation, only
+// these twelve specific ones. `.index` (LookupResult's own generic
+// payload field, reused here) holds the syscall number itself, not a
+// symbol-table index. Matched the same way `classify_word` (the
+// lexer's own keyword recognizer, above) matches fixed keyword text:
+// bucketed by length first, then compared byte by byte.
+function syscall_number_for(s: *Sema, file_idx: uint64, decl: *ASTNode) : LookupResult {
+  mut buf : *(uint8[65536]) := &(*(*s).buffers)[file_idx].bytes;
+  mut o : uint64 := (*decl).tok.offset;
+  mut n : uint64 := (*decl).tok.length;
+
+  if (n == 8) {
+    if ((*buf)[o+0]==115 && (*buf)[o+1]==121 && (*buf)[o+2]==115 && (*buf)[o+3]==95 && (*buf)[o+4]==114 && (*buf)[o+5]==101 && (*buf)[o+6]==97 && (*buf)[o+7]==100) { return LookupResult { found := true, index := 0 }; }
+    if ((*buf)[o+0]==115 && (*buf)[o+1]==121 && (*buf)[o+2]==115 && (*buf)[o+3]==95 && (*buf)[o+4]==109 && (*buf)[o+5]==109 && (*buf)[o+6]==97 && (*buf)[o+7]==112) { return LookupResult { found := true, index := 9 }; }
+    if ((*buf)[o+0]==115 && (*buf)[o+1]==121 && (*buf)[o+2]==115 && (*buf)[o+3]==95 && (*buf)[o+4]==101 && (*buf)[o+5]==120 && (*buf)[o+6]==105 && (*buf)[o+7]==116) { return LookupResult { found := true, index := 60 }; }
+    return LookupResult { found := false, index := 0 };
+  }
+  if (n == 9) {
+    if ((*buf)[o+0]==115 && (*buf)[o+1]==121 && (*buf)[o+2]==115 && (*buf)[o+3]==95 && (*buf)[o+4]==119 && (*buf)[o+5]==114 && (*buf)[o+6]==105 && (*buf)[o+7]==116 && (*buf)[o+8]==101) { return LookupResult { found := true, index := 1 }; }
+    if ((*buf)[o+0]==115 && (*buf)[o+1]==121 && (*buf)[o+2]==115 && (*buf)[o+3]==95 && (*buf)[o+4]==99 && (*buf)[o+5]==108 && (*buf)[o+6]==111 && (*buf)[o+7]==110 && (*buf)[o+8]==101) { return LookupResult { found := true, index := 56 }; }
+    if ((*buf)[o+0]==115 && (*buf)[o+1]==121 && (*buf)[o+2]==115 && (*buf)[o+3]==95 && (*buf)[o+4]==102 && (*buf)[o+5]==117 && (*buf)[o+6]==116 && (*buf)[o+7]==101 && (*buf)[o+8]==120) { return LookupResult { found := true, index := 202 }; }
+    if ((*buf)[o+0]==115 && (*buf)[o+1]==121 && (*buf)[o+2]==115 && (*buf)[o+3]==95 && (*buf)[o+4]==99 && (*buf)[o+5]==108 && (*buf)[o+6]==111 && (*buf)[o+7]==115 && (*buf)[o+8]==101) { return LookupResult { found := true, index := 3 }; }
+    return LookupResult { found := false, index := 0 };
+  }
+  if (n == 10) {
+    if ((*buf)[o+0]==115 && (*buf)[o+1]==121 && (*buf)[o+2]==115 && (*buf)[o+3]==95 && (*buf)[o+4]==109 && (*buf)[o+5]==117 && (*buf)[o+6]==110 && (*buf)[o+7]==109 && (*buf)[o+8]==97 && (*buf)[o+9]==112) { return LookupResult { found := true, index := 11 }; }
+    if ((*buf)[o+0]==115 && (*buf)[o+1]==121 && (*buf)[o+2]==115 && (*buf)[o+3]==95 && (*buf)[o+4]==109 && (*buf)[o+5]==114 && (*buf)[o+6]==101 && (*buf)[o+7]==109 && (*buf)[o+8]==97 && (*buf)[o+9]==112) { return LookupResult { found := true, index := 25 }; }
+    if ((*buf)[o+0]==115 && (*buf)[o+1]==121 && (*buf)[o+2]==115 && (*buf)[o+3]==95 && (*buf)[o+4]==103 && (*buf)[o+5]==101 && (*buf)[o+6]==116 && (*buf)[o+7]==116 && (*buf)[o+8]==105 && (*buf)[o+9]==100) { return LookupResult { found := true, index := 186 }; }
+    if ((*buf)[o+0]==115 && (*buf)[o+1]==121 && (*buf)[o+2]==115 && (*buf)[o+3]==95 && (*buf)[o+4]==111 && (*buf)[o+5]==112 && (*buf)[o+6]==101 && (*buf)[o+7]==110 && (*buf)[o+8]==97 && (*buf)[o+9]==116) { return LookupResult { found := true, index := 257 }; }
+    return LookupResult { found := false, index := 0 };
+  }
+  if (n == 14) {
+    if ((*buf)[o+0]==115 && (*buf)[o+1]==121 && (*buf)[o+2]==115 && (*buf)[o+3]==95 && (*buf)[o+4]==101 && (*buf)[o+5]==120 && (*buf)[o+6]==105 && (*buf)[o+7]==116 && (*buf)[o+8]==95 && (*buf)[o+9]==103 && (*buf)[o+10]==114 && (*buf)[o+11]==111 && (*buf)[o+12]==117 && (*buf)[o+13]==112) { return LookupResult { found := true, index := 231 }; }
+    return LookupResult { found := false, index := 0 };
+  }
+  return LookupResult { found := false, index := 0 };
+}
+
+// A type a raw syscall wrapper can move through an integer register --
+// a pointer (`ptrtoint`/`inttoptr` at the boundary) or any non-void
+// scalar keyword (passed/returned as its own width, widened to `i64`
+// with `zext` when narrower -- every whitelisted parameter narrower
+// than 64 bits happens to be `uint32`, SS5.2's own table, so `zext` is
+// always correct here, never `sext`). Explicitly false for a struct-
+// named TYPE_BASE or an array -- neither has a meaningful raw-register
+// representation, so a same-named `extern function` with one anywhere
+// in its signature safely falls back to gen_program's plain `declare`
+// instead of a syscall wrapper, rather than emitting nonsense IR.
+function is_syscall_safe_type(ty: *ASTNode) : bool {
+  if (ty == null) { return false; }
+  if ((*ty).kind == 121) { return true; }
+  if ((*ty).kind != 120) { return false; }
+  if ((*ty).tok.kind == 33) { return false; }
+  if ((*ty).tok.kind == 32) { return true; }
+  return base_type_size((*ty).tok.kind) > 0;
+}
+
+function cg_syscall_arg_reg(cg: *Codegen, which: uint64) : void {
+  cg_byte(cg, 123);
+  if (which == 0) { cg_byte(cg, 114); cg_byte(cg, 100); cg_byte(cg, 105); }
+  if (which == 1) { cg_byte(cg, 114); cg_byte(cg, 115); cg_byte(cg, 105); }
+  if (which == 2) { cg_byte(cg, 114); cg_byte(cg, 100); cg_byte(cg, 120); }
+  if (which == 3) { cg_byte(cg, 114); cg_byte(cg, 49); cg_byte(cg, 48); }
+  if (which == 4) { cg_byte(cg, 114); cg_byte(cg, 56); }
+  if (which == 5) { cg_byte(cg, 114); cg_byte(cg, 57); }
+  cg_byte(cg, 125);
+}
+
+// The only realistic way to reach the kernel directly from LLVM IR --
+// no libc, no syscall intrinsic -- is a `call` to an inline-asm blob
+// with register-constrained operands, the same idiom e.g. Rust's/
+// Zig's own freestanding raw-syscall paths use (postulate_stage1_
+// bootstrap_plan.md's own "Tracked checkpoint: extern/syscall calls
+// and `_start`", which this whole function, gen_syscall_extern, and
+// gen_start below implement in full). `args` holds each already-`i64`
+// argument operand, in order; `n_args` is at most 6 -- System V's own
+// register-argument limit, which every whitelisted extern function
+// already respects by construction. Always returns an `i64`; callers
+// translate it to their own wrapper's declared return type themselves.
+function gen_raw_syscall(cg: *Codegen, syscall_num: uint64, args: *(Operand[6]), n_args: uint64) : Operand {
+  mut r : uint64 := new_reg(cg);
+  mut i : uint64 := 0;
+  mut cur : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+  cg_piece(cg, 16);
+  cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32);
+  cg_byte(cg, 97); cg_byte(cg, 115); cg_byte(cg, 109); cg_byte(cg, 32);
+  cg_byte(cg, 115); cg_byte(cg, 105); cg_byte(cg, 100); cg_byte(cg, 101); cg_byte(cg, 101); cg_byte(cg, 102); cg_byte(cg, 102); cg_byte(cg, 101); cg_byte(cg, 99); cg_byte(cg, 116); cg_byte(cg, 32);
+  cg_byte(cg, 34);
+  cg_byte(cg, 115); cg_byte(cg, 121); cg_byte(cg, 115); cg_byte(cg, 99); cg_byte(cg, 97); cg_byte(cg, 108); cg_byte(cg, 108);
+  cg_byte(cg, 34);
+  cg_piece(cg, 3);
+  cg_byte(cg, 34);
+  cg_byte(cg, 61); cg_byte(cg, 123); cg_byte(cg, 114); cg_byte(cg, 97); cg_byte(cg, 120); cg_byte(cg, 125);
+  cg_byte(cg, 44);
+  cg_byte(cg, 123); cg_byte(cg, 114); cg_byte(cg, 97); cg_byte(cg, 120); cg_byte(cg, 125);
+  i := 0;
+  while (i < n_args) {
+    cg_byte(cg, 44);
+    cg_syscall_arg_reg(cg, i);
+    i := i + 1;
+  }
+  cg_byte(cg, 44);
+  cg_byte(cg, 126); cg_byte(cg, 123); cg_byte(cg, 114); cg_byte(cg, 99); cg_byte(cg, 120); cg_byte(cg, 125);
+  cg_byte(cg, 44);
+  cg_byte(cg, 126); cg_byte(cg, 123); cg_byte(cg, 114); cg_byte(cg, 49); cg_byte(cg, 49); cg_byte(cg, 125);
+  cg_byte(cg, 44);
+  cg_byte(cg, 126); cg_byte(cg, 123); cg_byte(cg, 109); cg_byte(cg, 101); cg_byte(cg, 109); cg_byte(cg, 111); cg_byte(cg, 114); cg_byte(cg, 121); cg_byte(cg, 125);
+  cg_byte(cg, 34);
+  cg_byte(cg, 40);
+  cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32); cg_uint(cg, syscall_num);
+  i := 0;
+  while (i < n_args) {
+    cg_piece(cg, 3);
+    cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32);
+    cur := (*args)[i];
+    cg_operand(cg, cur);
+    i := i + 1;
+  }
+  cg_byte(cg, 41);
+  cg_piece(cg, 0);
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+}
+
+// Emits a full `define` for a whitelisted `extern function`, backing
+// its own name with a real raw-syscall implementation instead of the
+// unresolvable `declare` gen_program falls back to for every other
+// extern. A pointer parameter is `ptrtoint`'d to feed the syscall's own
+// raw integer registers; a narrower-than-64-bit one is `zext`'d (see
+// is_syscall_safe_type's own comment on why zext, never sext, is always
+// correct here); an already-64-bit one needs no real conversion, but
+// still gets a fresh `add i64 %pN, 0` so it has its own `%rN` register
+// to hand to gen_raw_syscall (Operand's own reg field is always an
+// `%rN`, never a `%pN`, so a bare parameter reference can't be handed
+// through directly). The reverse (`inttoptr`) undoes the pointer
+// conversion for a `*void`-returning syscall (`sys_mmap`/`sys_mremap`)
+// on the way back out; `void`/64-bit-int returns need no conversion at
+// all. Only ever called once its caller (gen_program) has already
+// confirmed every parameter and the return type are all syscall-safe.
+function gen_syscall_extern(cg: *Codegen, s: *Sema, file_idx: uint64, decl: *ASTNode, syscall_num: uint64) : void {
+  mut param : *ASTNode := (*decl).first_child;
+  mut pidx : uint64 := 0;
+  mut args : Operand[6];
+  mut n_args : uint64 := 0;
+  mut ret_ty : *ASTNode := (*decl).data_type;
+  mut a : uint64 := 0;
+  mut rp : uint64 := 0;
+  mut result : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut arg_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+
+  cg_piece(cg, 4);
+  cg_type(cg, s, file_idx, ret_ty);
+  cg_byte(cg, 32);
+  cg_byte(cg, 64);
+  cg_slice(cg, &(*(*s).buffers)[file_idx].bytes, (*decl).tok.offset, (*decl).tok.length);
+  cg_piece(cg, 24);
+  param := (*decl).first_child;
+  pidx := 0;
+  while (param != null) {
+    if (pidx > 0) { cg_piece(cg, 3); }
+    cg_type(cg, s, file_idx, (*param).data_type);
+    cg_byte(cg, 32);
+    cg_param_ref(cg, pidx);
+    param := (*param).next_sibling;
+    pidx := pidx + 1;
+  }
+  cg_piece(cg, 25);
+  cg_byte(cg, 32);
+  cg_piece(cg, 22);
+  cg_piece(cg, 20);
+
+  param := (*decl).first_child;
+  pidx := 0;
+  n_args := 0;
+  while (param != null) {
+    if ((*(*param).data_type).kind == 121) {
+      a := new_reg(cg);
+      cg_piece(cg, 1); cg_reg_ref(cg, a); cg_piece(cg, 2);
+      cg_piece(cg, 53); cg_piece(cg, 51); cg_byte(cg, 32); cg_param_ref(cg, pidx); cg_piece(cg, 54); cg_piece(cg, 0);
+      arg_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false };
+      args[n_args] := arg_op;
+    } else {
+      if (llvm_int_width((*(*param).data_type).tok.kind) == 64) {
+        a := new_reg(cg);
+        cg_piece(cg, 1); cg_reg_ref(cg, a); cg_piece(cg, 2);
+        cg_piece(cg, 27); cg_byte(cg, 32);
+        cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32);
+        cg_param_ref(cg, pidx);
+        cg_piece(cg, 3); cg_byte(cg, 48);
+        cg_piece(cg, 0);
+        arg_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false };
+        args[n_args] := arg_op;
+      } else {
+        a := new_reg(cg);
+        cg_piece(cg, 1); cg_reg_ref(cg, a); cg_piece(cg, 2);
+        cg_piece(cg, 57);
+        cg_type(cg, s, file_idx, (*param).data_type);
+        cg_byte(cg, 32);
+        cg_param_ref(cg, pidx);
+        cg_piece(cg, 60);
+        cg_byte(cg, 105); cg_uint(cg, 64);
+        cg_piece(cg, 0);
+        arg_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false };
+        args[n_args] := arg_op;
+      }
+    }
+    n_args := n_args + 1;
+    param := (*param).next_sibling;
+    pidx := pidx + 1;
+  }
+
+  result := gen_raw_syscall(cg, syscall_num, &args, n_args);
+
+  if (is_void_type(ret_ty)) {
+    cg_piece(cg, 1); cg_piece(cg, 11);
+  } else {
+    if ((*ret_ty).kind == 121) {
+      rp := new_reg(cg);
+      cg_piece(cg, 1); cg_reg_ref(cg, rp); cg_piece(cg, 2);
+      cg_piece(cg, 55); cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32); cg_operand(cg, result); cg_piece(cg, 56); cg_piece(cg, 0);
+      cg_piece(cg, 1); cg_piece(cg, 10); cg_type(cg, s, file_idx, ret_ty); cg_byte(cg, 32); cg_reg_ref(cg, rp); cg_piece(cg, 0);
+    } else {
+      cg_piece(cg, 1); cg_piece(cg, 10); cg_type(cg, s, file_idx, ret_ty); cg_byte(cg, 32); cg_operand(cg, result); cg_piece(cg, 0);
+    }
+  }
+  cg_piece(cg, 23);
+}
+
 // Walks one file's already-declared+decorated top-level decls, emitting
-// `declare` for every EXTERN_DECL and `define` for every FUNCTION_DECL
-// whose entire signature -- and, for a FUNCTION_DECL, every top-level
-// body-local declaration too -- is supported (decl_is_supported, above:
-// scalar, struct, array, and pointer-to-any-of-those types, per is_
-// supported_value_type). What's still out of scope here is expression-
-// level, not signature-level -- a struct/array LITERAL (STRUCT_LIT/
-// ARRAY_LIT) or an extern/syscall CALL still sets had_error the moment
-// gen_expr/gen_call actually reaches one, even inside an otherwise-
-// supported function, exactly like sizeof/lengthof's own struct-name
-// case already does for an unresolvable type.
+// a real `define` (gen_syscall_extern) for every EXTERN_DECL whose name
+// and whole signature exactly match one of the twelve whitelisted
+// syscalls (syscall_number_for + is_syscall_safe_type on every
+// param/the return type), a bare `declare` for any other EXTERN_DECL,
+// and `define` for every FUNCTION_DECL whose entire signature -- and
+// every top-level body-local declaration too -- is supported (decl_is_
+// supported, above: scalar, struct, array, and pointer-to-any-of-those
+// types, per is_supported_value_type). What's still out of scope here
+// is expression-level, not signature-level -- a struct/array LITERAL
+// (STRUCT_LIT/ARRAY_LIT) still sets had_error the moment gen_expr
+// actually reaches an unsupported shape, exactly like sizeof/lengthof's
+// own struct-name case already does for an unresolvable type.
 function gen_program(cg: *Codegen, s: *Sema, program: *ASTNode, file_idx: uint64) : void {
   mut child : *ASTNode := (*program).first_child;
   mut param : *ASTNode := null;
   mut pidx : uint64 := 0;
+  mut lr : LookupResult := LookupResult { found := false, index := 0 };
+  mut safe : bool := false;
+  mut pcount : uint64 := 0;
 
   while (child != null) {
     if ((*child).kind == 112 && decl_is_supported(child)) {
-      cg_piece(cg, 5);
-      cg_type(cg, s, file_idx, (*child).data_type);
-      cg_byte(cg, 32);
-      cg_byte(cg, 64);
-      cg_slice(cg, &(*(*s).buffers)[file_idx].bytes, (*child).tok.offset, (*child).tok.length);
-      cg_piece(cg, 24);
+      lr := syscall_number_for(s, file_idx, child);
+      safe := lr.found;
       param := (*child).first_child;
-      pidx := 0;
-      while (param != null) {
-        if (pidx > 0) { cg_piece(cg, 3); }
-        cg_type(cg, s, file_idx, (*param).data_type);
+      pcount := 0;
+      while (safe && param != null) {
+        if (!is_syscall_safe_type((*param).data_type)) { safe := false; }
+        pcount := pcount + 1;
         param := (*param).next_sibling;
-        pidx := pidx + 1;
       }
-      cg_piece(cg, 25);
-      cg_piece(cg, 0);
+      if (pcount > 6) { safe := false; }
+      if (safe && !(is_void_type((*child).data_type) || is_syscall_safe_type((*child).data_type))) {
+        safe := false;
+      }
+      if (safe) {
+        gen_syscall_extern(cg, s, file_idx, child, lr.index);
+      } else {
+        cg_piece(cg, 5);
+        cg_type(cg, s, file_idx, (*child).data_type);
+        cg_byte(cg, 32);
+        cg_byte(cg, 64);
+        cg_slice(cg, &(*(*s).buffers)[file_idx].bytes, (*child).tok.offset, (*child).tok.length);
+        cg_piece(cg, 24);
+        param := (*child).first_child;
+        pidx := 0;
+        while (param != null) {
+          if (pidx > 0) { cg_piece(cg, 3); }
+          cg_type(cg, s, file_idx, (*param).data_type);
+          param := (*param).next_sibling;
+          pidx := pidx + 1;
+        }
+        cg_piece(cg, 25);
+        cg_piece(cg, 0);
+      }
     } else {
       if ((*child).kind == 113 && decl_is_supported(child)) {
         gen_function(cg, s, child, file_idx);
@@ -5814,6 +6069,101 @@ function gen_program(cg: *Codegen, s: *Sema, program: *ASTNode, file_idx: uint64
     }
     child := (*child).next_sibling;
   }
+}
+
+// Emits `_start`, the process's real ELF entry point, for whichever
+// file declares `main` -- found by walking each file's own top-level
+// FUNCTION_DECLs for the literal name (Module 3 doesn't yet enforce
+// v1's own "exactly one `main`, in `\Main`" rule, reference SS6.3, so
+// this walks every file via main()'s own per-file loop below and stops
+// at the first match; a well-formed program only ever has one). Calls
+// `@main` (still zero-parameter only -- the two-parameter `argv`/`argc`
+// form is `v1.1.5`, not yet parsed at all), coerces its return value
+// (`void` or any atomic type, SS6.3) to the raw `i64` an exit-code
+// register needs -- a pointer via `ptrtoint`, a narrower-than-64-bit
+// value via `zext` unconditionally (the exit syscall's own observable
+// code only depends on the low 8 bits regardless, so this doesn't need
+// to branch on `main`'s own signedness), `void` as a literal `0` --
+// then terminates the WHOLE process via `sys_exit_group` (231), not
+// `sys_exit` (60), which only ends the calling thread and would leave
+// any other still-running thread (started via `sys_clone`) alive.
+// `unreachable` afterward, since the syscall itself never returns.
+// Returns whether it found (and therefore emitted) `main` in THIS
+// file, so main()'s own driver loop knows to stop trying further files.
+function gen_start(cg: *Codegen, s: *Sema, program: *ASTNode, file_idx: uint64) : bool {
+  mut child : *ASTNode := (*program).first_child;
+  mut main_decl : *ASTNode := null;
+  mut buf : *(uint8[65536]) := &(*(*s).buffers)[file_idx].bytes;
+  mut o : uint64 := 0;
+  mut call_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut code_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut ret_ty : *ASTNode := null;
+  mut a : uint64 := 0;
+  mut args : Operand[6];
+  mut discard_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+
+  while (child != null) {
+    if ((*child).kind == 113 && (*child).tok.length == 4) {
+      o := (*child).tok.offset;
+      if ((*buf)[o+0]==109 && (*buf)[o+1]==97 && (*buf)[o+2]==105 && (*buf)[o+3]==110) {
+        main_decl := child;
+      }
+    }
+    child := (*child).next_sibling;
+  }
+  if (main_decl == null) { return false; }
+
+  cg_piece(cg, 4);
+  cg_piece(cg, 26);
+  cg_byte(cg, 32); cg_byte(cg, 64);
+  cg_byte(cg, 95); cg_byte(cg, 115); cg_byte(cg, 116); cg_byte(cg, 97); cg_byte(cg, 114); cg_byte(cg, 116);
+  cg_piece(cg, 24); cg_piece(cg, 25);
+  cg_byte(cg, 32); cg_piece(cg, 22);
+  cg_piece(cg, 20);
+
+  ret_ty := (*main_decl).data_type;
+  if (is_void_type(ret_ty)) {
+    cg_piece(cg, 1); cg_piece(cg, 16); cg_piece(cg, 26);
+    cg_byte(cg, 32); cg_byte(cg, 64);
+    cg_byte(cg, 109); cg_byte(cg, 97); cg_byte(cg, 105); cg_byte(cg, 110);
+    cg_piece(cg, 24); cg_piece(cg, 25); cg_piece(cg, 0);
+    code_op := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  } else {
+    a := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, a); cg_piece(cg, 2);
+    cg_piece(cg, 16);
+    cg_type(cg, s, file_idx, ret_ty);
+    cg_byte(cg, 32); cg_byte(cg, 64);
+    cg_byte(cg, 109); cg_byte(cg, 97); cg_byte(cg, 105); cg_byte(cg, 110);
+    cg_piece(cg, 24); cg_piece(cg, 25); cg_piece(cg, 0);
+    call_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false };
+
+    if ((*ret_ty).kind == 121) {
+      a := new_reg(cg);
+      cg_piece(cg, 1); cg_reg_ref(cg, a); cg_piece(cg, 2);
+      cg_piece(cg, 53); cg_piece(cg, 51); cg_byte(cg, 32); cg_operand(cg, call_op); cg_piece(cg, 54); cg_piece(cg, 0);
+      code_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false };
+    } else {
+      if (llvm_int_width((*ret_ty).tok.kind) == 64) {
+        code_op := call_op;
+      } else {
+        a := new_reg(cg);
+        cg_piece(cg, 1); cg_reg_ref(cg, a); cg_piece(cg, 2);
+        cg_piece(cg, 57);
+        cg_type(cg, s, file_idx, ret_ty);
+        cg_byte(cg, 32); cg_operand(cg, call_op);
+        cg_piece(cg, 60); cg_byte(cg, 105); cg_uint(cg, 64);
+        cg_piece(cg, 0);
+        code_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false };
+      }
+    }
+  }
+
+  args[0] := code_op;
+  discard_op := gen_raw_syscall(cg, 231, &args, 1);
+  cg_piece(cg, 1); cg_piece(cg, 21);
+  cg_piece(cg, 23);
+  return true;
 }
 
 function main() : int32 {
@@ -5909,6 +6259,7 @@ function main() : int32 {
   mut exit_code : int64 := 0;
   mut wrote_ok : bool := true;
   mut err_src : *(uint8[65536]) := &buffers_arr[0].bytes;
+  mut start_done : bool := false;
 
   mut msg_lex : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 108, 101, 120, 32, 101, 114, 114, 111, 114, 32, 98, 101, 102, 111, 114, 101, 32, 112, 97, 114, 115, 105, 110, 103, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
   mut msg_parse : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 112, 97, 114, 115, 101, 32, 101, 114, 114, 111, 114, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
@@ -6348,20 +6699,24 @@ function main() : int32 {
     w := w + 1;
   }
 
-  // ---- 5. codegen (Module 4, first slice): emit LLVM IR text for
-  // every function/extern whose whole signature is scalar (any
-  // integer type, `bool`, `char`) -- see gen_program's own header
-  // comment for exactly what's deliberately still out of scope this
-  // round (structs, arrays, pointers, `as` casts, sizeof/lengthof,
-  // extern calls). Unlike Module 3's own "dump and check by hand"
+  // ---- 5. codegen (Module 4): emit LLVM IR text for every supported
+  // struct/function/extern (see gen_program's own header comment for
+  // exactly what's still out of scope -- struct/array literals and
+  // broadcast-init are handled; extern/syscall calls now are too, per
+  // the loop below). Unlike Module 3's own "dump and check by hand"
   // verification, this module's own stdout is meant to be assembled
-  // with `llc` and actually run (postulate_stage1_v1_0_6_edsger_
-  // design.md's Module 4 section) -- checked as plain text for now,
-  // per this round's own agreed scope. ----
+  // with `llc` and actually run, and -- now that gen_start below emits
+  // a real ELF entry point -- linked with `ld` into a genuinely
+  // runnable binary (postulate_stage1_bootstrap_plan.md's own "Tracked
+  // checkpoint: extern/syscall calls and `_start`" section covers the
+  // technique in full). ----
   gen_struct_types(&cg, &sema);
   i := 0;
   while (i < fs.count) {
     gen_program(&cg, &sema, programs_arr[i], i);
+    if (!start_done) {
+      start_done := gen_start(&cg, &sema, programs_arr[i], i);
+    }
     i := i + 1;
   }
 

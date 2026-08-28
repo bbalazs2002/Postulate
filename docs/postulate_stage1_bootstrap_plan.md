@@ -369,30 +369,42 @@ is a placeholder to make sure it gets a real look before `v1.0.6`
 closes out the still-single-file proof-of-concept era, rather than
 being forgotten between now and then.
 
-### Tracked checkpoint: extern/syscall calls and `_start`, not yet carried into Edsger
+### Resolved checkpoint: extern/syscall calls and `_start`
 
-`v1.0.6`'s own Module 4 (Codegen) description above says it emits LLVM
-IR "reusing and extending `v1.0.2`/`v1.0.3`'s existing emission logic"
-— true for scalar/composite/pointer codegen, but Edsger's actual
-`codegen.ptl` never ended up implementing the one piece of `v1.0.2`
-that made a *compiled program* itself runnable: an emitted entry point
-and an exit syscall. Every Edsger program compiles to a `define ...
-@main(...)` and nothing else — no `_start`, no way to call `extern
-function sys_write`/`sys_exit`/etc. at all, and consequently no way yet
-to link a compiled program into a binary that does anything observable
-or even exits cleanly (confirmed directly: nothing in `codegen.ptl`
-emits `_start`, an inline-asm `syscall`, or a `declare`d extern's
-actual implementation — an `extern function`'s own `declare` line is
-emitted, but nothing at link time backs the symbol it names). This is
-not a deliberate `v1.1.n`-style deferral the way `v1.1.12` above is —
-it's a genuine gap against `v1.0.6`'s own original intent, found while
-building `Edsger/edsger` (the CLI script mirroring `Hoare/hoare`, which
-is why that script deliberately stops at an unlinked `.o` rather than
-attempting to link one, per its own header comment) and while
-deleting the now-superseded `postulate_stage1_v1_0_2_llvm_backend_
-design.md`/`postulate_stage1_v1_0_3_composites_design.md`, which had
-already worked out the exact technique once for the pre-rewrite proof
-of concept. Preserved here rather than left to be rediscovered:
+**Done, 2026-08-28** — originally tracked here as an open gap (kept
+below as the historical record of what was missing and why, and as the
+technique reference the actual implementation followed). `v1.0.6`'s own
+Module 4 (Codegen) description above says it emits LLVM IR "reusing and
+extending `v1.0.2`/`v1.0.3`'s existing emission logic" — true for
+scalar/composite/pointer codegen, but Edsger's `codegen.ptl` had never
+implemented the one piece of `v1.0.2` that made a *compiled program*
+itself runnable: an emitted entry point and an exit syscall. Every
+Edsger program compiled to a `define ... @main(...)` and nothing else —
+no `_start`, no way to call `extern function sys_write`/`sys_exit`/etc.
+at all, and consequently no way to link a compiled program into a
+binary that did anything observable or even exited cleanly. Fixed by
+adding, to `codegen.ptl`: `gen_start` (emits a real `define void
+@_start()` for whichever file declares `main`, per the technique below),
+`gen_syscall_extern`/`gen_raw_syscall`/`syscall_number_for`/`is_syscall_
+safe_type` (back each of the twelve whitelisted `extern function`s with
+a real inline-asm syscall wrapper instead of an unresolvable `declare`),
+and a fix to `gen_call` itself, which had been unconditionally rejecting
+any callee that wasn't a plain `FUNCTION_DECL` — silently dropping a
+call to an `extern function` from the output entirely even once its own
+wrapper existed. `Edsger/edsger` now links by default (`ld -static
+-no-pie -e _start`), exactly like `Hoare/hoare` already does. Verified
+end-to-end, not just unit-tested: a real program calling `sys_write`/
+`sys_mmap`/`sys_munmap`/`sys_gettid` compiles, assembles, links, and
+**runs** correctly (real stdout output, correct exit code) via
+`Edsger/Dockerfile.release`'s own release image — new fixture `Edsger/
+tests/codegen_cases/codegen_test_09_extern_syscalls.ptl`.
+
+This was found while building `Edsger/edsger` (the CLI script mirroring
+`Hoare/hoare`) and while deleting the now-superseded `postulate_stage1_
+v1_0_2_llvm_backend_design.md`/`postulate_stage1_v1_0_3_composites_
+design.md`, which had already worked out the exact technique once for
+the pre-rewrite proof of concept — preserved below rather than only in
+those now-deleted files:
 
 - **Raw syscalls have no LLVM intrinsic** — each of the whitelisted
   `extern function`s (§5.2's table: `sys_read`=0, `sys_write`=1,
@@ -421,10 +433,10 @@ of concept. Preserved here rather than left to be rediscovered:
 - **`_start` becomes a plain `define void @_start()`**: calls `@main`,
   then performs the exit syscall inline-asm above with `main`'s return
   value (`0` for a `void` main), then `unreachable`. No `@main`/libc/
-  crt0 convention needed — this is what makes `edsger`'s own eventual
-  link line able to stay exactly `ld -static -no-pie -e _start
-  -o out out.o`, no libc involved, mirroring `hoare`'s own link line
-  precisely. `_start` never reaches a `ret` (the process exits via the
+  crt0 convention needed — this is what lets `edsger`'s own link line
+  stay exactly `ld -static -no-pie -e _start -o out out.o`, no libc
+  involved, mirroring `hoare`'s own link line precisely. `_start` never
+  reaches a `ret` (the process exits via the
   syscall, not by returning), so any prologue `llc` may still emit for
   it is dead code that never executes — harmless, not worth suppressing.
 - **`main`'s own declared return width, not an assumed one** — `_start`
@@ -450,11 +462,9 @@ of concept. Preserved here rather than left to be rediscovered:
   codegen knows the failure mode to watch for if a similar shortcut
   looks tempting there too, not because Edsger has this bug today.
 
-Whether this becomes its own `v1.1.n` step, gets folded backward into
-finishing `v1.0.6` itself, or is handled some other way is **explicitly
-not decided here** — same "flag it, don't silently lose it, decide
-later" spirit as the struct-field-layout checkpoint above, not a
-recommendation for which of those three it should be.
+Landed as a direct fix to `v1.0.6`'s own Codegen module (above), not a
+new `v1.1.n` step — this was completing that module's own original,
+already-scoped intent, not adding new v1-language surface.
 
 ## 5. What's deliberately not in this plan
 

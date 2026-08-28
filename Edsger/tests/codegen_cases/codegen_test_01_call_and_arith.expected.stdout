@@ -22,3 +22,11 @@ entry:
   ret i32 %r9
 }
 
+define void @_start() {
+entry:
+  %r10 = call i32 @main()
+  %r11 = zext i32 %r10 to i64
+  %r12 = call i64 asm sideeffect "syscall", "={rax},{rax},{rdi},~{rcx},~{r11},~{memory}"(i64 231, i64 %r11)
+  unreachable
+}
+

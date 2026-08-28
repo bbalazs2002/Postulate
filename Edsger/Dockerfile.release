@@ -1,6 +1,6 @@
 # Postulate Edsger -- release image: just the compiler binary, the
-# language reference, and the tool `./edsger` needs at runtime (llc,
-# bash) -- nothing from the dev/test toolchain (the `.ptl` sources,
+# language reference, and the tools `./edsger` needs at runtime (llc,
+# ld, bash) -- nothing from the dev/test toolchain (the `.ptl` sources,
 # the tests/ fixtures, Hoare itself). Meant for other developers who
 # just want to compile Postulate v1 programs, not work on Edsger itself.
 #
@@ -19,10 +19,11 @@
 # Use:
 #   docker run --rm -v ${PWD}:/work postulate-edsger-release file.ptl
 #
-# Produces an unlinked object file, not a runnable binary -- see
-# ./edsger's own header comment, and docs/postulate_stage1_bootstrap_
-# plan.md's "Tracked checkpoint: extern/syscall calls and `_start`",
-# for exactly why and what's still missing.
+# Produces a real, runnable ELF binary by default -- gen_start/gen_
+# syscall_extern (codegen.ptl) emit a real `_start` entry point and
+# working syscall wrappers for the twelve whitelisted `extern function`s
+# (postulate_v1_language_reference.md SS5.2); see ./edsger's own header
+# comment for the `--emit-llvm`/`-c` flags that stop short of linking.
 
 FROM postulate-edsger:latest AS builder
 
@@ -32,7 +33,7 @@ RUN chmod +x edsger scripts/build.sh && ./scripts/build.sh
 FROM ubuntu:24.04
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends llvm bash \
+ && apt-get install -y --no-install-recommends llvm binutils bash \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/edsger
