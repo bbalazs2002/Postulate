@@ -1,3 +1,0 @@
-// B's own leading comment
-#include "./c.ptl";
-function b_val() : int32 { return c_val() + 1; }

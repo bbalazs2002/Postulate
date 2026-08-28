@@ -1,6 +1,0 @@
-namespace \Core\Math;
-
-use \Core\Math\Matrix;
-use \Core\Math\Matrix as MTX;
-use \Core\Math\{Matrix as MTX2, Vector, calculate_norm};
-use \Core\Math;

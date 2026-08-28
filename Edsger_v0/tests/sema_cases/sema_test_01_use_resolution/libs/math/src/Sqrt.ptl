@@ -1,5 +1,0 @@
-namespace \Vendor\Math;
-
-function noop() : void {
-  return;
-}

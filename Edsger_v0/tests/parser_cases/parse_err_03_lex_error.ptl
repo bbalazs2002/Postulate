@@ -1,9 +1,0 @@
-namespace \Main;
-
-function main() : int32 {
-  mut s : *(uint8[4]) := 0;
-  return 0;
-}
-
-// unterminated string literal below
-const bad : uint8 := "oops

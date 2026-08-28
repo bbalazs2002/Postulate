@@ -1,3 +1,0 @@
-sema warning: cast from 'int64' to 'int32' may lose or reinterpret its value at line 5, col 20
-sema warning: cast from 'int32' to 'uint32' may lose or reinterpret its value at line 7, col 21
-sema warning: cast from 'uint32' to 'int32' may lose or reinterpret its value at line 9, col 20

@@ -1,9 +1,0 @@
-namespace \Vendor\Geo;
-
-use \Core\Math\Sqrt;
-
-struct Point {
-  s : Sqrt;
-  x : int32;
-  y : int32;
-}

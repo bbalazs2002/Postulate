@@ -1,5 +1,0 @@
-namespace \Vendor\Math;
-
-function sqrt_noop() : void {
-  return;
-}

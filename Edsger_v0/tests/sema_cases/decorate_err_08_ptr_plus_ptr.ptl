@@ -1,7 +1,0 @@
-namespace \Main;
-function main() : int32 {
-  mut p : *int32 := null;
-  mut q : *int32 := null;
-  mut r : *int32 := p + q;
-  return 0;
-}

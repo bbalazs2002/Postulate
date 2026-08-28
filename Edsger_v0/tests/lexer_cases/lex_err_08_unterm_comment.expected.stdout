@@ -1,7 +1,0 @@
-KW function
-IDENT f
-LPAREN
-RPAREN
-COLON
-KW void
-LBRACE

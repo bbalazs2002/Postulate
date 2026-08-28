@@ -4,14 +4,10 @@ temp/**
 // build artifacts
 */build/**
 Hoare/build/**
-Edsger/build/**
 
 // node module files
 */node_modules/**
 node_modules/
-
-// build artifacts
-editors/vscode/out/
 
 // secrets
 */*.env

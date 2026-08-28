@@ -1,8 +1,0 @@
-namespace \Main;
-function add(a: int64, b: int32) : int64 {
-  return a + 3;
-}
-function main() : int32 {
-  mut r : int64 := add(1, 2);
-  return 0;
-}

@@ -1,7 +1,0 @@
-namespace \Main;
-
-function main() : int32 {
-  mut u : uint32 := 5;
-  mut r : uint32 := -u;
-  return 0;
-}

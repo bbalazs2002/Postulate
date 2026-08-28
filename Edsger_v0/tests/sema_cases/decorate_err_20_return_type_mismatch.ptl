@@ -1,8 +1,0 @@
-namespace \Main;
-function get() : int32 {
-  mut x : int64 := 1;
-  return x;
-}
-function main() : int32 {
-  return 0;
-}

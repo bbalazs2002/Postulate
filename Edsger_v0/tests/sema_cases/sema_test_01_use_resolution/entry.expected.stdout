@@ -1,9 +1,0 @@
-USE \Vendor\Math\Sqrt -> libs/math/src/Sqrt.ptl
-USE \Core\Collections -> Core/Collections.ptl
-SYM S Point size=8
-SYM S Line size=17
-SYM S Wrapper size=24
-SYM X sys_write
-SYM F main
-SYM F noop
-SYM F collections_noop

@@ -1,5 +1,0 @@
-namespace \Main;
-function main() : int32 {
-  mut n : int32 := lengthof(int32) as int32;
-  return 0;
-}

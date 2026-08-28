@@ -1,5 +1,0 @@
-namespace \Core;
-
-function collections_noop() : void {
-  return;
-}

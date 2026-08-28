@@ -1,6 +1,0 @@
-namespace \Main;
-function main() : int32 {
-  mut v : int64 := 1;
-  mut a : int32[2] := {v, 2};
-  return 0;
-}

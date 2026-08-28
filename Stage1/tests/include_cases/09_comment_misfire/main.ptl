@@ -1,3 +1,0 @@
-// see #include "evil.ptl"; below
-/* #include "evil2.ptl"; */
-function main() : int32 { return 0; }

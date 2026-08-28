@@ -1,9 +1,0 @@
-namespace \Main;
-
-@autoload("\Vendor\Math\", "libs/math/src");
-
-use \Vendor\Math;
-
-function main() : int32 {
-  return 0;
-}

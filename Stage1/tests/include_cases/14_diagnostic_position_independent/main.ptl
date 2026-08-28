@@ -1,4 +1,0 @@
-#include "./b.ptl";
-function main() : int32 {
-  return @;
-}

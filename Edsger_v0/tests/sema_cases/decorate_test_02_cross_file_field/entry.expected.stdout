@@ -1,3 +1,0 @@
-USE \Vendor\Geo\Point -> Vendor/Geo/Point.ptl
-SYM F main
-SYM S Point size=8

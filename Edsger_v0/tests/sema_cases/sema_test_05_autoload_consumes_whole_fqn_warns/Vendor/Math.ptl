@@ -1,5 +1,0 @@
-namespace \Vendor;
-
-function math_noop() : void {
-  return;
-}

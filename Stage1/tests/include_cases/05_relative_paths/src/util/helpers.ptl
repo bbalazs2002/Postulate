@@ -1,2 +1,0 @@
-#include "../shared/types.ptl";
-function helper_val() : int32 { return shared_val() + 1; }

@@ -1,7 +1,0 @@
-namespace \Main;
-
-@autoload("\Plugin\:module\:module\", "plugins/:module/src");
-
-function main() : int32 {
-  return 0;
-}
