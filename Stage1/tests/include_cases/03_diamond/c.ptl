@@ -1,2 +1,0 @@
-#include "./d.ptl";
-function c_val() : int32 { return 3; }

@@ -1,3 +1,0 @@
-#include "./b.ptl";
-#include "./e.ptl";
-function main() : int32 { return c_val() + d_val() + b_val() + e_val(); }

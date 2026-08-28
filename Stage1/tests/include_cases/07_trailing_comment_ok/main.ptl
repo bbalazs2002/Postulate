@@ -1,2 +1,0 @@
-#include "./b.ptl";   // shared defs
-function main() : int32 { return b_val(); }
