@@ -54,21 +54,6 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: Edsger_v0/scripts/bundle_release.sh "$VERSION" dist
 
-      # A scoped alternative to GitHub's own auto-attached "Source code"
-      # zip/tar.gz (which always contains the WHOLE monorepo -- both
-      # compilers, every doc -- and can't be turned off): just
-      # Edsger_v0/ itself plus its own (v1.0) language reference,
-      # nothing Hoare-related.
-      - name: Build a scoped source archive
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          NAME="postulate-edsger-${VERSION}-source"
-          mkdir -p dist
-          tar -czf "dist/$NAME.tar.gz" --transform "s,^,$NAME/," \
-            --exclude='Edsger_v0/build' \
-            Edsger_v0 docs/postulate_v1_0_language_reference.md
-
       - name: Create the GitHub Release
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -76,12 +61,11 @@ jobs:
         run: |
           gh release create "${{ github.ref_name }}" \
             "dist/postulate-edsger-${VERSION}-linux-x86_64.tar.gz" \
-            "dist/postulate-edsger-${VERSION}-source.tar.gz" \
             --title "Edsger $VERSION" \
             --notes "Postulate v1.0 compiler (Stage 1, self-hosted).
 
           - **Docker (recommended)**: \`docker run --rm -v \${PWD}:/work ghcr.io/${{ github.repository_owner }}/postulate-edsger:$VERSION test.ptl\`
-          - **Standalone tarball**: download \`postulate-edsger-$VERSION-linux-x86_64.tar.gz\`, extract it, run \`./edsger test.ptl\`. Bundles llc/ld and their shared libraries — no separate install needed on a compatible x86-64 Linux host (see Edsger_v0/README.md's own \"Release image\" section for exactly what that covers).
-          - **Source, Edsger only**: \`postulate-edsger-$VERSION-source.tar.gz\` — just the \`Edsger_v0/\` directory and its language reference. GitHub's own \"Source code\" zip/tar.gz below is the whole monorepo (both compilers, all docs); use this one instead if you only want Edsger's.
+          - **Standalone tarball**: download \`postulate-edsger-$VERSION-linux-x86_64.tar.gz\`, extract it, run \`./edsger test.ptl\`. Bundles llc/ld and their shared libraries — no separate install needed on a compatible x86-64 Linux host (see README.md's own \"Release image\" section for exactly what that covers).
+          - **Source**: the auto-generated \"Source code\" zip/tar.gz below — this tag lives on the \`edsger-release\` branch, which contains only Edsger's own source (plus Hoare, needed to bootstrap it) and docs, not the full Postulate monorepo.
 
           Language reference: [docs/postulate_v1_0_language_reference.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/postulate_v1_0_language_reference.md) — this is the practical reference for what Edsger accepts today, not the full v1 design doc."
