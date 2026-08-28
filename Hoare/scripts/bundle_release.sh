@@ -30,13 +30,21 @@
 # (docker build -f Hoare/Dockerfile.release -t postulate-hoare-release .
 # from the repository root) and Docker available to run it.
 set -euo pipefail
-cd "$(dirname "$0")/.."
 
 VERSION="${1:?usage: bundle_release.sh <version> <outdir>}"
 OUTDIR="${2:?usage: bundle_release.sh <version> <outdir>}"
 NAME="postulate-hoare-${VERSION}-linux-x86_64"
 
+# Resolve to an absolute path (and relative to the CALLER's cwd) before
+# the `cd` below moves us elsewhere -- Docker's `-v SRC:DST` treats a
+# bare relative name like "dist" as a *named volume*, not a bind mount
+# to ./dist, silently writing the tarball somewhere the caller (the
+# release workflow's later steps, or a person running this by hand)
+# will never find it.
 mkdir -p "$OUTDIR"
+OUTDIR="$(cd "$OUTDIR" && pwd)"
+
+cd "$(dirname "$0")/.."
 
 MSYS_NO_PATHCONV=1 docker run --rm \
   -v "$OUTDIR:/out" \

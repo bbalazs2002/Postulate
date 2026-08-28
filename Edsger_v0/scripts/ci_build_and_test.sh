@@ -12,14 +12,17 @@ set -euo pipefail
 echo "Runner: $(uname -m)"
 docker version --format 'Docker {{.Server.Version}} (server arch {{.Server.Arch}})'
 
-# --provenance=false --sbom=false: without these, GitHub-hosted
-# runners' Docker can emit a multi-manifest (attestation) image even
-# for a plain `docker build`, and a later `docker run` against it may
-# pick the non-runnable attestation manifest instead of the real one --
-# "cannot execute binary file" / exit 126 running e.g. bash inside it.
-# Diagnostic `docker inspect` calls below print each image's actual
-# Os/Architecture so a recurrence of that failure is easier to tell
-# apart from a genuine cross-arch build.
+# --provenance=false --sbom=false: harmless CI hygiene (skips writing
+# extra attestation manifests this script doesn't use) -- NOT a fix for
+# anything below; kept for the `docker inspect` diagnostics to stay
+# simple. The real "cannot execute binary file" / exit 126 bug (see the
+# docker run below) turned out to be unrelated: Edsger_v0/Dockerfile
+# sets `ENTRYPOINT ["/bin/bash"]`, so `docker run image bash -c "..."`
+# actually execs `/bin/bash bash -c "..."` -- bash's own argv[1] is the
+# literal string "bash", which it treats as a script *file* to run
+# (not a flag), finds the real /usr/bin/bash binary via PATH, and
+# refuses to interpret a binary file as a script. Fixed below with
+# `--entrypoint bash` instead of passing "bash" as part of the command.
 BUILD_FLAGS=(--provenance=false --sbom=false)
 
 docker build "${BUILD_FLAGS[@]}" -f Edsger_v0/Dockerfile -t postulate-edsger .
@@ -34,7 +37,7 @@ docker inspect postulate-edsger-release --format 'postulate-edsger-release: Os={
 # codegen_cases fixtures, run directly against the real, released
 # build/codegen (not the historical single-file src/codegen.ptl that
 # Edsger_v0/tests/run_all_tests.sh's own run_codegen_tests.sh checks).
-docker run --rm -v "$PWD/Edsger_v0:/workspace/Edsger" postulate-edsger bash -c "
+docker run --rm -v "$PWD/Edsger_v0:/workspace/Edsger" --entrypoint bash postulate-edsger -c "
   set -e
   for f in tests/codegen_cases/*.ptl; do
     base=\"\${f%.ptl}\"
