@@ -7,9 +7,10 @@
 # Hoare's own source does.
 #
 # Build context must be the repository root (this Dockerfile reaches
-# ./Hoare, a sibling of Edsger/, not something inside Edsger/ itself):
+# ./Hoare, a sibling of Edsger_v0/, not something inside Edsger_v0/
+# itself):
 #
-#   docker build -f Edsger/Dockerfile -t postulate-edsger .
+#   docker build -f Edsger_v0/Dockerfile -t postulate-edsger .
 #
 # or, equivalently, via docker-compose.yml (see its own `edsger-dev`
 # service, already wired to this file).

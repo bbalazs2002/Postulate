@@ -26,7 +26,7 @@ jobs:
       # bootstrap (Edsger_v0/scripts/build.sh) has something to compile
       # with -- see Edsger_v0/Dockerfile's own header comment.
       - name: Build the dev image
-        run: docker build -t postulate-edsger Edsger_v0
+        run: docker build -f Edsger_v0/Dockerfile -t postulate-edsger .
 
       # Runs Edsger_v0/scripts/build.sh's own two-stage bootstrap
       # (codegen_selfhost, then the real src/modular/ source) inside

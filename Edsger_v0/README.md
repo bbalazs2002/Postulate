@@ -58,11 +58,11 @@ you're curious.
 ## Build and test
 
 ```powershell
-docker build -t postulate-edsger Edsger_v0
+docker build -f Edsger_v0/Dockerfile -t postulate-edsger .
 ```
 
 (Build context is the **repository root** — this Dockerfile reaches
-`../Hoare`, a sibling directory, not something inside `Edsger_v0/`.)
+`./Hoare`, a sibling directory, not something inside `Edsger_v0/`.)
 
 This assembles Hoare inside the image (`Edsger_v0/Dockerfile`'s own
 job), then — from inside a container built from that image — running
@@ -162,7 +162,7 @@ always exactly what the dev image's own build just produced.
 Build from the **repository root**:
 
 ```powershell
-docker build -t postulate-edsger Edsger_v0
+docker build -f Edsger_v0/Dockerfile -t postulate-edsger .
 docker build -f Edsger_v0/Dockerfile.release -t postulate-edsger-release .
 ```
 
