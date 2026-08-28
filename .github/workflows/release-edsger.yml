@@ -1,0 +1,91 @@
+name: Release Edsger
+
+# Triggered by pushing a tag like "edsger-v0.1.0" -- separate from
+# Hoare's own "hoare-vX" tags (see release-hoare.yml) since the two
+# compilers are versioned and released independently.
+on:
+  push:
+    tags:
+      - "edsger-v*"
+
+permissions:
+  contents: write   # create the GitHub Release and upload assets
+  packages: write   # push the release image to ghcr.io
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/edsger-}" >> "$GITHUB_OUTPUT"
+
+      # Builds Hoare inside the image so Edsger's own two-stage
+      # bootstrap (Edsger_v0/scripts/build.sh) has something to compile
+      # with -- see Edsger_v0/Dockerfile's own header comment.
+      - name: Build the dev image
+        run: docker build -t postulate-edsger Edsger_v0
+
+      # Runs Edsger_v0/scripts/build.sh's own two-stage bootstrap
+      # (codegen_selfhost, then the real src/modular/ source) inside
+      # its builder stage, then the module fixture suites; see
+      # Edsger_v0/Dockerfile.release's own header comment. A failing
+      # build or fixture fails this step, gating the release on it.
+      - name: Build and test the release image
+        run: |
+          docker build -f Edsger_v0/Dockerfile.release -t postulate-edsger-release .
+          docker run --rm -v "$PWD/Edsger_v0:/workspace/Edsger" postulate-edsger bash -c "
+            set -e
+            for f in tests/codegen_cases/*.ptl; do
+              base=\"\${f%.ptl}\"
+              out=\$(mktemp); err=\$(mktemp)
+              ./build/codegen < \"\$f\" > \"\$out\" 2> \"\$err\"
+              diff -q \"\$base.expected.stdout\" \"\$out\"
+              diff -q \"\$base.expected.stderr\" \"\$err\"
+              rm -f \"\$out\" \"\$err\"
+            done
+            echo 'codegen_cases: all passed against build/codegen'
+          "
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push the release image to GHCR
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          IMAGE="ghcr.io/${{ github.repository_owner }}/postulate-edsger"
+          docker tag postulate-edsger-release "$IMAGE:$VERSION"
+          docker tag postulate-edsger-release "$IMAGE:latest"
+          docker push "$IMAGE:$VERSION"
+          docker push "$IMAGE:latest"
+
+      # See Edsger_v0/scripts/bundle_release.sh's own header comment
+      # (and Hoare/scripts/bundle_release.sh's, which it mirrors) for
+      # what "self-contained" means here and its portability trade-off
+      # against the Docker image just pushed above.
+      - name: Build the self-contained tarball
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: Edsger_v0/scripts/bundle_release.sh "$VERSION" dist
+
+      - name: Create the GitHub Release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            "dist/postulate-edsger-${VERSION}-linux-x86_64.tar.gz" \
+            --title "Edsger $VERSION" \
+            --notes "Postulate v1.0 compiler (Stage 1, self-hosted).
+
+          - **Docker (recommended)**: \`docker run --rm -v \${PWD}:/work ghcr.io/${{ github.repository_owner }}/postulate-edsger:$VERSION test.ptl\`
+          - **Standalone tarball**: download the asset below, extract it, run \`./edsger test.ptl\`. Bundles llc/ld and their shared libraries — no separate install needed on a compatible x86-64 Linux host (see Edsger_v0/README.md's own \"Release image\" section for exactly what that covers).
+
+          Language reference: [docs/postulate_v1_0_language_reference.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/postulate_v1_0_language_reference.md) — this is the practical reference for what Edsger accepts today, not the full v1 design doc."

@@ -1,0 +1,76 @@
+namespace \Edsger\Dynamic;
+
+// Growable, heap-backed buffers for the modular Edsger (docs/postulate_
+// stage1_bootstrap_plan.md's own "Modular, dynamic-memory Edsger" plan)
+// -- replaces codegen.ptl's fixed-size stack-local arrays (source/
+// token/AST-pool/symbol/local-binding/file buffers), which are both a
+// source of real, silent memory-safety bugs once real input exceeds
+// their capacity (the 2026-08-28 self-hosting dry run) and the reason
+// `llc` crashes assembling a function whose own stack frame is tens of
+// megabytes wide.
+//
+// No generics in this language, so this is a small, fixed set of
+// structs, each following the exact sys_mmap(init)/sys_mremap(grow)/
+// sys_munmap(free) pattern already given as the language reference's
+// own canonical example (postulate_v1_language_reference.md SS2.8,
+// alloc_int32_buffer/grow_int32_buffer). Growth policy, uniform across
+// all of them and per the user's own explicit choice: each carries its
+// own `chunk` -- the size passed to the initial sys_mmap and the
+// increment for every subsequent sys_mremap. `ensure(buf, needed)`
+// grows by whole chunks (not exact-fit, not doubling) to cut down the
+// number of mremap calls:
+//
+//   new_cap := cap;
+//   while (new_cap < needed) { new_cap := new_cap + chunk; }
+//
+// then one mremap from cap to new_cap.
+
+extern function sys_mmap(addr: uint64, length: uint64, prot: int64, flags: int64, fd: int64, offset: int64) : *void;
+extern function sys_munmap(addr: uint64, length: uint64) : int64;
+extern function sys_mremap(old_addr: uint64, old_length: uint64, new_length: uint64, flags: int64) : *void;
+
+// ---------------------------------------------------------------------
+// DynBytes -- the workhorse: per-file source buffers, the LLVM-IR
+// output buffer, path/error scratch buffers. `p[i]`/`p + n` (reference
+// SS2.5, pointer arithmetic/indexing -- already implemented in
+// codegen.ptl's own gen_addr/INDEX_EXPR pointer case) replace every
+// `(*buf)[i]` on what used to be a `*(uint8[N])`.
+// ---------------------------------------------------------------------
+
+struct DynBytes {
+  ptr : *uint8;
+  cap : uint64;
+  len : uint64;
+  chunk : uint64;
+}
+
+function dynbytes_new(chunk_size: uint64) : DynBytes {
+  mut raw : *void := sys_mmap(0, chunk_size, 3, 34, 0, 0);
+  return DynBytes { ptr := raw as *uint8, cap := chunk_size, len := 0, chunk := chunk_size };
+}
+
+function dynbytes_ensure(buf: *DynBytes, needed: uint64) : void {
+  mut new_cap : uint64 := 0;
+  mut raw : *void := null;
+  if (needed <= (*buf).cap) { return; }
+  new_cap := (*buf).cap;
+  while (new_cap < needed) {
+    new_cap := new_cap + (*buf).chunk;
+  }
+  raw := sys_mremap((*buf).ptr as uintptr, (*buf).cap, new_cap, 1);
+  (*buf).ptr := raw as *uint8;
+  (*buf).cap := new_cap;
+}
+
+function dynbytes_push_byte(buf: *DynBytes, b: uint8) : void {
+  dynbytes_ensure(buf, (*buf).len + 1);
+  (*buf).ptr[(*buf).len] := b;
+  (*buf).len := (*buf).len + 1;
+}
+
+function dynbytes_free(buf: *DynBytes) : void {
+  sys_munmap((*buf).ptr as uintptr, (*buf).cap);
+  (*buf).ptr := null;
+  (*buf).cap := 0;
+  (*buf).len := 0;
+}

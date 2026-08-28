@@ -184,6 +184,27 @@ with:
 docker run --rm --entrypoint cat postulate-hoare-release /opt/hoare/docs/postulate_v0_language_reference.md > language_reference.md
 ```
 
+## Published releases
+
+Pushing a `hoare-vX.Y.Z` tag runs `.github/workflows/release-hoare.yml`:
+it builds and tests the dev image (exactly "Build and test" above),
+re-packages the release image, and publishes it two ways:
+
+- **The release image itself**, pushed to
+  `ghcr.io/<owner>/postulate-hoare:vX.Y.Z` (and `:latest`) — use exactly
+  like the locally-built release image above, just with that image name
+  instead of `postulate-hoare-release`.
+- **A self-contained tarball** (`scripts/bundle_release.sh`), attached
+  to the GitHub Release itself, for anyone who'd rather not use Docker
+  at all: extract it and run `./hoare test.ptl` directly. It bundles
+  `nasm`/`ld` and their own shared-library dependencies (`ldd`-resolved
+  against the exact Ubuntu 24.04 build the Docker image itself uses),
+  so nothing needs separately installing on the target machine — a
+  best-effort portability measure (works on essentially any
+  actively-maintained x86-64 Linux distribution) rather than the same
+  hermetic guarantee the Docker image gives; see the script's own
+  header comment for the full reasoning.
+
 ## Run
 
 ```powershell

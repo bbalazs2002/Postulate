@@ -1,0 +1,74 @@
+name: Release Hoare
+
+# Triggered by pushing a tag like "hoare-v0.1.0" -- separate from
+# Edsger's own "edsger-vX" tags (see release-edsger.yml) since the two
+# compilers are versioned and released independently.
+on:
+  push:
+    tags:
+      - "hoare-v*"
+
+permissions:
+  contents: write   # create the GitHub Release and upload assets
+  packages: write   # push the release image to ghcr.io
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/hoare-}" >> "$GITHUB_OUTPUT"
+
+      # Builds all four binaries and runs every fixture suite as part
+      # of the image build itself (Hoare/Dockerfile's own RUN steps) --
+      # a failing test fails this step, gating the release on it.
+      - name: Build and test the dev image
+        run: docker build -t postulate-hoare Hoare
+
+      # Re-packages the already-tested binaries above; see
+      # Hoare/Dockerfile.release's own header comment.
+      - name: Build the release image
+        run: docker build -f Hoare/Dockerfile.release -t postulate-hoare-release .
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push the release image to GHCR
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          IMAGE="ghcr.io/${{ github.repository_owner }}/postulate-hoare"
+          docker tag postulate-hoare-release "$IMAGE:$VERSION"
+          docker tag postulate-hoare-release "$IMAGE:latest"
+          docker push "$IMAGE:$VERSION"
+          docker push "$IMAGE:latest"
+
+      # See Hoare/scripts/bundle_release.sh's own header comment for
+      # what "self-contained" means here and its portability trade-off
+      # against the Docker image just pushed above.
+      - name: Build the self-contained tarball
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: Hoare/scripts/bundle_release.sh "$VERSION" dist
+
+      - name: Create the GitHub Release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            "dist/postulate-hoare-${VERSION}-linux-x86_64.tar.gz" \
+            --title "Hoare $VERSION" \
+            --notes "Postulate v0 compiler (Stage 0).
+
+          - **Docker (recommended)**: \`docker run --rm -v \${PWD}:/work ghcr.io/${{ github.repository_owner }}/postulate-hoare:$VERSION test.ptl\`
+          - **Standalone tarball**: download the asset below, extract it, run \`./hoare test.ptl\`. Bundles nasm/ld and their shared libraries — no separate install needed on a compatible x86-64 Linux host (see Hoare/README.md's own \"Release\" section for exactly what that covers).
+
+          Language reference: [docs/postulate_v0_language_reference.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/postulate_v0_language_reference.md)"

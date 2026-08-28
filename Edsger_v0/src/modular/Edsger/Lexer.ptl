@@ -1,0 +1,571 @@
+namespace \Edsger\Lexer;
+use \Edsger\Dynamic;
+
+// Edsger -- semantic analyzer module, v1.0.6 (Module 3), SECOND SLICE.
+// Written in Postulate v0, compiled by Hoare (Stage 0).
+//
+// Self-contained, like lexer.ptl/parser.ptl: v0 has no separate
+// compilation, so this file embeds its own full copy of the lexer AND
+// parser (SourceReader through parse_program, unchanged from
+// parser.ptl) rather than "importing" them, so it can turn real .ptl
+// source into a real AST before doing anything semantic with it.
+//
+// This slice replaces the first slice's own throwaway line-based
+// @autoload test protocol (retired -- see git history / the previous
+// session for that version) with a real driver: tokenize + parse the
+// whole input, then:
+//   1. collect and validate every @autoload rule from the parsed
+//      AUTOLOAD_DECL nodes (validate_pattern, unchanged from the first
+//      slice) -- pattern/path text is sliced from each STRING_LIT
+//      token's own span with its surrounding quotes dropped
+//      (offset+1, length-2);
+//   2. resolve every use_decl's fqn against those rules (resolve_path,
+//      refactored below to take a fqn as pre-split Segment[] rather
+//      than a raw span -- the parser never records the position of
+//      the backslashes connecting a PATH_SEGMENT chain's own
+//      identifiers, only each segment's own token, so there is no
+//      single contiguous source span to hand it in the first place);
+//   3. run the symbol-table "declare" pass (struct/function/extern,
+//      postulate_stage1_v1_0_6_edsger_design.md's own Module 3 SS1)
+//      over the WHOLE program before computing anything that depends
+//      on cross-references -- this is pass 1 of the agreed two-pass
+//      design (declare everything, then check), which is what lets a
+//      struct field resolve a type declared later in the same file
+//      with no special-casing;
+//   4. compute every struct's size, detecting a value-type field cycle
+//      (struct A contains struct B by value, B contains A by value --
+//      an infinite size) via white/gray/black DFS coloring over the
+//      "sizing" call stack, flagging the error at the SECOND encounter
+//      of an in-progress struct only, not at every node in the cycle
+//      (this session's own explicit refinement, mirroring
+//      validate_pattern's identical "flag the second occurrence" rule
+//      for a duplicate autoload placeholder);
+//   5. dump the resolved use-paths and the symbol table itself
+//      (postulate_stage1_v1_0_6_edsger_design.md's own stated
+//      verification method for this module).
+//
+// Still NOT in this slice: multi-file `use`/`@autoload` file-opening
+// (sys_openat) -- use_decls are resolved to a PATH, but that file is
+// never actually opened/parsed/merged in yet; function-body/expression
+// type checking and AST decoration (data_type/symbol_ref/is_constant)
+// -- only top-level declarations and struct layout are handled. Both
+// remain for a follow-up step.
+
+extern function sys_read(fd: int64, buf: *uint8, count: uint64) : int64;
+extern function sys_write(fd: int64, buf: *uint8, count: uint64) : int64;
+extern function sys_exit(code: int64) : void;
+extern function sys_openat(dirfd: int64, path: *uint8, flags: int64, mode: int64) : int64;
+extern function sys_close(fd: int64) : int64;
+
+// ---------------------------------------------------------------------
+// Embedded lexer -- byte-for-byte the same design as lexer.ptl (see
+// that file's own header for the reasoning); copied rather than
+// shared, since v0 has no mechanism to share it. Buffer access goes
+// exclusively through reader_peek/reader_advance/reader_match/
+// reader_is_eof, exactly as there.
+// ---------------------------------------------------------------------
+
+struct SourceReader {
+  buffer : *DynBytes;
+  length : uint64;
+  cursor : uint64;
+}
+
+function reader_is_eof(r: *SourceReader) : bool {
+  return (*r).cursor >= (*r).length;
+}
+
+function reader_peek(r: *SourceReader) : uint8 {
+  if (reader_is_eof(r)) {
+    return 0;
+  }
+  return (*(*r).buffer).ptr[(*r).cursor];
+}
+
+function reader_advance(r: *SourceReader) : void {
+  if (reader_is_eof(r) == false) {
+    (*r).cursor := (*r).cursor + 1;
+  }
+}
+
+struct Token {
+  kind : int32;
+  offset : uint64;
+  length : uint64;
+}
+
+struct TriviaResult {
+  had_error : bool;
+  comment_start : uint64;
+  found_slash_token : bool;
+  slash_offset : uint64;
+}
+
+struct NumberResult {
+  had_error : bool;
+  error_at : uint64;
+}
+
+struct CharLitResult {
+  had_error : bool;
+  err_kind : int32;
+  error_at : uint64;
+}
+
+struct StringLitResult {
+  had_error : bool;
+}
+
+struct LineCol {
+  line : uint64;
+  col : uint64;
+}
+
+function is_digit(b: uint8) : bool {
+  return b >= 48 && b <= 57;
+}
+
+function is_hex_digit(b: uint8) : bool {
+  return (b >= 48 && b <= 57) || (b >= 97 && b <= 102) || (b >= 65 && b <= 70);
+}
+
+function is_alpha(b: uint8) : bool {
+  return (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || b == 95;
+}
+
+function is_alnum(b: uint8) : bool {
+  return is_alpha(b) || is_digit(b);
+}
+
+function is_ws(b: uint8) : bool {
+  return b == 32 || b == 9 || b == 13 || b == 10;
+}
+
+function skip_trivia(r: *SourceReader) : TriviaResult {
+  mut had_error : bool := false;
+  mut comment_start : uint64 := 0;
+  mut found_slash_token : bool := false;
+  mut slash_offset : uint64 := 0;
+  mut looping : bool := true;
+  mut slash_at : uint64 := 0;
+  mut terminated : bool := false;
+  mut inner_looping : bool := true;
+
+  while (looping) {
+    if (reader_is_eof(r)) {
+      looping := false;
+    } else {
+      if (is_ws(reader_peek(r))) {
+        reader_advance(r);
+      } else {
+        if (reader_peek(r) == 47) {
+          slash_at := (*r).cursor;
+          reader_advance(r);
+          if (reader_peek(r) == 47) {
+            reader_advance(r);
+            inner_looping := true;
+            while (inner_looping) {
+              if (reader_is_eof(r)) {
+                inner_looping := false;
+              } else {
+                if (reader_peek(r) == 10) {
+                  reader_advance(r);
+                  inner_looping := false;
+                } else {
+                  reader_advance(r);
+                }
+              }
+            }
+          } else {
+            if (reader_peek(r) == 42) {
+              reader_advance(r);
+              terminated := false;
+              inner_looping := true;
+              while (inner_looping) {
+                if (reader_is_eof(r)) {
+                  inner_looping := false;
+                } else {
+                  if (reader_peek(r) == 42) {
+                    reader_advance(r);
+                    if (reader_peek(r) == 47) {
+                      reader_advance(r);
+                      terminated := true;
+                      inner_looping := false;
+                    }
+                  } else {
+                    reader_advance(r);
+                  }
+                }
+              }
+              if (!terminated) {
+                had_error := true;
+                comment_start := slash_at;
+                looping := false;
+              }
+            } else {
+              found_slash_token := true;
+              slash_offset := slash_at;
+              looping := false;
+            }
+          }
+        } else {
+          looping := false;
+        }
+      }
+    }
+  }
+
+  return TriviaResult {
+    had_error := had_error,
+    comment_start := comment_start,
+    found_slash_token := found_slash_token,
+    slash_offset := slash_offset
+  };
+}
+
+function scan_number(r: *SourceReader) : NumberResult {
+  mut had_error : bool := false;
+  mut error_at : uint64 := 0;
+  mut n_pos : uint64 := 0;
+  mut has_value_digit : bool := false;
+  mut looping : bool := true;
+
+  while (looping) {
+    if (is_digit(reader_peek(r))) {
+      reader_advance(r);
+    } else {
+      looping := false;
+    }
+  }
+
+  if (reader_peek(r) == 110) {
+    n_pos := (*r).cursor;
+    reader_advance(r);
+    has_value_digit := false;
+    looping := true;
+    while (looping) {
+      if (is_hex_digit(reader_peek(r))) {
+        has_value_digit := true;
+        reader_advance(r);
+      } else {
+        looping := false;
+      }
+    }
+    if (!has_value_digit) {
+      had_error := true;
+      error_at := n_pos + 1;
+    }
+  }
+
+  return NumberResult { had_error := had_error, error_at := error_at };
+}
+
+function scan_char_literal(r: *SourceReader) : CharLitResult {
+  mut had_error : bool := false;
+  mut err_kind : int32 := 0;
+  mut error_at : uint64 := (*r).cursor;
+  mut b : uint8 := 0;
+  mut b2 : uint8 := 0;
+  mut body_ok : bool := false;
+  mut scanning : bool := false;
+  mut esc_at : uint64 := 0;
+
+  reader_advance(r);
+
+  if (reader_is_eof(r)) {
+    had_error := true;
+    err_kind := 1;
+  } else {
+    b := reader_peek(r);
+    if (b == 39) {
+      had_error := true;
+      err_kind := 2;
+      reader_advance(r);
+    } else {
+      if (b == 10 || b == 13) {
+        had_error := true;
+        err_kind := 1;
+      } else {
+        if (b == 92) {
+          esc_at := (*r).cursor;
+          reader_advance(r);
+          if (reader_is_eof(r)) {
+            had_error := true;
+            err_kind := 1;
+          } else {
+            b2 := reader_peek(r);
+            if (b2 == 110 || b2 == 116 || b2 == 114 || b2 == 48 || b2 == 92 || b2 == 39) {
+              reader_advance(r);
+              body_ok := true;
+            } else {
+              had_error := true;
+              err_kind := 3;
+              error_at := esc_at;
+              reader_advance(r);
+            }
+          }
+        } else {
+          reader_advance(r);
+          body_ok := true;
+        }
+      }
+    }
+
+    if (!had_error && body_ok) {
+      if (reader_is_eof(r)) {
+        had_error := true;
+        err_kind := 1;
+      } else {
+        if (reader_peek(r) == 39) {
+          reader_advance(r);
+        } else {
+          if (reader_peek(r) == 10) {
+            had_error := true;
+            err_kind := 1;
+          } else {
+            had_error := true;
+            err_kind := 4;
+            scanning := true;
+            while (scanning) {
+              if (reader_is_eof(r)) {
+                scanning := false;
+              } else {
+                if (reader_peek(r) == 39) {
+                  reader_advance(r);
+                  scanning := false;
+                } else {
+                  if (reader_peek(r) == 10) {
+                    scanning := false;
+                  } else {
+                    reader_advance(r);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return CharLitResult { had_error := had_error, err_kind := err_kind, error_at := error_at };
+}
+
+function scan_string_literal(r: *SourceReader) : StringLitResult {
+  mut had_error : bool := false;
+  mut looping : bool := true;
+
+  reader_advance(r);
+
+  while (looping) {
+    if (reader_is_eof(r)) {
+      had_error := true;
+      looping := false;
+    } else {
+      if (reader_peek(r) == 34) {
+        reader_advance(r);
+        looping := false;
+      } else {
+        if (reader_peek(r) == 10 || reader_peek(r) == 13) {
+          had_error := true;
+          looping := false;
+        } else {
+          reader_advance(r);
+        }
+      }
+    }
+  }
+
+  return StringLitResult { had_error := had_error };
+}
+
+function classify_word(r: *SourceReader, off: uint64, len: uint64) : int32 {
+  mut result : int32 := 1;
+  mut buf : *DynBytes := (*r).buffer;
+
+  if (len == 2) {
+    if ((*buf).ptr[off + 0] == 105 && (*buf).ptr[off + 1] == 102) { result := 15; }
+    if ((*buf).ptr[off + 0] == 97 && (*buf).ptr[off + 1] == 115) { result := 34; }
+  }
+  if (len == 3) {
+    if ((*buf).ptr[off + 0] == 109 && (*buf).ptr[off + 1] == 117 && (*buf).ptr[off + 2] == 116) { result := 13; }
+    if ((*buf).ptr[off + 0] == 105 && (*buf).ptr[off + 1] == 110 && (*buf).ptr[off + 2] == 116) { result := 24; }
+    if ((*buf).ptr[off + 0] == 117 && (*buf).ptr[off + 1] == 115 && (*buf).ptr[off + 2] == 101) { result := 35; }
+  }
+  if (len == 4) {
+    if ((*buf).ptr[off + 0] == 101 && (*buf).ptr[off + 1] == 108 && (*buf).ptr[off + 2] == 115 && (*buf).ptr[off + 3] == 101) { result := 16; }
+    if ((*buf).ptr[off + 0] == 116 && (*buf).ptr[off + 1] == 114 && (*buf).ptr[off + 2] == 117 && (*buf).ptr[off + 3] == 101) { result := 19; }
+    if ((*buf).ptr[off + 0] == 110 && (*buf).ptr[off + 1] == 117 && (*buf).ptr[off + 2] == 108 && (*buf).ptr[off + 3] == 108) { result := 21; }
+    if ((*buf).ptr[off + 0] == 105 && (*buf).ptr[off + 1] == 110 && (*buf).ptr[off + 2] == 116 && (*buf).ptr[off + 3] == 56) { result := 22; }
+    if ((*buf).ptr[off + 0] == 98 && (*buf).ptr[off + 1] == 111 && (*buf).ptr[off + 2] == 111 && (*buf).ptr[off + 3] == 108) { result := 32; }
+    if ((*buf).ptr[off + 0] == 118 && (*buf).ptr[off + 1] == 111 && (*buf).ptr[off + 2] == 105 && (*buf).ptr[off + 3] == 100) { result := 33; }
+    if ((*buf).ptr[off + 0] == 117 && (*buf).ptr[off + 1] == 105 && (*buf).ptr[off + 2] == 110 && (*buf).ptr[off + 3] == 116) { result := 29; }
+    if ((*buf).ptr[off + 0] == 99 && (*buf).ptr[off + 1] == 104 && (*buf).ptr[off + 2] == 97 && (*buf).ptr[off + 3] == 114) { result := 36; }
+  }
+  if (len == 5) {
+    if ((*buf).ptr[off + 0] == 99 && (*buf).ptr[off + 1] == 111 && (*buf).ptr[off + 2] == 110 && (*buf).ptr[off + 3] == 115 && (*buf).ptr[off + 4] == 116) { result := 14; }
+    if ((*buf).ptr[off + 0] == 119 && (*buf).ptr[off + 1] == 104 && (*buf).ptr[off + 2] == 105 && (*buf).ptr[off + 3] == 108 && (*buf).ptr[off + 4] == 101) { result := 17; }
+    if ((*buf).ptr[off + 0] == 102 && (*buf).ptr[off + 1] == 97 && (*buf).ptr[off + 2] == 108 && (*buf).ptr[off + 3] == 115 && (*buf).ptr[off + 4] == 101) { result := 20; }
+    if ((*buf).ptr[off + 0] == 105 && (*buf).ptr[off + 1] == 110 && (*buf).ptr[off + 2] == 116 && (*buf).ptr[off + 3] == 49 && (*buf).ptr[off + 4] == 54) { result := 23; }
+    if ((*buf).ptr[off + 0] == 105 && (*buf).ptr[off + 1] == 110 && (*buf).ptr[off + 2] == 116 && (*buf).ptr[off + 3] == 51 && (*buf).ptr[off + 4] == 50) { result := 25; }
+    if ((*buf).ptr[off + 0] == 105 && (*buf).ptr[off + 1] == 110 && (*buf).ptr[off + 2] == 116 && (*buf).ptr[off + 3] == 54 && (*buf).ptr[off + 4] == 52) { result := 26; }
+    if ((*buf).ptr[off + 0] == 117 && (*buf).ptr[off + 1] == 105 && (*buf).ptr[off + 2] == 110 && (*buf).ptr[off + 3] == 116 && (*buf).ptr[off + 4] == 56) { result := 27; }
+  }
+  if (len == 6) {
+    if ((*buf).ptr[off + 0] == 115 && (*buf).ptr[off + 1] == 116 && (*buf).ptr[off + 2] == 114 && (*buf).ptr[off + 3] == 117 && (*buf).ptr[off + 4] == 99 && (*buf).ptr[off + 5] == 116) { result := 11; }
+    if ((*buf).ptr[off + 0] == 101 && (*buf).ptr[off + 1] == 120 && (*buf).ptr[off + 2] == 116 && (*buf).ptr[off + 3] == 101 && (*buf).ptr[off + 4] == 114 && (*buf).ptr[off + 5] == 110) { result := 12; }
+    if ((*buf).ptr[off + 0] == 114 && (*buf).ptr[off + 1] == 101 && (*buf).ptr[off + 2] == 116 && (*buf).ptr[off + 3] == 117 && (*buf).ptr[off + 4] == 114 && (*buf).ptr[off + 5] == 110) { result := 18; }
+    if ((*buf).ptr[off + 0] == 117 && (*buf).ptr[off + 1] == 105 && (*buf).ptr[off + 2] == 110 && (*buf).ptr[off + 3] == 116 && (*buf).ptr[off + 4] == 49 && (*buf).ptr[off + 5] == 54) { result := 28; }
+    if ((*buf).ptr[off + 0] == 117 && (*buf).ptr[off + 1] == 105 && (*buf).ptr[off + 2] == 110 && (*buf).ptr[off + 3] == 116 && (*buf).ptr[off + 4] == 51 && (*buf).ptr[off + 5] == 50) { result := 30; }
+    if ((*buf).ptr[off + 0] == 117 && (*buf).ptr[off + 1] == 105 && (*buf).ptr[off + 2] == 110 && (*buf).ptr[off + 3] == 116 && (*buf).ptr[off + 4] == 54 && (*buf).ptr[off + 5] == 52) { result := 31; }
+    if ((*buf).ptr[off + 0] == 115 && (*buf).ptr[off + 1] == 105 && (*buf).ptr[off + 2] == 122 && (*buf).ptr[off + 3] == 101 && (*buf).ptr[off + 4] == 111 && (*buf).ptr[off + 5] == 102) { result := 41; }
+  }
+  if (len == 7) {
+    if ((*buf).ptr[off + 0] == 117 && (*buf).ptr[off + 1] == 105 && (*buf).ptr[off + 2] == 110 && (*buf).ptr[off + 3] == 116 && (*buf).ptr[off + 4] == 112 && (*buf).ptr[off + 5] == 116 && (*buf).ptr[off + 6] == 114) { result := 43; }
+  }
+  if (len == 8) {
+    if ((*buf).ptr[off + 0] == 102 && (*buf).ptr[off + 1] == 117 && (*buf).ptr[off + 2] == 110 && (*buf).ptr[off + 3] == 99 && (*buf).ptr[off + 4] == 116 && (*buf).ptr[off + 5] == 105 && (*buf).ptr[off + 6] == 111 && (*buf).ptr[off + 7] == 110) { result := 10; }
+    if ((*buf).ptr[off + 0] == 118 && (*buf).ptr[off + 1] == 101 && (*buf).ptr[off + 2] == 114 && (*buf).ptr[off + 3] == 105 && (*buf).ptr[off + 4] == 102 && (*buf).ptr[off + 5] == 105 && (*buf).ptr[off + 6] == 101 && (*buf).ptr[off + 7] == 100) { result := 37; }
+    if ((*buf).ptr[off + 0] == 108 && (*buf).ptr[off + 1] == 101 && (*buf).ptr[off + 2] == 110 && (*buf).ptr[off + 3] == 103 && (*buf).ptr[off + 4] == 116 && (*buf).ptr[off + 5] == 104 && (*buf).ptr[off + 6] == 111 && (*buf).ptr[off + 7] == 102) { result := 42; }
+  }
+  if (len == 9) {
+    if ((*buf).ptr[off + 0] == 110 && (*buf).ptr[off + 1] == 97 && (*buf).ptr[off + 2] == 109 && (*buf).ptr[off + 3] == 101 && (*buf).ptr[off + 4] == 115 && (*buf).ptr[off + 5] == 112 && (*buf).ptr[off + 6] == 97 && (*buf).ptr[off + 7] == 99 && (*buf).ptr[off + 8] == 101) { result := 39; }
+  }
+  if (len == 10) {
+    if ((*buf).ptr[off + 0] == 117 && (*buf).ptr[off + 1] == 110 && (*buf).ptr[off + 2] == 118 && (*buf).ptr[off + 3] == 101 && (*buf).ptr[off + 4] == 114 && (*buf).ptr[off + 5] == 105 && (*buf).ptr[off + 6] == 102 && (*buf).ptr[off + 7] == 105 && (*buf).ptr[off + 8] == 101 && (*buf).ptr[off + 9] == 100) { result := 38; }
+  }
+
+  return result;
+}
+
+function lex_next(r: *SourceReader) : Token {
+  mut trivia : TriviaResult := skip_trivia(r);
+  mut tok_offset : uint64 := 0;
+  mut b : uint8 := 0;
+  mut num : NumberResult := NumberResult { had_error := false, error_at := 0 };
+  mut cl : CharLitResult := CharLitResult { had_error := false, err_kind := 0, error_at := 0 };
+  mut sl : StringLitResult := StringLitResult { had_error := false };
+  mut is_autoload : bool := false;
+  mut j : uint64 := 0;
+  mut next_b : uint8 := 0;
+
+  mut ext_first    : uint8[7] := {58, 61, 33, 60, 62, 38, 124};
+  mut ext_byte1    : uint8[7] := {61, 61, 61, 61, 61, 38, 124};
+  mut ext_kind1    : int32[7] := {70, 71, 72, 73, 74, 77, 78};
+  mut ext_byte2    : uint8[7] := {0, 0, 0, 60, 62, 0, 0};
+  mut ext_kind2    : int32[7] := {0, 0, 0, 75, 76, 0, 0};
+  mut ext_lone_kind : int32[7] := {50, 254, 79, 86, 87, 82, 89};
+
+  mut single_byte : uint8[16] := {59, 44, 46, 40, 41, 123, 125, 91, 93, 92, 45, 42, 47, 37, 43, 94};
+  mut single_kind : int32[16] := {51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 80, 81, 83, 84, 85, 88};
+
+  if (trivia.had_error) {
+    return Token { kind := 253, offset := trivia.comment_start, length := 0 };
+  }
+
+  if (trivia.found_slash_token) {
+    return Token { kind := 83, offset := trivia.slash_offset, length := 1 };
+  }
+
+  if (reader_is_eof(r)) {
+    return Token { kind := 0, offset := (*r).cursor, length := 0 };
+  }
+
+  tok_offset := (*r).cursor;
+  b := reader_peek(r);
+
+  if (is_alpha(b)) {
+    while (is_alnum(reader_peek(r))) {
+      reader_advance(r);
+    }
+    return Token {
+      kind := classify_word(r, tok_offset, (*r).cursor - tok_offset),
+      offset := tok_offset,
+      length := (*r).cursor - tok_offset
+    };
+  }
+
+  if (is_digit(b)) {
+    num := scan_number(r);
+    if (num.had_error) {
+      return Token { kind := 252, offset := num.error_at, length := 0 };
+    }
+    return Token { kind := 2, offset := tok_offset, length := (*r).cursor - tok_offset };
+  }
+
+  if (b == 39) {
+    cl := scan_char_literal(r);
+    if (cl.had_error) {
+      if (cl.err_kind == 1) {
+        return Token { kind := 251, offset := tok_offset, length := 0 };
+      }
+      if (cl.err_kind == 2) {
+        return Token { kind := 250, offset := tok_offset, length := 0 };
+      }
+      if (cl.err_kind == 3) {
+        return Token { kind := 249, offset := cl.error_at, length := 0 };
+      }
+      return Token { kind := 248, offset := tok_offset, length := 0 };
+    }
+    return Token { kind := 3, offset := tok_offset, length := (*r).cursor - tok_offset };
+  }
+
+  if (b == 34) {
+    sl := scan_string_literal(r);
+    if (sl.had_error) {
+      return Token { kind := 247, offset := tok_offset, length := 0 };
+    }
+    return Token { kind := 4, offset := tok_offset, length := (*r).cursor - tok_offset };
+  }
+
+  if (b == 64) {
+    is_autoload := false;
+    if (tok_offset + 9 <= (*r).length) {
+      if ((*(*r).buffer).ptr[tok_offset + 1] == 97 && (*(*r).buffer).ptr[tok_offset + 2] == 117 && (*(*r).buffer).ptr[tok_offset + 3] == 116 && (*(*r).buffer).ptr[tok_offset + 4] == 111 && (*(*r).buffer).ptr[tok_offset + 5] == 108 && (*(*r).buffer).ptr[tok_offset + 6] == 111 && (*(*r).buffer).ptr[tok_offset + 7] == 97 && (*(*r).buffer).ptr[tok_offset + 8] == 100) {
+        if (!(tok_offset + 9 < (*r).length && is_alnum((*(*r).buffer).ptr[tok_offset + 9]))) {
+          is_autoload := true;
+        }
+      }
+    }
+    if (is_autoload) {
+      j := 0;
+      while (j < 9) {
+        reader_advance(r);
+        j := j + 1;
+      }
+      return Token { kind := 40, offset := tok_offset, length := 9 };
+    }
+    reader_advance(r);
+    return Token { kind := 254, offset := tok_offset, length := 1 };
+  }
+
+  j := 0;
+  while (j < 7) {
+    if (b == ext_first[j]) {
+      reader_advance(r);
+      next_b := reader_peek(r);
+      if (next_b == ext_byte1[j]) {
+        reader_advance(r);
+        return Token { kind := ext_kind1[j], offset := tok_offset, length := 2 };
+      }
+      if (ext_byte2[j] != 0 && next_b == ext_byte2[j]) {
+        reader_advance(r);
+        return Token { kind := ext_kind2[j], offset := tok_offset, length := 2 };
+      }
+      return Token { kind := ext_lone_kind[j], offset := tok_offset, length := 1 };
+    }
+    j := j + 1;
+  }
+
+  j := 0;
+  while (j < 16) {
+    if (b == single_byte[j]) {
+      reader_advance(r);
+      return Token { kind := single_kind[j], offset := tok_offset, length := 1 };
+    }
+    j := j + 1;
+  }
+
+  reader_advance(r);
+  return Token { kind := 254, offset := tok_offset, length := 1 };
+}

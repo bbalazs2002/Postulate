@@ -1,0 +1,1916 @@
+namespace \Edsger\Codegen;
+use \Edsger\Lexer;
+use \Edsger\Parser;
+use \Edsger\Sema;
+use \Edsger\Dynamic;
+
+
+// =======================================================================
+// Module 4: Codegen (postulate_stage1_v1_0_6_edsger_design.md's own
+// Module 4 section) -- emits LLVM IR text from the decorated tree.
+// FIRST SLICE ONLY (this session's own agreed scope, mirroring how
+// `v1.0.2` itself was scalar-only before `v1.0.3` added composites):
+// functions/externs whose entire signature (every param, the return
+// type) is a scalar type -- any of the 8 integer types, `bool`, or
+// `char` -- with arithmetic/bitwise/comparison/logical expressions,
+// `if`/`while`, `return`, and calls between two such user functions.
+//
+// Explicitly NOT attempted here, each its own later increment:
+// structs, arrays, pointers (so no extern call either, since every
+// extern this codebase's own source ever declares takes a pointer
+// argument), `as` casts, `sizeof`/`lengthof`. A declaration whose
+// signature isn't fully scalar is simply skipped (decl_is_scalar_
+// only) rather than attempted and failed.
+//
+// One stack slot (`alloca`) per local, a `load` before every read and
+// a `store` after every write, no manual SSA -- postulate_stage1_
+// bootstrap_plan.md SS2's own "what `clang -O0` does," left for
+// `opt`'s `mem2reg` (`v1.1.2`) to promote once optimization exists.
+// Every value Module 3 already resolved a `data_type` for is read
+// straight off that node here -- codegen never re-infers a type.
+// =======================================================================
+
+struct Codegen {
+  out : *DynBytes;
+  pos : uint64;
+  reg : uint64;     // next unused %rN
+  label : uint64;    // next unused LN
+  had_error : bool;  // set (never fatal on its own) when something
+                     // outside this slice's scope was reached anyway
+}
+
+// A computed value: either a register already holding it, or (for a
+// bare int/bool literal) its own immediate value, spelled directly as
+// an operand wherever LLVM IR accepts one -- literals never need their
+// own `alloca`/register at all, exactly like `clang` itself never
+// bothers materializing a constant into a register before using it.
+struct Operand {
+  is_reg : bool;
+  reg : uint64;
+  imm : int64;
+
+  // `null` (NULL_LIT) is neither a register nor a printable integer --
+  // LLVM IR's own literal spelling for a null pointer constant is the
+  // keyword `null`, never a numeric `0` (pointers and integers are
+  // different types at the text-syntax level, no implicit conversion
+  // between them). Checked before `is_reg` in cg_operand.
+  is_null : bool;
+}
+
+// Every fixed IR text fragment used anywhere below, dispatched by
+// number -- same shape as Stage1/src/codegen.ptl's own `emit_piece`,
+// reused here for the same reason: v0 has no global/static data, so a
+// script of small local `uint8[100]` constants declared fresh on each
+// call (like lex_next's own small lookup tables) is the idiomatic way
+// to give many call sites access to the same fixed strings without
+// duplicating each one at every site that needs it.
+function cg_piece(cg: *Codegen, piece: int32) : void {
+  mut p0 : uint8[100] := {10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p1 : uint8[100] := {32, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p2 : uint8[100] := {32, 61, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p3 : uint8[100] := {44, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p4 : uint8[100] := {100, 101, 102, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p5 : uint8[100] := {100, 101, 99, 108, 97, 114, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p6 : uint8[100] := {97, 108, 108, 111, 99, 97, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p7 : uint8[100] := {108, 111, 97, 100, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p8 : uint8[100] := {44, 32, 112, 116, 114, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p9 : uint8[100] := {115, 116, 111, 114, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p10 : uint8[100] := {114, 101, 116, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p11 : uint8[100] := {114, 101, 116, 32, 118, 111, 105, 100, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p12 : uint8[100] := {98, 114, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p13 : uint8[100] := {98, 114, 32, 105, 49, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p14 : uint8[100] := {44, 32, 108, 97, 98, 101, 108, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p15 : uint8[100] := {108, 97, 98, 101, 108, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p16 : uint8[100] := {99, 97, 108, 108, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p17 : uint8[100] := {105, 99, 109, 112, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p18 : uint8[100] := {120, 111, 114, 32, 105, 49, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p19 : uint8[100] := {58, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p20 : uint8[100] := {101, 110, 116, 114, 121, 58, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p21 : uint8[100] := {117, 110, 114, 101, 97, 99, 104, 97, 98, 108, 101, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p22 : uint8[100] := {123, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p23 : uint8[100] := {125, 10, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p24 : uint8[100] := {40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p25 : uint8[100] := {41, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p26 : uint8[100] := {118, 111, 105, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p27 : uint8[100] := {97, 100, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p28 : uint8[100] := {115, 117, 98, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p29 : uint8[100] := {109, 117, 108, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p30 : uint8[100] := {117, 100, 105, 118, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p31 : uint8[100] := {115, 100, 105, 118, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p32 : uint8[100] := {117, 114, 101, 109, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p33 : uint8[100] := {115, 114, 101, 109, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p34 : uint8[100] := {115, 104, 108, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p35 : uint8[100] := {108, 115, 104, 114, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p36 : uint8[100] := {97, 115, 104, 114, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p37 : uint8[100] := {97, 110, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p38 : uint8[100] := {111, 114, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p39 : uint8[100] := {120, 111, 114, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p40 : uint8[100] := {101, 113, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p41 : uint8[100] := {110, 101, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p42 : uint8[100] := {115, 108, 116, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p43 : uint8[100] := {117, 108, 116, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p44 : uint8[100] := {115, 103, 116, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p45 : uint8[100] := {117, 103, 116, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p46 : uint8[100] := {115, 108, 101, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p47 : uint8[100] := {117, 108, 101, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p48 : uint8[100] := {115, 103, 101, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p49 : uint8[100] := {117, 103, 101, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p50 : uint8[100] := {110, 117, 108, 108, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p51 : uint8[100] := {112, 116, 114, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p52 : uint8[100] := {103, 101, 116, 101, 108, 101, 109, 101, 110, 116, 112, 116, 114, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p53 : uint8[100] := {112, 116, 114, 116, 111, 105, 110, 116, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p54 : uint8[100] := {32, 116, 111, 32, 105, 54, 52, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p55 : uint8[100] := {105, 110, 116, 116, 111, 112, 116, 114, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p56 : uint8[100] := {32, 116, 111, 32, 112, 116, 114, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p57 : uint8[100] := {122, 101, 120, 116, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p58 : uint8[100] := {115, 101, 120, 116, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p59 : uint8[100] := {116, 114, 117, 110, 99, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut p60 : uint8[100] := {32, 116, 111, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut lens : uint64[61] := {1,2,3,2,7,8,7,5,6,6,4,9,3,6,8,6,5,5,7,2,7,12,2,3,1,1,4,3,3,3,4,4,4,4,3,4,4,3,2,3,2,2,3,3,3,3,3,3,3,3,4,3,14,9,7,9,7,5,5,6,4};
+
+  if (piece == 0) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p0, lens[0]); return; }
+  if (piece == 1) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p1, lens[1]); return; }
+  if (piece == 2) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p2, lens[2]); return; }
+  if (piece == 3) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p3, lens[3]); return; }
+  if (piece == 4) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p4, lens[4]); return; }
+  if (piece == 5) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p5, lens[5]); return; }
+  if (piece == 6) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p6, lens[6]); return; }
+  if (piece == 7) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p7, lens[7]); return; }
+  if (piece == 8) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p8, lens[8]); return; }
+  if (piece == 9) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p9, lens[9]); return; }
+  if (piece == 10) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p10, lens[10]); return; }
+  if (piece == 11) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p11, lens[11]); return; }
+  if (piece == 12) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p12, lens[12]); return; }
+  if (piece == 13) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p13, lens[13]); return; }
+  if (piece == 14) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p14, lens[14]); return; }
+  if (piece == 15) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p15, lens[15]); return; }
+  if (piece == 16) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p16, lens[16]); return; }
+  if (piece == 17) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p17, lens[17]); return; }
+  if (piece == 18) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p18, lens[18]); return; }
+  if (piece == 19) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p19, lens[19]); return; }
+  if (piece == 20) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p20, lens[20]); return; }
+  if (piece == 21) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p21, lens[21]); return; }
+  if (piece == 22) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p22, lens[22]); return; }
+  if (piece == 23) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p23, lens[23]); return; }
+  if (piece == 24) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p24, lens[24]); return; }
+  if (piece == 25) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p25, lens[25]); return; }
+  if (piece == 26) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p26, lens[26]); return; }
+  if (piece == 27) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p27, lens[27]); return; }
+  if (piece == 28) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p28, lens[28]); return; }
+  if (piece == 29) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p29, lens[29]); return; }
+  if (piece == 30) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p30, lens[30]); return; }
+  if (piece == 31) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p31, lens[31]); return; }
+  if (piece == 32) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p32, lens[32]); return; }
+  if (piece == 33) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p33, lens[33]); return; }
+  if (piece == 34) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p34, lens[34]); return; }
+  if (piece == 35) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p35, lens[35]); return; }
+  if (piece == 36) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p36, lens[36]); return; }
+  if (piece == 37) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p37, lens[37]); return; }
+  if (piece == 38) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p38, lens[38]); return; }
+  if (piece == 39) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p39, lens[39]); return; }
+  if (piece == 40) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p40, lens[40]); return; }
+  if (piece == 41) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p41, lens[41]); return; }
+  if (piece == 42) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p42, lens[42]); return; }
+  if (piece == 43) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p43, lens[43]); return; }
+  if (piece == 44) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p44, lens[44]); return; }
+  if (piece == 45) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p45, lens[45]); return; }
+  if (piece == 46) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p46, lens[46]); return; }
+  if (piece == 47) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p47, lens[47]); return; }
+  if (piece == 48) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p48, lens[48]); return; }
+  if (piece == 49) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p49, lens[49]); return; }
+  if (piece == 50) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p50, lens[50]); return; }
+  if (piece == 51) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p51, lens[51]); return; }
+  if (piece == 52) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p52, lens[52]); return; }
+  if (piece == 53) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p53, lens[53]); return; }
+  if (piece == 54) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p54, lens[54]); return; }
+  if (piece == 55) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p55, lens[55]); return; }
+  if (piece == 56) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p56, lens[56]); return; }
+  if (piece == 57) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p57, lens[57]); return; }
+  if (piece == 58) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p58, lens[58]); return; }
+  if (piece == 59) { (*cg).pos := append_str((*cg).out, (*cg).pos, &p59, lens[59]); return; }
+  (*cg).pos := append_str((*cg).out, (*cg).pos, &p60, lens[60]);
+}
+
+function cg_byte(cg: *Codegen, b: uint8) : void {
+  (*cg).pos := append_byte((*cg).out, (*cg).pos, b);
+}
+
+function cg_uint(cg: *Codegen, v: uint64) : void {
+  (*cg).pos := append_uint((*cg).out, (*cg).pos, v);
+}
+
+function cg_slice(cg: *Codegen, src: *DynBytes, off: uint64, ln: uint64) : void {
+  (*cg).pos := append_slice((*cg).out, (*cg).pos, src, off, ln);
+}
+
+function new_reg(cg: *Codegen) : uint64 {
+  mut r : uint64 := (*cg).reg;
+  (*cg).reg := (*cg).reg + 1;
+  return r;
+}
+
+function new_label(cg: *Codegen) : uint64 {
+  mut l : uint64 := (*cg).label;
+  (*cg).label := (*cg).label + 1;
+  return l;
+}
+
+function cg_reg_ref(cg: *Codegen, r: uint64) : void {
+  cg_byte(cg, 37);
+  cg_byte(cg, 114);
+  cg_uint(cg, r);
+}
+
+function cg_param_ref(cg: *Codegen, n: uint64) : void {
+  cg_byte(cg, 37);
+  cg_byte(cg, 112);
+  cg_uint(cg, n);
+}
+
+function cg_label_def(cg: *Codegen, l: uint64) : void {
+  cg_byte(cg, 76);
+  cg_uint(cg, l);
+  cg_piece(cg, 19);
+}
+
+function cg_label_target(cg: *Codegen, l: uint64) : void {
+  cg_byte(cg, 37);
+  cg_byte(cg, 76);
+  cg_uint(cg, l);
+}
+
+function cg_operand(cg: *Codegen, op: Operand) : void {
+  if (op.is_null) {
+    cg_piece(cg, 50);
+    return;
+  }
+  if (op.is_reg) {
+    cg_reg_ref(cg, op.reg);
+    return;
+  }
+  cg_uint(cg, int64_to_uint64(op.imm));
+}
+
+// `bool` is `i1`; every other scalar type here is `i<8*bytewidth>`,
+// reusing base_type_size (Module 3's own byte-width table) directly --
+// codegen never needs its own copy of that table.
+// v0 has no cast operator (postulate_v0_language_reference.md SS2.8),
+// so widening a `uint8` byte into a `uint64` needs the same counting-
+// loop technique this file's own uint64_to_int64 already uses for
+// uint64 -> int64 -- comparing `count` against `b` requires them to be
+// the SAME type, hence the uint8 counter alongside the uint64 result.
+function byte_to_uint64(b: uint8) : uint64 {
+  mut result : uint64 := 0;
+  mut count : uint8 := 0;
+  while (count < b) {
+    result := result + 1;
+    count := count + 1;
+  }
+  return result;
+}
+
+// CHAR_LIT's own tok spans the source text quotes-inclusive (`'a'` or
+// `'\n'`) -- unlike INT_LIT, the parser never precomputes its value
+// into int_val, so codegen decodes it directly here, the same handful
+// of escapes postulate_v1_language_reference.md SS1.5 lists (`\n \t \r
+// \0 \\ \'`); anything else between the quotes is that one byte as-is.
+function decode_char_literal(src: *DynBytes, tok_offset: uint64) : int64 {
+  mut b : uint8 := (*src).ptr[tok_offset + 1];
+  mut e : uint8 := 0;
+  mut v : uint8 := 0;
+
+  if (b == 92) {
+    e := (*src).ptr[tok_offset + 2];
+    if (e == 110) { v := 10; }
+    if (e == 116) { v := 9; }
+    if (e == 114) { v := 13; }
+    if (e == 48) { v := 0; }
+    if (e == 92) { v := 92; }
+    if (e == 39) { v := 39; }
+    return uint64_to_int64(byte_to_uint64(v));
+  }
+  return uint64_to_int64(byte_to_uint64(b));
+}
+
+function llvm_int_width(tok_kind: int32) : uint64 {
+  if (tok_kind == 32) { return 1; }
+  return base_type_size(tok_kind) * 8;
+}
+
+// Every pointer, regardless of pointee, is spelled `ptr` -- opaque
+// pointers (matching Stage1/src/codegen.ptl's own already-established
+// choice, confirmed by its own literal ", ptr %vret\n" fragment) carry
+// no pointee-type information in the IR type itself; `load`/`store`/
+// `getelementptr` are what actually need the pointee type spelled out,
+// each at its own call site (gen_expr's own UNARY_EXPR/BINARY_EXPR
+// cases, below).
+function cg_type(cg: *Codegen, s: *Sema, file_idx: uint64, ty: *ASTNode) : void {
+  mut lr : LookupResult := LookupResult { found := false, index := 0 };
+  if (ty == null) {
+    (*cg).had_error := true;
+    return;
+  }
+  if ((*ty).kind == 121) {
+    cg_piece(cg, 51);
+    return;
+  }
+  if ((*ty).kind == 122) {
+    cg_byte(cg, 91);
+    cg_uint(cg, int64_to_uint64((*ty).int_val));
+    cg_byte(cg, 32); cg_byte(cg, 120); cg_byte(cg, 32);
+    cg_type(cg, s, file_idx, (*ty).left);
+    cg_byte(cg, 93);
+    return;
+  }
+  if ((*ty).kind != 120) {
+    (*cg).had_error := true;
+    return;
+  }
+  if ((*ty).tok.kind == 33) {
+    cg_piece(cg, 26);
+    return;
+  }
+  if (base_type_size((*ty).tok.kind) > 0) {
+    cg_byte(cg, 105);
+    cg_uint(cg, llvm_int_width((*ty).tok.kind));
+    return;
+  }
+  lr := find_struct_symbol(s, &(*(*s).buffers)[file_idx].bytes, (*ty).tok.offset, (*ty).tok.length);
+  if (!lr.found) {
+    (*cg).had_error := true;
+    return;
+  }
+  cg_byte(cg, 37);
+  cg_slice(cg, &(*(*s).buffers)[file_idx].bytes, (*ty).tok.offset, (*ty).tok.length);
+}
+
+function is_void_type(ty: *ASTNode) : bool {
+  return ty != null && (*ty).kind == 120 && (*ty).tok.kind == 33;
+}
+
+// Scalar (any integer type, `bool`, `char`), struct-named, array, OR a
+// pointer whose own pointee is -- recursively -- itself any of those
+// or `*void` (`**int32` and friends included; a pointer's own inner
+// type is only ever null for canon_null's own "adopts any pointer"
+// sentinel, which should never actually reach a real decl's data_type,
+// but treating it as supported rather than crashing is the safer
+// default). `void` itself is excluded -- it's only ever valid as a
+// return type, checked separately via is_void_type at each call site.
+function is_supported_value_type(ty: *ASTNode) : bool {
+  if (ty == null) { return false; }
+  if ((*ty).kind == 121) {
+    if ((*ty).left == null || is_void_type((*ty).left)) { return true; }
+    return is_supported_value_type((*ty).left);
+  }
+  if ((*ty).kind == 122) {
+    return is_supported_value_type((*ty).left);
+  }
+  if ((*ty).kind != 120) { return false; }
+  return !is_void_type(ty);
+}
+
+// Whether decl (FUNCTION_DECL or EXTERN_DECL)'s entire signature is
+// within this slice's scope -- every param AND the return type must be
+// supported (is_supported_value_type, above) or `void` (return only).
+// For a FUNCTION_DECL specifically, every top-level local (gen_
+// function's own prologue allocas one for each) must ALSO be
+// supported -- sizeof/lengthof can name a struct/array TYPE freely
+// (type_byte_size's own job, never runtime codegen), but an actual
+// struct/array-TYPED local would need real composite codegen the
+// moment gen_function tried to alloca a slot for it, which is why this
+// check exists at all: without it, a function with an unsupported
+// local's own signature could still look "supported" from its
+// params/return alone and only fail confusingly once already
+// mid-emission. Anything unsupported here means gen_program simply
+// skips the whole declaration rather than attempting and failing it.
+function decl_is_supported(decl: *ASTNode) : bool {
+  mut param : *ASTNode := (*decl).first_child;
+  mut ok : bool := true;
+  mut body : *ASTNode := null;
+  mut stmt : *ASTNode := null;
+  while (param != null && ok) {
+    if (!is_supported_value_type((*param).data_type)) { ok := false; }
+    param := (*param).next_sibling;
+  }
+  if (ok) {
+    if (!(is_supported_value_type((*decl).data_type) || is_void_type((*decl).data_type))) {
+      ok := false;
+    }
+  }
+  if (ok && (*decl).kind == 113) {
+    body := (*decl).extra;
+    if (body != null) {
+      stmt := (*body).first_child;
+      while (stmt != null && ok) {
+        if ((*stmt).kind == 134 && !is_supported_value_type((*stmt).data_type)) {
+          ok := false;
+        }
+        stmt := (*stmt).next_sibling;
+      }
+    }
+  }
+  return ok;
+}
+
+function scope_reg_for_decl(sc: *Scope, decl: *ASTNode) : uint64 {
+  mut i : uint64 := 0;
+  mut r : uint64 := 0;
+  while (i < (*sc).count) {
+    if ((*sc).bindings.ptr[i].decl == decl) {
+      r := (*sc).bindings.ptr[i].reg;
+    }
+    i := i + 1;
+  }
+  return r;
+}
+
+function cg_binop_mnemonic(cg: *Codegen, op_type: int32, is_unsigned: bool) : void {
+  if (op_type == 85) { cg_piece(cg, 27); return; }
+  if (op_type == 80) { cg_piece(cg, 28); return; }
+  if (op_type == 81) { cg_piece(cg, 29); return; }
+  if (op_type == 83) {
+    if (is_unsigned) { cg_piece(cg, 30); } else { cg_piece(cg, 31); }
+    return;
+  }
+  if (op_type == 84) {
+    if (is_unsigned) { cg_piece(cg, 32); } else { cg_piece(cg, 33); }
+    return;
+  }
+  if (op_type == 75) { cg_piece(cg, 34); return; }
+  if (op_type == 76) {
+    if (is_unsigned) { cg_piece(cg, 35); } else { cg_piece(cg, 36); }
+    return;
+  }
+  if (op_type == 82) { cg_piece(cg, 37); return; }
+  if (op_type == 89) { cg_piece(cg, 38); return; }
+  cg_piece(cg, 39);
+}
+
+function cg_cmp_pred(cg: *Codegen, op_type: int32, is_unsigned: bool) : void {
+  if (op_type == 71) { cg_piece(cg, 40); return; }
+  if (op_type == 72) { cg_piece(cg, 41); return; }
+  if (op_type == 86) {
+    if (is_unsigned) { cg_piece(cg, 43); } else { cg_piece(cg, 42); }
+    return;
+  }
+  if (op_type == 87) {
+    if (is_unsigned) { cg_piece(cg, 45); } else { cg_piece(cg, 44); }
+    return;
+  }
+  if (op_type == 73) {
+    if (is_unsigned) { cg_piece(cg, 47); } else { cg_piece(cg, 46); }
+    return;
+  }
+  if (is_unsigned) { cg_piece(cg, 49); } else { cg_piece(cg, 48); }
+}
+
+// gen_expr/gen_and/gen_or/gen_call/gen_block/gen_stmt call each other,
+// directly and mutually recursively, in whatever order is convenient
+// below -- no forward declaration needed for any of it, the same
+// already-confirmed forward-reference support decorate_block/decorate_
+// stmt's own mutual recursion already relies on elsewhere in this file.
+
+function gen_and(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTNode) : Operand {
+  mut slot : uint64 := new_reg(cg);
+  mut rhs_l : uint64 := new_label(cg);
+  mut false_l : uint64 := new_label(cg);
+  mut end_l : uint64 := new_label(cg);
+  mut left_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut right_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut r : uint64 := 0;
+
+  cg_piece(cg, 1); cg_reg_ref(cg, slot); cg_piece(cg, 2); cg_piece(cg, 6);
+  cg_byte(cg, 105); cg_byte(cg, 49); cg_piece(cg, 0);
+
+  left_op := gen_expr(cg, s, sc, file_idx, (*e).left);
+  cg_piece(cg, 1); cg_piece(cg, 13); cg_operand(cg, left_op);
+  cg_piece(cg, 14); cg_label_target(cg, rhs_l);
+  cg_piece(cg, 14); cg_label_target(cg, false_l);
+  cg_piece(cg, 0);
+
+  cg_label_def(cg, rhs_l);
+  right_op := gen_expr(cg, s, sc, file_idx, (*e).right);
+  cg_piece(cg, 1); cg_piece(cg, 9); cg_byte(cg, 105); cg_byte(cg, 49); cg_byte(cg, 32);
+  cg_operand(cg, right_op); cg_piece(cg, 8); cg_reg_ref(cg, slot); cg_piece(cg, 0);
+  cg_piece(cg, 1); cg_piece(cg, 12); cg_piece(cg, 15); cg_label_target(cg, end_l); cg_piece(cg, 0);
+
+  cg_label_def(cg, false_l);
+  cg_piece(cg, 1); cg_piece(cg, 9); cg_byte(cg, 105); cg_byte(cg, 49); cg_byte(cg, 32);
+  cg_byte(cg, 48); cg_piece(cg, 8); cg_reg_ref(cg, slot); cg_piece(cg, 0);
+  cg_piece(cg, 1); cg_piece(cg, 12); cg_piece(cg, 15); cg_label_target(cg, end_l); cg_piece(cg, 0);
+
+  cg_label_def(cg, end_l);
+  r := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 7);
+  cg_byte(cg, 105); cg_byte(cg, 49); cg_piece(cg, 8); cg_reg_ref(cg, slot); cg_piece(cg, 0);
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+}
+
+function gen_or(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTNode) : Operand {
+  mut slot : uint64 := new_reg(cg);
+  mut true_l : uint64 := new_label(cg);
+  mut rhs_l : uint64 := new_label(cg);
+  mut end_l : uint64 := new_label(cg);
+  mut left_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut right_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut r : uint64 := 0;
+
+  cg_piece(cg, 1); cg_reg_ref(cg, slot); cg_piece(cg, 2); cg_piece(cg, 6);
+  cg_byte(cg, 105); cg_byte(cg, 49); cg_piece(cg, 0);
+
+  left_op := gen_expr(cg, s, sc, file_idx, (*e).left);
+  cg_piece(cg, 1); cg_piece(cg, 13); cg_operand(cg, left_op);
+  cg_piece(cg, 14); cg_label_target(cg, true_l);
+  cg_piece(cg, 14); cg_label_target(cg, rhs_l);
+  cg_piece(cg, 0);
+
+  cg_label_def(cg, true_l);
+  cg_piece(cg, 1); cg_piece(cg, 9); cg_byte(cg, 105); cg_byte(cg, 49); cg_byte(cg, 32);
+  cg_byte(cg, 49); cg_piece(cg, 8); cg_reg_ref(cg, slot); cg_piece(cg, 0);
+  cg_piece(cg, 1); cg_piece(cg, 12); cg_piece(cg, 15); cg_label_target(cg, end_l); cg_piece(cg, 0);
+
+  cg_label_def(cg, rhs_l);
+  right_op := gen_expr(cg, s, sc, file_idx, (*e).right);
+  cg_piece(cg, 1); cg_piece(cg, 9); cg_byte(cg, 105); cg_byte(cg, 49); cg_byte(cg, 32);
+  cg_operand(cg, right_op); cg_piece(cg, 8); cg_reg_ref(cg, slot); cg_piece(cg, 0);
+  cg_piece(cg, 1); cg_piece(cg, 12); cg_piece(cg, 15); cg_label_target(cg, end_l); cg_piece(cg, 0);
+
+  cg_label_def(cg, end_l);
+  r := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 7);
+  cg_byte(cg, 105); cg_byte(cg, 49); cg_piece(cg, 8); cg_reg_ref(cg, slot); cg_piece(cg, 0);
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+}
+
+// Argument evaluation order is LEFT TO RIGHT (postulate_v1_language_
+// reference.md SS3.9's own "Changed" note -- v0's right-to-left rule
+// only ever existed for Hoare's/the original proof of concept's push-
+// based calling convention, which Stage 1's LLVM IR backend, v1.0.2,
+// removed; matching source reading order is what v1 adopts once that
+// reason is gone). Straightforwardly a single forward pass: each
+// argument's Operand is computed into `ops`, in the same order they're
+// written, and the `call` instruction printed afterward just reads
+// those already-computed values back out in that same order. Extern
+// calls are out of this round's scope (every extern this codebase
+// declares takes a pointer argument) -- a callee that isn't an
+// ordinary user FUNCTION_DECL just marks had_error.
+function gen_call(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTNode) : Operand {
+  mut callee_decl : *ASTNode := (*(*e).left).symbol_ref;
+  mut args : *ASTNode[16];
+  mut ops : Operand[16];
+  mut n : uint64 := 0;
+  mut arg : *ASTNode := null;
+  mut i : uint64 := 0;
+  mut r : uint64 := 0;
+  mut is_void : bool := false;
+
+  if (callee_decl == null || ((*callee_decl).kind != 113 && (*callee_decl).kind != 112)) {
+    (*cg).had_error := true;
+    return Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  }
+
+  arg := (*e).first_child;
+  while (arg != null) {
+    args[n] := arg;
+    ops[n] := gen_expr(cg, s, sc, file_idx, arg);
+    n := n + 1;
+    arg := (*arg).next_sibling;
+  }
+
+  is_void := is_void_type((*callee_decl).data_type);
+
+  cg_piece(cg, 1);
+  if (!is_void) {
+    r := new_reg(cg);
+    cg_reg_ref(cg, r);
+    cg_piece(cg, 2);
+  }
+  cg_piece(cg, 16);
+  cg_type(cg, s, (*(*e).left).type_file_idx, (*callee_decl).data_type);
+  cg_byte(cg, 32);
+  cg_byte(cg, 64);
+  cg_slice(cg, &(*(*s).buffers)[(*(*e).left).type_file_idx].bytes, (*callee_decl).tok.offset, (*callee_decl).tok.length);
+  cg_piece(cg, 24);
+  i := 0;
+  while (i < n) {
+    if (i > 0) { cg_piece(cg, 3); }
+    cg_type(cg, s, (*args[i]).type_file_idx, (*args[i]).data_type);
+    cg_byte(cg, 32);
+    cg_operand(cg, ops[i]);
+    i := i + 1;
+  }
+  cg_piece(cg, 25);
+  cg_piece(cg, 0);
+
+  if (is_void) {
+    return Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  }
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+}
+
+// Sets are already validated by Module 3 (type/category, operand
+// equality, pointer/`as` special cases) -- codegen only ever needs to
+// pick the right opcode/predicate and read data_type for width/sign,
+// never re-check legality. Anything reached here outside this slice's
+// scope (pointers/structs/arrays/casts/sizeof) sets had_error.
+// `p + n`/`n + p` (postulate_v1_language_reference.md SS2.5): whichever
+// side is the pointer lends its own pointee type to `getelementptr`'s
+// own required element-type operand; the other side is the raw index,
+// used at its own already-resolved integer type/width, no widening to
+// i64 needed (GEP accepts an index of any integer width). Module 3
+// already rejected `p + p` and `*void` arithmetic before this can ever
+// be reached, so ptr_ty's own pointee (`.left`) is always a real,
+// non-null scalar type here.
+function gen_ptr_add(cg: *Codegen, s: *Sema, file_idx: uint64, e: *ASTNode, left_op: Operand, right_op: Operand, lcat: int32) : Operand {
+  mut ptr_op : Operand := left_op;
+  mut int_op : Operand := right_op;
+  mut ptr_ty : *ASTNode := (*(*e).left).data_type;
+  mut int_ty : *ASTNode := (*(*e).right).data_type;
+  mut ptr_file : uint64 := (*(*e).left).type_file_idx;
+  mut int_file : uint64 := (*(*e).right).type_file_idx;
+  mut r : uint64 := 0;
+
+  if (lcat != 4) {
+    ptr_op := right_op;
+    int_op := left_op;
+    ptr_ty := (*(*e).right).data_type;
+    int_ty := (*(*e).left).data_type;
+    ptr_file := (*(*e).right).type_file_idx;
+    int_file := (*(*e).left).type_file_idx;
+  }
+
+  r := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 52);
+  cg_type(cg, s, ptr_file, (*ptr_ty).left);
+  cg_piece(cg, 3);
+  cg_piece(cg, 51); cg_byte(cg, 32);
+  cg_operand(cg, ptr_op);
+  cg_piece(cg, 3);
+  cg_type(cg, s, int_file, int_ty);
+  cg_byte(cg, 32);
+  cg_operand(cg, int_op);
+  cg_piece(cg, 0);
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+}
+
+// `p - n` negates the index first (GEP has no separate "subtract"
+// mode, only ever adds a signed index) then reuses the exact same GEP
+// shape as `p + n`. `p1 - p2` (same pointee type, Module 3's own
+// requirement) has no single GEP-based lowering -- the standard
+// technique is `ptrtoint` both sides to `i64`, `sub`, then `sdiv` by
+// the pointee's own byte size to turn a byte distance into an element
+// count (postulate_v1_language_reference.md SS2.5's own "number of
+// T-sized elements between them").
+function gen_ptr_sub(cg: *Codegen, s: *Sema, file_idx: uint64, e: *ASTNode, left_op: Operand, right_op: Operand, rcat: int32) : Operand {
+  mut ptr_ty : *ASTNode := (*(*e).left).data_type;
+  mut int_ty : *ASTNode := (*(*e).right).data_type;
+  mut ptr_file : uint64 := (*(*e).left).type_file_idx;
+  mut int_file : uint64 := (*(*e).right).type_file_idx;
+  mut r : uint64 := 0;
+  mut a : uint64 := 0;
+  mut b : uint64 := 0;
+  mut neg : uint64 := 0;
+  mut sz : uint64 := 0;
+
+  if (rcat == 4) {
+    a := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, a); cg_piece(cg, 2); cg_piece(cg, 53);
+    cg_piece(cg, 51); cg_byte(cg, 32);
+    cg_operand(cg, left_op);
+    cg_piece(cg, 54); cg_piece(cg, 0);
+
+    b := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, b); cg_piece(cg, 2); cg_piece(cg, 53);
+    cg_piece(cg, 51); cg_byte(cg, 32);
+    cg_operand(cg, right_op);
+    cg_piece(cg, 54); cg_piece(cg, 0);
+
+    r := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 28);
+    cg_byte(cg, 32); cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32);
+    cg_reg_ref(cg, a); cg_piece(cg, 3); cg_reg_ref(cg, b); cg_piece(cg, 0);
+
+    sz := type_byte_size(cg, s, ptr_file, (*ptr_ty).left);
+    neg := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, neg); cg_piece(cg, 2); cg_piece(cg, 31);
+    cg_byte(cg, 32); cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32);
+    cg_reg_ref(cg, r); cg_piece(cg, 3); cg_uint(cg, sz); cg_piece(cg, 0);
+    return Operand { is_reg := true, reg := neg, imm := 0, is_null := false };
+  }
+
+  neg := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, neg); cg_piece(cg, 2); cg_piece(cg, 28);
+  cg_byte(cg, 32);
+  cg_type(cg, s, int_file, int_ty);
+  cg_byte(cg, 32); cg_byte(cg, 48); cg_piece(cg, 3);
+  cg_operand(cg, right_op);
+  cg_piece(cg, 0);
+
+  r := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 52);
+  cg_type(cg, s, ptr_file, (*ptr_ty).left);
+  cg_piece(cg, 3);
+  cg_piece(cg, 51); cg_byte(cg, 32);
+  cg_operand(cg, left_op);
+  cg_piece(cg, 3);
+  cg_type(cg, s, int_file, int_ty); cg_byte(cg, 32);
+  cg_reg_ref(cg, neg);
+  cg_piece(cg, 0);
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+}
+
+// `sizeof`/`lengthof` (postulate_v1_language_reference.md SS2.7a) are
+// purely compile-time, type-level queries -- the answer never depends
+// on a value at runtime, so this never emits any instructions at all,
+// just folds straight to an immediate. A struct-named TYPE_BASE (kind
+// 120, not a builtin keyword) delegates to Module 3's own field_type_
+// size/compute_struct_size (Symbol's own sizing pass, already run to
+// completion before codegen starts, per struct sizing_state's own
+// white/gray/black cycle-detection contract) rather than recomputing
+// struct layout here a second time.
+function type_byte_size(cg: *Codegen, s: *Sema, file_idx: uint64, ty: *ASTNode) : uint64 {
+  if (ty == null) {
+    (*cg).had_error := true;
+    return 0;
+  }
+  if ((*ty).kind == 121) { return 8; }
+  if ((*ty).kind == 122) {
+    return type_byte_size(cg, s, file_idx, (*ty).left) * int64_to_uint64((*ty).int_val);
+  }
+  if ((*ty).kind != 120) {
+    (*cg).had_error := true;
+    return 0;
+  }
+  if (base_type_size((*ty).tok.kind) > 0) {
+    return base_type_size((*ty).tok.kind);
+  }
+  return field_type_size(s, ty, file_idx);
+}
+
+// `as` (postulate_v1_language_reference.md SS3.7a's own conversion
+// table -- already fully legality-checked by Module 3, so every pair
+// reached here is real): opaque pointers make `*T -> *U` an outright
+// no-op (same "ptr" either way, nothing to convert); same-width
+// integer/`char` pairs are also a no-op (identical bit pattern);
+// everything else picks the one LLVM instruction that actually applies
+// -- `ptrtoint`/`inttoptr` for the pointer/`uintptr` pair, `zext`/
+// `icmp ne ..., 0` for `bool` in from/to an integer (`false`/`true` ->
+// `0`/`1` and back, matching the table's own wording exactly), and
+// `zext`/`sext`/`trunc` by width otherwise (`sext` only when the
+// source is signed -- an unsigned source always zero-extends).
+function gen_cast(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTNode) : Operand {
+  mut src_op : Operand := gen_expr(cg, s, sc, file_idx, (*e).left);
+  mut src_ty : *ASTNode := (*(*e).left).data_type;
+  mut dst_ty : *ASTNode := (*e).data_type;
+  mut src_cat : int32 := cast_category(src_ty);
+  mut dst_cat : int32 := cast_category(dst_ty);
+  mut r : uint64 := 0;
+  mut sw : uint64 := 0;
+  mut dw : uint64 := 0;
+
+  if ((src_cat == 4 && dst_cat == 4) || (src_cat == 2 && dst_cat == 2)) {
+    return src_op;
+  }
+
+  if (src_cat == 4 && dst_cat == 1) {
+    r := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 53);
+    cg_piece(cg, 51); cg_byte(cg, 32);
+    cg_operand(cg, src_op);
+    cg_piece(cg, 54); cg_piece(cg, 0);
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+  }
+  if (src_cat == 1 && dst_cat == 4) {
+    r := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 55);
+    cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32);
+    cg_operand(cg, src_op);
+    cg_piece(cg, 56); cg_piece(cg, 0);
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+  }
+
+  if (src_cat == 2) {
+    r := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 57);
+    cg_byte(cg, 105); cg_uint(cg, 1); cg_byte(cg, 32);
+    cg_operand(cg, src_op);
+    cg_piece(cg, 60);
+    cg_type(cg, s, file_idx, dst_ty);
+    cg_piece(cg, 0);
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+  }
+  if (dst_cat == 2) {
+    r := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 17); cg_piece(cg, 41);
+    cg_byte(cg, 32);
+    cg_type(cg, s, (*(*e).left).type_file_idx, src_ty);
+    cg_byte(cg, 32);
+    cg_operand(cg, src_op);
+    cg_piece(cg, 3); cg_byte(cg, 48); cg_piece(cg, 0);
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+  }
+
+  sw := llvm_int_width((*src_ty).tok.kind);
+  dw := llvm_int_width((*dst_ty).tok.kind);
+  if (sw == dw) {
+    return src_op;
+  }
+  r := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+  if (dw > sw) {
+    if (is_unsigned_for_cast((*src_ty).tok.kind)) {
+      cg_piece(cg, 57);
+    } else {
+      cg_piece(cg, 58);
+    }
+  } else {
+    cg_piece(cg, 59);
+  }
+  cg_type(cg, s, (*(*e).left).type_file_idx, src_ty);
+  cg_byte(cg, 32);
+  cg_operand(cg, src_op);
+  cg_piece(cg, 60);
+  cg_type(cg, s, file_idx, dst_ty);
+  cg_piece(cg, 0);
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+}
+
+function gen_expr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTNode) : Operand {
+  mut k : uint32 := (*e).kind;
+  mut slot : uint64 := 0;
+  mut r : uint64 := 0;
+  mut left_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut right_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut is_unsigned : bool := false;
+  mut lcat : int32 := 0;
+  mut rcat : int32 := 0;
+  mut lit_lr : LookupResult := LookupResult { found := false, index := 0 };
+  mut lit_struct_decl : *ASTNode := null;
+  mut lit_struct_file : uint64 := 0;
+  mut lit_field : *ASTNode := null;
+  mut lit_decl_field : *ASTNode := null;
+  mut lit_field_idx : uint64 := 0;
+  mut lit_found : bool := false;
+  mut lit_val_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut lit_addr : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut lit_base_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut lit_slot : uint64 := 0;
+  mut lit_elem_ty : *ASTNode := null;
+  mut lit_elem_file : uint64 := 0;
+
+  if (k == 140) {
+    slot := scope_reg_for_decl(sc, (*e).symbol_ref);
+    r := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 7);
+    cg_type(cg, s, file_idx, (*e).data_type);
+    cg_piece(cg, 8); cg_reg_ref(cg, slot); cg_piece(cg, 0);
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+  }
+
+  if (k == 141 || k == 144) {
+    return Operand { is_reg := false, reg := 0, imm := (*e).int_val, is_null := false };
+  }
+
+  if (k == 142) {
+    return Operand { is_reg := false, reg := 0, imm := decode_char_literal(&(*(*s).buffers)[file_idx].bytes, (*e).tok.offset), is_null := false };
+  }
+
+  if (k == 145) {
+    return Operand { is_reg := false, reg := 0, imm := 0, is_null := true };
+  }
+
+  if (k == 146) {
+    if (is_logical_op((*e).op_type)) {
+      if ((*e).op_type == 77) { return gen_and(cg, s, sc, file_idx, e); }
+      return gen_or(cg, s, sc, file_idx, e);
+    }
+    left_op := gen_expr(cg, s, sc, file_idx, (*e).left);
+    right_op := gen_expr(cg, s, sc, file_idx, (*e).right);
+    lcat := cast_category((*(*e).left).data_type);
+    rcat := cast_category((*(*e).right).data_type);
+
+    if ((*e).op_type == 85 && (lcat == 4 || rcat == 4)) {
+      return gen_ptr_add(cg, s, file_idx, e, left_op, right_op, lcat);
+    }
+    if ((*e).op_type == 80 && lcat == 4) {
+      return gen_ptr_sub(cg, s, file_idx, e, left_op, right_op, rcat);
+    }
+
+    if (lcat == 4 && rcat == 4) {
+      // SS3.4's pointer exception: any two pointer types compare,
+      // regardless of pointee -- an address is conventionally an
+      // UNSIGNED quantity, so ordered comparisons always use the
+      // unsigned predicate here, never derived from a pointer type
+      // node's own (meaningless -- TYPE_POINTER carries no base-type
+      // keyword) tok.kind the way a scalar comparison's would be.
+      is_unsigned := true;
+    } else {
+      is_unsigned := is_unsigned_for_cast((*(*(*e).left).data_type).tok.kind);
+    }
+    r := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+    if (is_comparison_op((*e).op_type)) {
+      cg_piece(cg, 17);
+      cg_cmp_pred(cg, (*e).op_type, is_unsigned);
+      cg_byte(cg, 32);
+      cg_type(cg, s, (*(*e).left).type_file_idx, (*(*e).left).data_type);
+    } else {
+      cg_binop_mnemonic(cg, (*e).op_type, is_unsigned);
+      cg_byte(cg, 32);
+      cg_type(cg, s, (*e).type_file_idx, (*e).data_type);
+    }
+    cg_byte(cg, 32);
+    cg_operand(cg, left_op);
+    cg_piece(cg, 3);
+    cg_operand(cg, right_op);
+    cg_piece(cg, 0);
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+  }
+
+  if (k == 147) {
+    if ((*e).op_type == 82) {
+      // Address-of: the inner lvalue's own ADDRESS (an ordinary local's
+      // own alloca slot register, or a freshly-computed `getelementptr`
+      // for `&x.field`/`&arr[i]`) -- never call gen_expr (which would
+      // instead LOAD its current value) on the operand here.
+      return gen_addr(cg, s, sc, file_idx, (*e).left);
+    }
+    left_op := gen_expr(cg, s, sc, file_idx, (*e).left);
+    if ((*e).op_type == 81) {
+      r := new_reg(cg);
+      cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 7);
+      cg_type(cg, s, (*e).type_file_idx, (*e).data_type);
+      cg_piece(cg, 8);
+      cg_operand(cg, left_op);
+      cg_piece(cg, 0);
+      return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+    }
+    r := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+    if ((*e).op_type == 79) {
+      cg_piece(cg, 18);
+      cg_operand(cg, left_op);
+      cg_piece(cg, 3);
+      cg_byte(cg, 49);
+    } else {
+      cg_piece(cg, 28);
+      cg_byte(cg, 32);
+      cg_type(cg, s, (*e).type_file_idx, (*e).data_type);
+      cg_byte(cg, 32);
+      cg_byte(cg, 48);
+      cg_piece(cg, 3);
+      cg_operand(cg, left_op);
+    }
+    cg_piece(cg, 0);
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+  }
+
+  if (k == 149) {
+    return gen_call(cg, s, sc, file_idx, e);
+  }
+
+  if (k == 148) {
+    return gen_cast(cg, s, sc, file_idx, e);
+  }
+
+  if (k == 155 || k == 156) {
+    // `extra` is the measured type for BOTH forms once decorated
+    // (decorate_literal_with_expected's own header comment) EXCEPT the
+    // expr form, which only ever set `left`, never `extra` -- that
+    // case reads the already-decorated operand's own data_type
+    // instead. Neither form's operand is ever evaluated at runtime
+    // (see type_byte_size's own header comment on why not).
+    if ((*e).left != null) {
+      if (k == 155) {
+        return Operand { is_reg := false, reg := 0, imm := uint64_to_int64(type_byte_size(cg, s, (*(*e).left).type_file_idx, (*(*e).left).data_type)), is_null := false };
+      }
+      if ((*(*e).left).data_type == null || (*(*(*e).left).data_type).kind != 122) {
+        (*cg).had_error := true;
+        return Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+      }
+      return Operand { is_reg := false, reg := 0, imm := (*(*(*e).left).data_type).int_val, is_null := false };
+    }
+    if (k == 155) {
+      return Operand { is_reg := false, reg := 0, imm := uint64_to_int64(type_byte_size(cg, s, file_idx, (*e).extra)), is_null := false };
+    }
+    if ((*e).extra == null || (*(*e).extra).kind != 122) {
+      (*cg).had_error := true;
+      return Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+    }
+    return Operand { is_reg := false, reg := 0, imm := (*(*e).extra).int_val, is_null := false };
+  }
+
+  // STRUCT_LIT/ARRAY_LIT (postulate_v0_language_reference.md SS3.8): no
+  // single LLVM instruction builds an aggregate constant from runtime
+  // values, so this uses the same technique as any other composite
+  // write -- a fresh temporary `alloca`, one `getelementptr`+`store`
+  // per member (evaluated in the literal's own left-to-right written
+  // order), then a whole-value `load` back out, exactly mirroring the
+  // existing alloca+load/store convention everywhere else in this file
+  // rather than inventing a literal-specific shape.
+  if (k == 152) {
+    lit_slot := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, lit_slot); cg_piece(cg, 2); cg_piece(cg, 6);
+    cg_type(cg, s, (*e).type_file_idx, (*e).data_type);
+    cg_piece(cg, 0);
+
+    lit_lr := find_struct_symbol(s, &(*(*s).buffers)[file_idx].bytes, (*e).tok.offset, (*e).tok.length);
+    if (!lit_lr.found) {
+      (*cg).had_error := true;
+      return Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+    }
+    lit_struct_decl := sym_decl(s, lit_lr.index);
+    lit_struct_file := (*s).symbols.ptr[lit_lr.index].file_idx;
+    lit_base_op := Operand { is_reg := true, reg := lit_slot, imm := 0, is_null := false };
+
+    lit_field := (*e).first_child;
+    while (lit_field != null) {
+      lit_decl_field := (*lit_struct_decl).first_child;
+      lit_field_idx := 0;
+      lit_found := false;
+      while (lit_decl_field != null && !lit_found) {
+        if (bytes_equal_cross(&(*(*s).buffers)[lit_struct_file].bytes, (*lit_decl_field).tok.offset, (*lit_decl_field).tok.length, &(*(*s).buffers)[file_idx].bytes, (*lit_field).tok.offset, (*lit_field).tok.length)) {
+          lit_found := true;
+        } else {
+          lit_decl_field := (*lit_decl_field).next_sibling;
+          lit_field_idx := lit_field_idx + 1;
+        }
+      }
+      lit_val_op := gen_expr(cg, s, sc, file_idx, (*lit_field).left);
+      lit_addr := gen_member_addr(cg, s, (*e).type_file_idx, (*e).data_type, lit_base_op, lit_field_idx);
+      cg_piece(cg, 1); cg_piece(cg, 9);
+      cg_type(cg, s, lit_struct_file, (*lit_decl_field).data_type);
+      cg_byte(cg, 32);
+      cg_operand(cg, lit_val_op);
+      cg_piece(cg, 8); cg_operand(cg, lit_addr); cg_piece(cg, 0);
+
+      lit_field := (*lit_field).next_sibling;
+    }
+
+    r := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 7);
+    cg_type(cg, s, (*e).type_file_idx, (*e).data_type);
+    cg_piece(cg, 8); cg_reg_ref(cg, lit_slot); cg_piece(cg, 0);
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+  }
+
+  if (k == 153) {
+    lit_slot := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, lit_slot); cg_piece(cg, 2); cg_piece(cg, 6);
+    cg_type(cg, s, (*e).type_file_idx, (*e).data_type);
+    cg_piece(cg, 0);
+
+    lit_elem_ty := (*(*e).data_type).left;
+    lit_elem_file := (*e).type_file_idx;
+    lit_base_op := Operand { is_reg := true, reg := lit_slot, imm := 0, is_null := false };
+
+    lit_field := (*e).first_child;
+    lit_field_idx := 0;
+    while (lit_field != null) {
+      lit_val_op := gen_expr(cg, s, sc, file_idx, lit_field);
+      lit_addr := gen_member_addr(cg, s, (*e).type_file_idx, (*e).data_type, lit_base_op, lit_field_idx);
+      cg_piece(cg, 1); cg_piece(cg, 9);
+      cg_type(cg, s, lit_elem_file, lit_elem_ty);
+      cg_byte(cg, 32);
+      cg_operand(cg, lit_val_op);
+      cg_piece(cg, 8); cg_operand(cg, lit_addr); cg_piece(cg, 0);
+
+      lit_field := (*lit_field).next_sibling;
+      lit_field_idx := lit_field_idx + 1;
+    }
+
+    r := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 7);
+    cg_type(cg, s, (*e).type_file_idx, (*e).data_type);
+    cg_piece(cg, 8); cg_reg_ref(cg, lit_slot); cg_piece(cg, 0);
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+  }
+
+  if (k == 150 || k == 151) {
+    left_op := gen_addr(cg, s, sc, file_idx, e);
+    r := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 7);
+    cg_type(cg, s, (*e).type_file_idx, (*e).data_type);
+    cg_piece(cg, 8);
+    cg_operand(cg, left_op);
+    cg_piece(cg, 0);
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+  }
+
+  (*cg).had_error := true;
+  return Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+}
+
+// field_decl's own position (0-based) among struct_decl's FIELD_DECL
+// chain -- exactly the index `getelementptr`'s own struct-index operand
+// needs. field_decl is always (*some FIELD_EXPR).symbol_ref, already
+// resolved by Module 3's own decorate_expr (k == 151) to point at one
+// of struct_decl's actual children, so the walk always terminates on a
+// match, never falls off the end.
+function find_field_index(struct_decl: *ASTNode, field_decl: *ASTNode) : uint64 {
+  mut field : *ASTNode := (*struct_decl).first_child;
+  mut idx : uint64 := 0;
+  while (field != null && field != field_decl) {
+    field := (*field).next_sibling;
+    idx := idx + 1;
+  }
+  return idx;
+}
+
+// `%r = getelementptr <container_ty>, ptr <base>, i32 0, i32 <index>` --
+// the leading `i32 0` selects "the one container object at `base`"
+// (GEP's own pointer-arithmetic-over-an-array-of-container_ty
+// interpretation), the second selects a compile-time-known struct
+// field or array element position within it. Shared by FIELD_EXPR's
+// own address computation and by STRUCT_LIT/ARRAY_LIT's own per-
+// member store address (gen_addr and gen_expr, below) -- NOT used for
+// a runtime-VARIABLE array index (gen_addr's own INDEX_EXPR case),
+// since that one's second GEP operand has to keep the index
+// expression's own natural type, not a hardcoded `i32` constant.
+function gen_member_addr(cg: *Codegen, s: *Sema, container_file: uint64, container_ty: *ASTNode, base: Operand, index: uint64) : Operand {
+  mut r : uint64 := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 52);
+  cg_type(cg, s, container_file, container_ty);
+  cg_piece(cg, 3);
+  cg_piece(cg, 51); cg_byte(cg, 32);
+  cg_operand(cg, base);
+  cg_piece(cg, 3);
+  cg_byte(cg, 105); cg_uint(cg, 32); cg_byte(cg, 32); cg_byte(cg, 48);
+  cg_piece(cg, 3);
+  cg_byte(cg, 105); cg_uint(cg, 32); cg_byte(cg, 32); cg_uint(cg, index);
+  cg_piece(cg, 0);
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+}
+
+// The lvalue's own "address" operand -- used both to STORE through
+// (ASSIGN_STMT) and, for FIELD_EXPR/INDEX_EXPR, to LOAD from (gen_
+// expr's own read branches for kind 150/151): an ordinary local
+// (IDENT_EXPR) is its own alloca slot register, used directly; `*p` is
+// the pointer VALUE `p` evaluates to (gen_expr on the dereference's own
+// operand, not the dereference itself); `x.field` computes the base's
+// own address (recursing into gen_addr if the base is itself a plain
+// struct value, or gen_expr if the base's static type is already a
+// pointer-to-struct, matching decorate_expr's own one-level auto-deref
+// rule for `.`) then a struct-shaped `getelementptr`; `arr[i]` reuses
+// gen_ptr_add's existing single-index GEP shape when the base is a
+// pointer (`p[i]` is exactly `*(p + i)`), or a leading-`i32 0` array-
+// shaped `getelementptr` when the base is a true array value.
+function gen_addr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTNode) : Operand {
+  mut base_ty : *ASTNode := null;
+  mut base_file : uint64 := 0;
+  mut base_addr : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut struct_ty : *ASTNode := null;
+  mut struct_file : uint64 := 0;
+  mut lr : LookupResult := LookupResult { found := false, index := 0 };
+  mut struct_decl : *ASTNode := null;
+  mut field_idx : uint64 := 0;
+  mut idx_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut r : uint64 := 0;
+
+  if ((*e).kind == 140) {
+    return Operand { is_reg := true, reg := scope_reg_for_decl(sc, (*e).symbol_ref), imm := 0, is_null := false };
+  }
+  if ((*e).kind == 147 && (*e).op_type == 81) {
+    return gen_expr(cg, s, sc, file_idx, (*e).left);
+  }
+
+  if ((*e).kind == 151) {
+    base_ty := (*(*e).left).data_type;
+    base_file := (*(*e).left).type_file_idx;
+    if (base_ty != null && (*base_ty).kind == 121) {
+      base_addr := gen_expr(cg, s, sc, file_idx, (*e).left);
+      struct_ty := (*base_ty).left;
+    } else {
+      base_addr := gen_addr(cg, s, sc, file_idx, (*e).left);
+      struct_ty := base_ty;
+    }
+    struct_file := base_file;
+    lr := find_struct_symbol(s, &(*(*s).buffers)[struct_file].bytes, (*struct_ty).tok.offset, (*struct_ty).tok.length);
+    if (!lr.found) {
+      (*cg).had_error := true;
+      return Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+    }
+    struct_decl := sym_decl(s, lr.index);
+    field_idx := find_field_index(struct_decl, (*e).symbol_ref);
+    return gen_member_addr(cg, s, struct_file, struct_ty, base_addr, field_idx);
+  }
+
+  if ((*e).kind == 150) {
+    base_ty := (*(*e).left).data_type;
+    base_file := (*(*e).left).type_file_idx;
+    if (base_ty != null && (*base_ty).kind == 121) {
+      base_addr := gen_expr(cg, s, sc, file_idx, (*e).left);
+      idx_op := gen_expr(cg, s, sc, file_idx, (*e).right);
+      return gen_ptr_add(cg, s, file_idx, e, base_addr, idx_op, 4);
+    }
+    base_addr := gen_addr(cg, s, sc, file_idx, (*e).left);
+    idx_op := gen_expr(cg, s, sc, file_idx, (*e).right);
+    r := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 52);
+    cg_type(cg, s, base_file, base_ty);
+    cg_piece(cg, 3);
+    cg_piece(cg, 51); cg_byte(cg, 32);
+    cg_operand(cg, base_addr);
+    cg_piece(cg, 3);
+    cg_byte(cg, 105); cg_uint(cg, 32); cg_byte(cg, 32); cg_byte(cg, 48);
+    cg_piece(cg, 3);
+    cg_type(cg, s, (*(*e).right).type_file_idx, (*(*e).right).data_type);
+    cg_byte(cg, 32);
+    cg_operand(cg, idx_op);
+    cg_piece(cg, 0);
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+  }
+
+  (*cg).had_error := true;
+  return Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+}
+
+function gen_stmt(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, stmt: *ASTNode) : void {
+  mut k : uint32 := (*stmt).kind;
+  mut cond_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut then_l : uint64 := 0;
+  mut else_l : uint64 := 0;
+  mut end_l : uint64 := 0;
+  mut cond_l : uint64 := 0;
+  mut body_l : uint64 := 0;
+  mut ret_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut val_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut slot : uint64 := 0;
+  mut pair : *ASTNode := null;
+  mut pair_slots : Operand[16];
+  mut pair_ops : Operand[16];
+  mut n_pairs : uint64 := 0;
+  mut i : uint64 := 0;
+  mut branch_ret : bool := false;
+
+  if (k == 131) {
+    cond_op := gen_expr(cg, s, sc, file_idx, (*stmt).left);
+    then_l := new_label(cg);
+    end_l := new_label(cg);
+    if ((*stmt).extra != null) {
+      else_l := new_label(cg);
+    } else {
+      else_l := end_l;
+    }
+    cg_piece(cg, 1); cg_piece(cg, 13); cg_operand(cg, cond_op);
+    cg_piece(cg, 14); cg_label_target(cg, then_l);
+    cg_piece(cg, 14); cg_label_target(cg, else_l);
+    cg_piece(cg, 0);
+
+    cg_label_def(cg, then_l);
+    // A `br` right after the then-block's own `ret` (no label between
+    // them) would be a second terminator in the same basic block --
+    // invalid IR -- so it's only emitted when the block did NOT
+    // already end in one (gen_block's own returned bool; see its own
+    // comment for exactly what it does and doesn't detect).
+    branch_ret := gen_block(cg, s, sc, file_idx, (*stmt).right);
+    if (!branch_ret) {
+      cg_piece(cg, 1); cg_piece(cg, 12); cg_piece(cg, 15); cg_label_target(cg, end_l); cg_piece(cg, 0);
+    }
+
+    if ((*stmt).extra != null) {
+      cg_label_def(cg, else_l);
+      if ((*(*stmt).extra).kind == 131) {
+        // A nested "elseif" always finishes by DEFINING its own end
+        // label with nothing emitted after it (this same k == 131
+        // branch's own last two lines) -- so falling out of it always
+        // still needs its own trailing branch, unconditionally.
+        gen_stmt(cg, s, sc, file_idx, (*stmt).extra);
+        cg_piece(cg, 1); cg_piece(cg, 12); cg_piece(cg, 15); cg_label_target(cg, end_l); cg_piece(cg, 0);
+      } else {
+        branch_ret := gen_block(cg, s, sc, file_idx, (*stmt).extra);
+        if (!branch_ret) {
+          cg_piece(cg, 1); cg_piece(cg, 12); cg_piece(cg, 15); cg_label_target(cg, end_l); cg_piece(cg, 0);
+        }
+      }
+    }
+
+    cg_label_def(cg, end_l);
+    return;
+  }
+
+  if (k == 132) {
+    cond_l := new_label(cg);
+    body_l := new_label(cg);
+    end_l := new_label(cg);
+
+    cg_piece(cg, 1); cg_piece(cg, 12); cg_piece(cg, 15); cg_label_target(cg, cond_l); cg_piece(cg, 0);
+
+    cg_label_def(cg, cond_l);
+    cond_op := gen_expr(cg, s, sc, file_idx, (*stmt).left);
+    cg_piece(cg, 1); cg_piece(cg, 13); cg_operand(cg, cond_op);
+    cg_piece(cg, 14); cg_label_target(cg, body_l);
+    cg_piece(cg, 14); cg_label_target(cg, end_l);
+    cg_piece(cg, 0);
+
+    cg_label_def(cg, body_l);
+    branch_ret := gen_block(cg, s, sc, file_idx, (*stmt).right);
+    if (!branch_ret) {
+      cg_piece(cg, 1); cg_piece(cg, 12); cg_piece(cg, 15); cg_label_target(cg, cond_l); cg_piece(cg, 0);
+    }
+
+    cg_label_def(cg, end_l);
+    return;
+  }
+
+  if (k == 133) {
+    if ((*stmt).left != null) {
+      ret_op := gen_expr(cg, s, sc, file_idx, (*stmt).left);
+      cg_piece(cg, 1); cg_piece(cg, 10);
+      cg_type(cg, s, (*(*stmt).left).type_file_idx, (*(*stmt).left).data_type);
+      cg_byte(cg, 32);
+      cg_operand(cg, ret_op);
+      cg_piece(cg, 0);
+    } else {
+      cg_piece(cg, 1); cg_piece(cg, 11);
+    }
+    return;
+  }
+
+  if (k == 134) {
+    slot := scope_reg_for_decl(sc, stmt);
+    if ((*stmt).left != null) {
+      val_op := gen_expr(cg, s, sc, file_idx, (*stmt).left);
+      cg_piece(cg, 1); cg_piece(cg, 9);
+      cg_type(cg, s, file_idx, (*stmt).data_type);
+      cg_byte(cg, 32);
+      cg_operand(cg, val_op);
+      cg_piece(cg, 8); cg_reg_ref(cg, slot); cg_piece(cg, 0);
+    }
+    return;
+  }
+
+  if (k == 135) {
+    // Dijkstra/Hoare simultaneous assignment (postulate_v0_language_
+    // reference.md SS4.2): every right-hand side evaluated against the
+    // state as it was before, THEN all stores happen -- collect every
+    // pair's target slot and computed value first, in one pass, before
+    // emitting any `store` at all.
+    pair := (*stmt).first_child;
+    while (pair != null) {
+      pair_slots[n_pairs] := gen_addr(cg, s, sc, file_idx, (*pair).left);
+      pair_ops[n_pairs] := gen_expr(cg, s, sc, file_idx, (*pair).right);
+      n_pairs := n_pairs + 1;
+      pair := (*pair).next_sibling;
+    }
+    pair := (*stmt).first_child;
+    i := 0;
+    while (i < n_pairs) {
+      cg_piece(cg, 1); cg_piece(cg, 9);
+      cg_type(cg, s, (*(*pair).left).type_file_idx, (*(*pair).left).data_type);
+      cg_byte(cg, 32);
+      cg_operand(cg, pair_ops[i]);
+      cg_piece(cg, 8); cg_operand(cg, pair_slots[i]); cg_piece(cg, 0);
+      pair := (*pair).next_sibling;
+      i := i + 1;
+    }
+    return;
+  }
+
+  if (k == 136) {
+    val_op := gen_expr(cg, s, sc, file_idx, (*stmt).left);
+    return;
+  }
+}
+
+// Returns whether this block's own last statement, positionally, was
+// literally a RETURN_STMT -- not real reachability analysis (Module 3
+// doesn't do "every path returns" checking, so this doesn't either),
+// just enough for callers to know whether the basic block they're
+// still inside already has a terminator, and so must NOT get another
+// instruction appended to it (LLVM IR allows only one terminator per
+// block, at its very end). A block ending in an `if`/`while` that
+// itself always returns doesn't need this: gen_stmt's own IF_STMT
+// case always finishes by DEFINING a fresh, unterminated label with
+// nothing emitted after it, so the code position right after it is
+// always safe to append to regardless of what happened inside.
+function gen_block(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, block: *ASTNode) : bool {
+  mut stmt : *ASTNode := (*block).first_child;
+  mut last_kind : uint32 := 0;
+  while (stmt != null) {
+    gen_stmt(cg, s, sc, file_idx, stmt);
+    last_kind := (*stmt).kind;
+    stmt := (*stmt).next_sibling;
+  }
+  return last_kind == 133;
+}
+
+function gen_function(cg: *Codegen, s: *Sema, func_decl: *ASTNode, file_idx: uint64) : void {
+  mut sc : Scope := Scope { bindings := dynbindings_new(256), count := 0, ret_type := (*func_decl).data_type, ret_file := file_idx };
+  mut param : *ASTNode := (*func_decl).first_child;
+  mut body : *ASTNode := (*func_decl).extra;
+  mut stmt : *ASTNode := null;
+  mut pidx : uint64 := 0;
+  mut slot : uint64 := 0;
+  mut body_ret : bool := false;
+
+  cg_piece(cg, 4);
+  cg_type(cg, s, file_idx, (*func_decl).data_type);
+  cg_byte(cg, 32);
+  cg_byte(cg, 64);
+  cg_slice(cg, &(*(*s).buffers)[file_idx].bytes, (*func_decl).tok.offset, (*func_decl).tok.length);
+  cg_piece(cg, 24);
+  while (param != null) {
+    if (pidx > 0) { cg_piece(cg, 3); }
+    cg_type(cg, s, file_idx, (*param).data_type);
+    cg_byte(cg, 32);
+    cg_param_ref(cg, pidx);
+    param := (*param).next_sibling;
+    pidx := pidx + 1;
+  }
+  cg_piece(cg, 25);
+  cg_byte(cg, 32);
+  cg_piece(cg, 22);
+  cg_piece(cg, 20);
+
+  param := (*func_decl).first_child;
+  pidx := 0;
+  while (param != null) {
+    scope_add(&sc, param);
+    slot := new_reg(cg);
+    sc.bindings.ptr[sc.count - 1].reg := slot;
+    cg_piece(cg, 1); cg_reg_ref(cg, slot); cg_piece(cg, 2); cg_piece(cg, 6);
+    cg_type(cg, s, file_idx, (*param).data_type);
+    cg_piece(cg, 0);
+    cg_piece(cg, 1); cg_piece(cg, 9);
+    cg_type(cg, s, file_idx, (*param).data_type);
+    cg_byte(cg, 32);
+    cg_param_ref(cg, pidx);
+    cg_piece(cg, 8); cg_reg_ref(cg, slot); cg_piece(cg, 0);
+    param := (*param).next_sibling;
+    pidx := pidx + 1;
+  }
+
+  if (body != null) {
+    stmt := (*body).first_child;
+    while (stmt != null) {
+      if ((*stmt).kind == 134) {
+        scope_add(&sc, stmt);
+        slot := new_reg(cg);
+        sc.bindings.ptr[sc.count - 1].reg := slot;
+        cg_piece(cg, 1); cg_reg_ref(cg, slot); cg_piece(cg, 2); cg_piece(cg, 6);
+        cg_type(cg, s, file_idx, (*stmt).data_type);
+        cg_piece(cg, 0);
+      }
+      stmt := (*stmt).next_sibling;
+    }
+    body_ret := gen_block(cg, s, &sc, file_idx, body);
+  }
+
+  // Only reached when the body did NOT already end in its own `ret`
+  // (Module 3 doesn't do full "every path returns" control-flow
+  // analysis, so a source function that doesn't is still possible) --
+  // NO fresh label first: wherever generation left off is always
+  // either mid-block (some non-terminator statement, e.g. a plain
+  // assignment, was the body's last one -- this terminates it) or
+  // sitting right at an `if`/`while`'s own freshly-defined, still-
+  // empty merge label (gen_stmt's own IF_STMT/WHILE_STMT cases always
+  // leave one behind) -- either way, appending a terminator directly
+  // is exactly what that block still needs, and inserting a new label
+  // first would either orphan the still-open current block (never
+  // itself terminated) or produce a second, empty, unreachable label
+  // with nothing branching into it -- both invalid IR.
+  if (!body_ret) {
+    if (is_void_type((*func_decl).data_type)) {
+      cg_piece(cg, 1); cg_piece(cg, 11);
+    } else {
+      cg_piece(cg, 1); cg_piece(cg, 21);
+    }
+  }
+  cg_piece(cg, 23);
+}
+
+// One `%Name = type <{ field1, field2, ... }>` line per struct symbol
+// in the WHOLE program (Sema's own symbol table is already global
+// across every file by the time codegen runs), emitted once up front
+// before any function/extern -- LLVM requires every named type to be
+// defined before its first use, and a struct can be referenced from a
+// function declared in any file via cross-file `use`. `<{ ... }>`
+// (packed) rather than plain `{ ... }` matches postulate_v1_language_
+// reference.md's own "fields laid out with no implicit padding"
+// struct-layout guarantee -- LLVM's default (unpacked) struct layout
+// would insert alignment padding a verifier relying on that guarantee
+// doesn't expect.
+function gen_struct_types(cg: *Codegen, s: *Sema) : void {
+  mut i : uint64 := 0;
+  mut decl : *ASTNode := null;
+  mut struct_file : uint64 := 0;
+  mut field : *ASTNode := null;
+  mut first : bool := true;
+
+  while (i < (*s).symbol_count) {
+    if ((*s).symbols.ptr[i].kind == 1) {
+      decl := sym_decl(s, i);
+      struct_file := (*s).symbols.ptr[i].file_idx;
+      cg_byte(cg, 37);
+      cg_slice(cg, &(*(*s).buffers)[struct_file].bytes, (*decl).tok.offset, (*decl).tok.length);
+      cg_piece(cg, 2);
+      cg_byte(cg, 116); cg_byte(cg, 121); cg_byte(cg, 112); cg_byte(cg, 101); cg_byte(cg, 32);
+      cg_byte(cg, 60); cg_byte(cg, 123); cg_byte(cg, 32);
+      field := (*decl).first_child;
+      first := true;
+      while (field != null) {
+        if (!first) { cg_piece(cg, 3); }
+        cg_type(cg, s, struct_file, (*field).data_type);
+        first := false;
+        field := (*field).next_sibling;
+      }
+      cg_byte(cg, 32); cg_byte(cg, 125); cg_byte(cg, 62);
+      cg_piece(cg, 0);
+    }
+    i := i + 1;
+  }
+}
+
+// Linux x86-64 syscall numbers for exactly the twelve `extern
+// function` names postulate_v1_language_reference.md SS5.2 whitelists.
+// Any OTHER extern function name still only gets a bare `declare`
+// (gen_program's own fallback, unchanged below) -- there is no way to
+// back an arbitrary extern symbol with a real implementation, only
+// these twelve specific ones. `.index` (LookupResult's own generic
+// payload field, reused here) holds the syscall number itself, not a
+// symbol-table index. Matched the same way `classify_word` (the
+// lexer's own keyword recognizer, above) matches fixed keyword text:
+// bucketed by length first, then compared byte by byte.
+function syscall_number_for(s: *Sema, file_idx: uint64, decl: *ASTNode) : LookupResult {
+  mut buf : *DynBytes := &(*(*s).buffers)[file_idx].bytes;
+  mut o : uint64 := (*decl).tok.offset;
+  mut n : uint64 := (*decl).tok.length;
+
+  if (n == 8) {
+    if ((*buf).ptr[o+0]==115 && (*buf).ptr[o+1]==121 && (*buf).ptr[o+2]==115 && (*buf).ptr[o+3]==95 && (*buf).ptr[o+4]==114 && (*buf).ptr[o+5]==101 && (*buf).ptr[o+6]==97 && (*buf).ptr[o+7]==100) { return LookupResult { found := true, index := 0 }; }
+    if ((*buf).ptr[o+0]==115 && (*buf).ptr[o+1]==121 && (*buf).ptr[o+2]==115 && (*buf).ptr[o+3]==95 && (*buf).ptr[o+4]==109 && (*buf).ptr[o+5]==109 && (*buf).ptr[o+6]==97 && (*buf).ptr[o+7]==112) { return LookupResult { found := true, index := 9 }; }
+    if ((*buf).ptr[o+0]==115 && (*buf).ptr[o+1]==121 && (*buf).ptr[o+2]==115 && (*buf).ptr[o+3]==95 && (*buf).ptr[o+4]==101 && (*buf).ptr[o+5]==120 && (*buf).ptr[o+6]==105 && (*buf).ptr[o+7]==116) { return LookupResult { found := true, index := 60 }; }
+    return LookupResult { found := false, index := 0 };
+  }
+  if (n == 9) {
+    if ((*buf).ptr[o+0]==115 && (*buf).ptr[o+1]==121 && (*buf).ptr[o+2]==115 && (*buf).ptr[o+3]==95 && (*buf).ptr[o+4]==119 && (*buf).ptr[o+5]==114 && (*buf).ptr[o+6]==105 && (*buf).ptr[o+7]==116 && (*buf).ptr[o+8]==101) { return LookupResult { found := true, index := 1 }; }
+    if ((*buf).ptr[o+0]==115 && (*buf).ptr[o+1]==121 && (*buf).ptr[o+2]==115 && (*buf).ptr[o+3]==95 && (*buf).ptr[o+4]==99 && (*buf).ptr[o+5]==108 && (*buf).ptr[o+6]==111 && (*buf).ptr[o+7]==110 && (*buf).ptr[o+8]==101) { return LookupResult { found := true, index := 56 }; }
+    if ((*buf).ptr[o+0]==115 && (*buf).ptr[o+1]==121 && (*buf).ptr[o+2]==115 && (*buf).ptr[o+3]==95 && (*buf).ptr[o+4]==102 && (*buf).ptr[o+5]==117 && (*buf).ptr[o+6]==116 && (*buf).ptr[o+7]==101 && (*buf).ptr[o+8]==120) { return LookupResult { found := true, index := 202 }; }
+    if ((*buf).ptr[o+0]==115 && (*buf).ptr[o+1]==121 && (*buf).ptr[o+2]==115 && (*buf).ptr[o+3]==95 && (*buf).ptr[o+4]==99 && (*buf).ptr[o+5]==108 && (*buf).ptr[o+6]==111 && (*buf).ptr[o+7]==115 && (*buf).ptr[o+8]==101) { return LookupResult { found := true, index := 3 }; }
+    return LookupResult { found := false, index := 0 };
+  }
+  if (n == 10) {
+    if ((*buf).ptr[o+0]==115 && (*buf).ptr[o+1]==121 && (*buf).ptr[o+2]==115 && (*buf).ptr[o+3]==95 && (*buf).ptr[o+4]==109 && (*buf).ptr[o+5]==117 && (*buf).ptr[o+6]==110 && (*buf).ptr[o+7]==109 && (*buf).ptr[o+8]==97 && (*buf).ptr[o+9]==112) { return LookupResult { found := true, index := 11 }; }
+    if ((*buf).ptr[o+0]==115 && (*buf).ptr[o+1]==121 && (*buf).ptr[o+2]==115 && (*buf).ptr[o+3]==95 && (*buf).ptr[o+4]==109 && (*buf).ptr[o+5]==114 && (*buf).ptr[o+6]==101 && (*buf).ptr[o+7]==109 && (*buf).ptr[o+8]==97 && (*buf).ptr[o+9]==112) { return LookupResult { found := true, index := 25 }; }
+    if ((*buf).ptr[o+0]==115 && (*buf).ptr[o+1]==121 && (*buf).ptr[o+2]==115 && (*buf).ptr[o+3]==95 && (*buf).ptr[o+4]==103 && (*buf).ptr[o+5]==101 && (*buf).ptr[o+6]==116 && (*buf).ptr[o+7]==116 && (*buf).ptr[o+8]==105 && (*buf).ptr[o+9]==100) { return LookupResult { found := true, index := 186 }; }
+    if ((*buf).ptr[o+0]==115 && (*buf).ptr[o+1]==121 && (*buf).ptr[o+2]==115 && (*buf).ptr[o+3]==95 && (*buf).ptr[o+4]==111 && (*buf).ptr[o+5]==112 && (*buf).ptr[o+6]==101 && (*buf).ptr[o+7]==110 && (*buf).ptr[o+8]==97 && (*buf).ptr[o+9]==116) { return LookupResult { found := true, index := 257 }; }
+    return LookupResult { found := false, index := 0 };
+  }
+  if (n == 14) {
+    if ((*buf).ptr[o+0]==115 && (*buf).ptr[o+1]==121 && (*buf).ptr[o+2]==115 && (*buf).ptr[o+3]==95 && (*buf).ptr[o+4]==101 && (*buf).ptr[o+5]==120 && (*buf).ptr[o+6]==105 && (*buf).ptr[o+7]==116 && (*buf).ptr[o+8]==95 && (*buf).ptr[o+9]==103 && (*buf).ptr[o+10]==114 && (*buf).ptr[o+11]==111 && (*buf).ptr[o+12]==117 && (*buf).ptr[o+13]==112) { return LookupResult { found := true, index := 231 }; }
+    return LookupResult { found := false, index := 0 };
+  }
+  return LookupResult { found := false, index := 0 };
+}
+
+// A type a raw syscall wrapper can move through an integer register --
+// a pointer (`ptrtoint`/`inttoptr` at the boundary) or any non-void
+// scalar keyword (passed/returned as its own width, widened to `i64`
+// with `zext` when narrower -- every whitelisted parameter narrower
+// than 64 bits happens to be `uint32`, SS5.2's own table, so `zext` is
+// always correct here, never `sext`). Explicitly false for a struct-
+// named TYPE_BASE or an array -- neither has a meaningful raw-register
+// representation, so a same-named `extern function` with one anywhere
+// in its signature safely falls back to gen_program's plain `declare`
+// instead of a syscall wrapper, rather than emitting nonsense IR.
+function is_syscall_safe_type(ty: *ASTNode) : bool {
+  if (ty == null) { return false; }
+  if ((*ty).kind == 121) { return true; }
+  if ((*ty).kind != 120) { return false; }
+  if ((*ty).tok.kind == 33) { return false; }
+  if ((*ty).tok.kind == 32) { return true; }
+  return base_type_size((*ty).tok.kind) > 0;
+}
+
+function cg_syscall_arg_reg(cg: *Codegen, which: uint64) : void {
+  cg_byte(cg, 123);
+  if (which == 0) { cg_byte(cg, 114); cg_byte(cg, 100); cg_byte(cg, 105); }
+  if (which == 1) { cg_byte(cg, 114); cg_byte(cg, 115); cg_byte(cg, 105); }
+  if (which == 2) { cg_byte(cg, 114); cg_byte(cg, 100); cg_byte(cg, 120); }
+  if (which == 3) { cg_byte(cg, 114); cg_byte(cg, 49); cg_byte(cg, 48); }
+  if (which == 4) { cg_byte(cg, 114); cg_byte(cg, 56); }
+  if (which == 5) { cg_byte(cg, 114); cg_byte(cg, 57); }
+  cg_byte(cg, 125);
+}
+
+// The only realistic way to reach the kernel directly from LLVM IR --
+// no libc, no syscall intrinsic -- is a `call` to an inline-asm blob
+// with register-constrained operands, the same idiom e.g. Rust's/
+// Zig's own freestanding raw-syscall paths use (postulate_stage1_
+// bootstrap_plan.md's own "Tracked checkpoint: extern/syscall calls
+// and `_start`", which this whole function, gen_syscall_extern, and
+// gen_start below implement in full). `args` holds each already-`i64`
+// argument operand, in order; `n_args` is at most 6 -- System V's own
+// register-argument limit, which every whitelisted extern function
+// already respects by construction. Always returns an `i64`; callers
+// translate it to their own wrapper's declared return type themselves.
+function gen_raw_syscall(cg: *Codegen, syscall_num: uint64, args: *(Operand[6]), n_args: uint64) : Operand {
+  mut r : uint64 := new_reg(cg);
+  mut i : uint64 := 0;
+  mut cur : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+  cg_piece(cg, 16);
+  cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32);
+  cg_byte(cg, 97); cg_byte(cg, 115); cg_byte(cg, 109); cg_byte(cg, 32);
+  cg_byte(cg, 115); cg_byte(cg, 105); cg_byte(cg, 100); cg_byte(cg, 101); cg_byte(cg, 101); cg_byte(cg, 102); cg_byte(cg, 102); cg_byte(cg, 101); cg_byte(cg, 99); cg_byte(cg, 116); cg_byte(cg, 32);
+  cg_byte(cg, 34);
+  cg_byte(cg, 115); cg_byte(cg, 121); cg_byte(cg, 115); cg_byte(cg, 99); cg_byte(cg, 97); cg_byte(cg, 108); cg_byte(cg, 108);
+  cg_byte(cg, 34);
+  cg_piece(cg, 3);
+  cg_byte(cg, 34);
+  cg_byte(cg, 61); cg_byte(cg, 123); cg_byte(cg, 114); cg_byte(cg, 97); cg_byte(cg, 120); cg_byte(cg, 125);
+  cg_byte(cg, 44);
+  cg_byte(cg, 123); cg_byte(cg, 114); cg_byte(cg, 97); cg_byte(cg, 120); cg_byte(cg, 125);
+  i := 0;
+  while (i < n_args) {
+    cg_byte(cg, 44);
+    cg_syscall_arg_reg(cg, i);
+    i := i + 1;
+  }
+  cg_byte(cg, 44);
+  cg_byte(cg, 126); cg_byte(cg, 123); cg_byte(cg, 114); cg_byte(cg, 99); cg_byte(cg, 120); cg_byte(cg, 125);
+  cg_byte(cg, 44);
+  cg_byte(cg, 126); cg_byte(cg, 123); cg_byte(cg, 114); cg_byte(cg, 49); cg_byte(cg, 49); cg_byte(cg, 125);
+  cg_byte(cg, 44);
+  cg_byte(cg, 126); cg_byte(cg, 123); cg_byte(cg, 109); cg_byte(cg, 101); cg_byte(cg, 109); cg_byte(cg, 111); cg_byte(cg, 114); cg_byte(cg, 121); cg_byte(cg, 125);
+  cg_byte(cg, 34);
+  cg_byte(cg, 40);
+  cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32); cg_uint(cg, syscall_num);
+  i := 0;
+  while (i < n_args) {
+    cg_piece(cg, 3);
+    cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32);
+    cur := (*args)[i];
+    cg_operand(cg, cur);
+    i := i + 1;
+  }
+  cg_byte(cg, 41);
+  cg_piece(cg, 0);
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+}
+
+// Emits a full `define` for a whitelisted `extern function`, backing
+// its own name with a real raw-syscall implementation instead of the
+// unresolvable `declare` gen_program falls back to for every other
+// extern. A pointer parameter is `ptrtoint`'d to feed the syscall's own
+// raw integer registers; a narrower-than-64-bit one is `zext`'d (see
+// is_syscall_safe_type's own comment on why zext, never sext, is always
+// correct here); an already-64-bit one needs no real conversion, but
+// still gets a fresh `add i64 %pN, 0` so it has its own `%rN` register
+// to hand to gen_raw_syscall (Operand's own reg field is always an
+// `%rN`, never a `%pN`, so a bare parameter reference can't be handed
+// through directly). The reverse (`inttoptr`) undoes the pointer
+// conversion for a `*void`-returning syscall (`sys_mmap`/`sys_mremap`)
+// on the way back out; `void`/64-bit-int returns need no conversion at
+// all. Only ever called once its caller (gen_program) has already
+// confirmed every parameter and the return type are all syscall-safe.
+function gen_syscall_extern(cg: *Codegen, s: *Sema, file_idx: uint64, decl: *ASTNode, syscall_num: uint64) : void {
+  mut param : *ASTNode := (*decl).first_child;
+  mut pidx : uint64 := 0;
+  mut args : Operand[6];
+  mut n_args : uint64 := 0;
+  mut ret_ty : *ASTNode := (*decl).data_type;
+  mut a : uint64 := 0;
+  mut rp : uint64 := 0;
+  mut result : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut arg_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+
+  cg_piece(cg, 4);
+  cg_type(cg, s, file_idx, ret_ty);
+  cg_byte(cg, 32);
+  cg_byte(cg, 64);
+  cg_slice(cg, &(*(*s).buffers)[file_idx].bytes, (*decl).tok.offset, (*decl).tok.length);
+  cg_piece(cg, 24);
+  param := (*decl).first_child;
+  pidx := 0;
+  while (param != null) {
+    if (pidx > 0) { cg_piece(cg, 3); }
+    cg_type(cg, s, file_idx, (*param).data_type);
+    cg_byte(cg, 32);
+    cg_param_ref(cg, pidx);
+    param := (*param).next_sibling;
+    pidx := pidx + 1;
+  }
+  cg_piece(cg, 25);
+  cg_byte(cg, 32);
+  cg_piece(cg, 22);
+  cg_piece(cg, 20);
+
+  param := (*decl).first_child;
+  pidx := 0;
+  n_args := 0;
+  while (param != null) {
+    if ((*(*param).data_type).kind == 121) {
+      a := new_reg(cg);
+      cg_piece(cg, 1); cg_reg_ref(cg, a); cg_piece(cg, 2);
+      cg_piece(cg, 53); cg_piece(cg, 51); cg_byte(cg, 32); cg_param_ref(cg, pidx); cg_piece(cg, 54); cg_piece(cg, 0);
+      arg_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false };
+      args[n_args] := arg_op;
+    } else {
+      if (llvm_int_width((*(*param).data_type).tok.kind) == 64) {
+        a := new_reg(cg);
+        cg_piece(cg, 1); cg_reg_ref(cg, a); cg_piece(cg, 2);
+        cg_piece(cg, 27); cg_byte(cg, 32);
+        cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32);
+        cg_param_ref(cg, pidx);
+        cg_piece(cg, 3); cg_byte(cg, 48);
+        cg_piece(cg, 0);
+        arg_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false };
+        args[n_args] := arg_op;
+      } else {
+        a := new_reg(cg);
+        cg_piece(cg, 1); cg_reg_ref(cg, a); cg_piece(cg, 2);
+        cg_piece(cg, 57);
+        cg_type(cg, s, file_idx, (*param).data_type);
+        cg_byte(cg, 32);
+        cg_param_ref(cg, pidx);
+        cg_piece(cg, 60);
+        cg_byte(cg, 105); cg_uint(cg, 64);
+        cg_piece(cg, 0);
+        arg_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false };
+        args[n_args] := arg_op;
+      }
+    }
+    n_args := n_args + 1;
+    param := (*param).next_sibling;
+    pidx := pidx + 1;
+  }
+
+  result := gen_raw_syscall(cg, syscall_num, &args, n_args);
+
+  if (is_void_type(ret_ty)) {
+    cg_piece(cg, 1); cg_piece(cg, 11);
+  } else {
+    if ((*ret_ty).kind == 121) {
+      rp := new_reg(cg);
+      cg_piece(cg, 1); cg_reg_ref(cg, rp); cg_piece(cg, 2);
+      cg_piece(cg, 55); cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32); cg_operand(cg, result); cg_piece(cg, 56); cg_piece(cg, 0);
+      cg_piece(cg, 1); cg_piece(cg, 10); cg_type(cg, s, file_idx, ret_ty); cg_byte(cg, 32); cg_reg_ref(cg, rp); cg_piece(cg, 0);
+    } else {
+      cg_piece(cg, 1); cg_piece(cg, 10); cg_type(cg, s, file_idx, ret_ty); cg_byte(cg, 32); cg_operand(cg, result); cg_piece(cg, 0);
+    }
+  }
+  cg_piece(cg, 23);
+}
+
+// Walks one file's already-declared+decorated top-level decls, emitting
+// a real `define` (gen_syscall_extern) for every EXTERN_DECL whose name
+// and whole signature exactly match one of the twelve whitelisted
+// syscalls (syscall_number_for + is_syscall_safe_type on every
+// param/the return type), a bare `declare` for any other EXTERN_DECL,
+// and `define` for every FUNCTION_DECL whose entire signature -- and
+// every top-level body-local declaration too -- is supported (decl_is_
+// supported, above: scalar, struct, array, and pointer-to-any-of-those
+// types, per is_supported_value_type). What's still out of scope here
+// is expression-level, not signature-level -- a struct/array LITERAL
+// (STRUCT_LIT/ARRAY_LIT) still sets had_error the moment gen_expr
+// actually reaches an unsupported shape, exactly like sizeof/lengthof's
+// own struct-name case already does for an unresolvable type.
+function gen_program(cg: *Codegen, s: *Sema, program: *ASTNode, file_idx: uint64) : void {
+  mut child : *ASTNode := (*program).first_child;
+  mut param : *ASTNode := null;
+  mut pidx : uint64 := 0;
+  mut lr : LookupResult := LookupResult { found := false, index := 0 };
+  mut safe : bool := false;
+  mut pcount : uint64 := 0;
+
+  while (child != null) {
+    if ((*child).kind == 112 && decl_is_supported(child)) {
+      lr := syscall_number_for(s, file_idx, child);
+      safe := lr.found;
+      param := (*child).first_child;
+      pcount := 0;
+      while (safe && param != null) {
+        if (!is_syscall_safe_type((*param).data_type)) { safe := false; }
+        pcount := pcount + 1;
+        param := (*param).next_sibling;
+      }
+      if (pcount > 6) { safe := false; }
+      if (safe && !(is_void_type((*child).data_type) || is_syscall_safe_type((*child).data_type))) {
+        safe := false;
+      }
+      if (safe) {
+        gen_syscall_extern(cg, s, file_idx, child, lr.index);
+      } else {
+        cg_piece(cg, 5);
+        cg_type(cg, s, file_idx, (*child).data_type);
+        cg_byte(cg, 32);
+        cg_byte(cg, 64);
+        cg_slice(cg, &(*(*s).buffers)[file_idx].bytes, (*child).tok.offset, (*child).tok.length);
+        cg_piece(cg, 24);
+        param := (*child).first_child;
+        pidx := 0;
+        while (param != null) {
+          if (pidx > 0) { cg_piece(cg, 3); }
+          cg_type(cg, s, file_idx, (*param).data_type);
+          param := (*param).next_sibling;
+          pidx := pidx + 1;
+        }
+        cg_piece(cg, 25);
+        cg_piece(cg, 0);
+      }
+    } else {
+      if ((*child).kind == 113 && decl_is_supported(child)) {
+        gen_function(cg, s, child, file_idx);
+      }
+    }
+    child := (*child).next_sibling;
+  }
+}
+
+// Emits `_start`, the process's real ELF entry point, for whichever
+// file declares `main` -- found by walking each file's own top-level
+// FUNCTION_DECLs for the literal name (Module 3 doesn't yet enforce
+// v1's own "exactly one `main`, in `\Main`" rule, reference SS6.3, so
+// this walks every file via main()'s own per-file loop below and stops
+// at the first match; a well-formed program only ever has one). Calls
+// `@main` (still zero-parameter only -- the two-parameter `argv`/`argc`
+// form is `v1.1.5`, not yet parsed at all), coerces its return value
+// (`void` or any atomic type, SS6.3) to the raw `i64` an exit-code
+// register needs -- a pointer via `ptrtoint`, a narrower-than-64-bit
+// value via `zext` unconditionally (the exit syscall's own observable
+// code only depends on the low 8 bits regardless, so this doesn't need
+// to branch on `main`'s own signedness), `void` as a literal `0` --
+// then terminates the WHOLE process via `sys_exit_group` (231), not
+// `sys_exit` (60), which only ends the calling thread and would leave
+// any other still-running thread (started via `sys_clone`) alive.
+// `unreachable` afterward, since the syscall itself never returns.
+// Returns whether it found (and therefore emitted) `main` in THIS
+// file, so main()'s own driver loop knows to stop trying further files.
+function gen_start(cg: *Codegen, s: *Sema, program: *ASTNode, file_idx: uint64) : bool {
+  mut child : *ASTNode := (*program).first_child;
+  mut main_decl : *ASTNode := null;
+  mut buf : *DynBytes := &(*(*s).buffers)[file_idx].bytes;
+  mut o : uint64 := 0;
+  mut call_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut code_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut ret_ty : *ASTNode := null;
+  mut a : uint64 := 0;
+  mut args : Operand[6];
+  mut discard_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+
+  while (child != null) {
+    if ((*child).kind == 113 && (*child).tok.length == 4) {
+      o := (*child).tok.offset;
+      if ((*buf).ptr[o+0]==109 && (*buf).ptr[o+1]==97 && (*buf).ptr[o+2]==105 && (*buf).ptr[o+3]==110) {
+        main_decl := child;
+      }
+    }
+    child := (*child).next_sibling;
+  }
+  if (main_decl == null) { return false; }
+
+  cg_piece(cg, 4);
+  cg_piece(cg, 26);
+  cg_byte(cg, 32); cg_byte(cg, 64);
+  cg_byte(cg, 95); cg_byte(cg, 115); cg_byte(cg, 116); cg_byte(cg, 97); cg_byte(cg, 114); cg_byte(cg, 116);
+  cg_piece(cg, 24); cg_piece(cg, 25);
+  cg_byte(cg, 32); cg_piece(cg, 22);
+  cg_piece(cg, 20);
+
+  ret_ty := (*main_decl).data_type;
+  if (is_void_type(ret_ty)) {
+    cg_piece(cg, 1); cg_piece(cg, 16); cg_piece(cg, 26);
+    cg_byte(cg, 32); cg_byte(cg, 64);
+    cg_byte(cg, 109); cg_byte(cg, 97); cg_byte(cg, 105); cg_byte(cg, 110);
+    cg_piece(cg, 24); cg_piece(cg, 25); cg_piece(cg, 0);
+    code_op := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  } else {
+    a := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, a); cg_piece(cg, 2);
+    cg_piece(cg, 16);
+    cg_type(cg, s, file_idx, ret_ty);
+    cg_byte(cg, 32); cg_byte(cg, 64);
+    cg_byte(cg, 109); cg_byte(cg, 97); cg_byte(cg, 105); cg_byte(cg, 110);
+    cg_piece(cg, 24); cg_piece(cg, 25); cg_piece(cg, 0);
+    call_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false };
+
+    if ((*ret_ty).kind == 121) {
+      a := new_reg(cg);
+      cg_piece(cg, 1); cg_reg_ref(cg, a); cg_piece(cg, 2);
+      cg_piece(cg, 53); cg_piece(cg, 51); cg_byte(cg, 32); cg_operand(cg, call_op); cg_piece(cg, 54); cg_piece(cg, 0);
+      code_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false };
+    } else {
+      if (llvm_int_width((*ret_ty).tok.kind) == 64) {
+        code_op := call_op;
+      } else {
+        a := new_reg(cg);
+        cg_piece(cg, 1); cg_reg_ref(cg, a); cg_piece(cg, 2);
+        cg_piece(cg, 57);
+        cg_type(cg, s, file_idx, ret_ty);
+        cg_byte(cg, 32); cg_operand(cg, call_op);
+        cg_piece(cg, 60); cg_byte(cg, 105); cg_uint(cg, 64);
+        cg_piece(cg, 0);
+        code_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false };
+      }
+    }
+  }
+
+  args[0] := code_op;
+  discard_op := gen_raw_syscall(cg, 231, &args, 1);
+  cg_piece(cg, 1); cg_piece(cg, 21);
+  cg_piece(cg, 23);
+  return true;
+}

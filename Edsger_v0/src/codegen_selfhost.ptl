@@ -2435,7 +2435,7 @@ struct CastWarning {
 // `s.src` directly now needs to know which slot to read instead (each
 // Symbol carries its own `file_idx` for exactly this reason).
 struct Sema {
-  buffers : *(FileBuf[1]);
+  buffers : *(FileBuf[16]);
   symbols : *(Symbol[2048]);
   symbol_count : uint64;
   had_error : bool;
@@ -3791,11 +3791,11 @@ struct PathBuf {
 }
 
 struct FileSet {
-  buffers : *(FileBuf[1]);
-  lens : *(uint64[1]);
-  paths : *(PathBuf[1]);
-  path_lens : *(uint64[1]);
-  programs : *(*ASTNode[1]);
+  buffers : *(FileBuf[16]);
+  lens : *(uint64[16]);
+  paths : *(PathBuf[16]);
+  path_lens : *(uint64[16]);
+  programs : *(*ASTNode[16]);
   count : uint64;
   had_error : bool;
   err_kind : int32;      // 1 open failed, 2 file too large, 3 lex error, 4 parse error, 5 too many files
@@ -3950,7 +3950,7 @@ function discover_files(fs: *FileSet, p: *Parser, rules: *(AutoloadRule[32]), ru
 
         lr := find_existing_file(fs, &path_scratch, resres.length);
         if (!lr.found) {
-          if ((*fs).count >= 1) {
+          if ((*fs).count >= 16) {
             (*fs).had_error := true;
             (*fs).err_kind := 5;
           } else {
@@ -5513,10 +5513,10 @@ function gen_addr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
     call_val_op := gen_expr(cg, s, sc, file_idx, e);
     r := new_reg(cg);
     cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 6);
-    cg_type(cg, s, file_idx, (*e).data_type);
+    cg_type(cg, s, (*e).type_file_idx, (*e).data_type);
     cg_piece(cg, 0);
     cg_piece(cg, 1); cg_piece(cg, 9);
-    cg_type(cg, s, file_idx, (*e).data_type);
+    cg_type(cg, s, (*e).type_file_idx, (*e).data_type);
     cg_byte(cg, 32);
     cg_operand(cg, call_val_op);
     cg_piece(cg, 8); cg_reg_ref(cg, r); cg_piece(cg, 0);
@@ -6269,11 +6269,11 @@ function gen_start(cg: *Codegen, s: *Sema, program: *ASTNode, file_idx: uint64) 
 }
 
 function main() : int32 {
-  mut buffers_arr : FileBuf[1];
-  mut lens_arr : uint64[1] := 0;
-  mut paths_arr : PathBuf[1];
-  mut path_lens_arr : uint64[1] := 0;
-  mut programs_arr : *ASTNode[1];
+  mut buffers_arr : FileBuf[16];
+  mut lens_arr : uint64[16] := 0;
+  mut paths_arr : PathBuf[16];
+  mut path_lens_arr : uint64[16] := 0;
+  mut programs_arr : *ASTNode[16];
 
   mut fs : FileSet := FileSet {
     buffers := &buffers_arr,

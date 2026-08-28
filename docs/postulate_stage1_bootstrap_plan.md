@@ -703,6 +703,82 @@ fixes above have been ported into the real `Edsger_v0/src/codegen.ptl`
 — `codegen_selfhost.ptl` stays exactly what its name says: a disposable
 record of this one dry run, not a pending patch.
 
+### Resolved: the modular, dynamic-memory rewrite (2026-08-28)
+
+**Done, same day as the dry run above** — what the dry run identified as
+the two remaining blockers (the `llc` crash, and the five memory-safety
+bugs) are both closed, not by patching `codegen.ptl` in place, but by
+building the real, physically-modular Edsger the dry run's own "what
+this does and doesn't mean" section deferred: `Edsger_v0/src/modular/`
+— genuine `namespace`/`use` files (`Edsger/{Dynamic,Lexer,Parser,Sema,
+Codegen}.ptl`, `main.ptl`), and every one of `codegen.ptl`'s
+fixed-capacity stack arrays replaced with real, growable, `sys_mmap`/
+`sys_mremap`-backed dynamic memory. **This is now the default build**:
+`Edsger_v0/scripts/build.sh` and `Edsger_v0/edsger` both target it —
+`src/codegen.ptl` (the original, single-file, fixed-capacity
+architecture) is left on disk, untouched, as the historical record, but
+is no longer what gets built.
+
+**The `Dynamic` module and five converted structures** — one growable
+struct per element shape (no generics), each following the language
+reference's own canonical `sys_mmap`(init)/`sys_mremap`(grow)/
+`sys_munmap`(free) pattern (§2.8), growing in **fixed-size chunks** (not
+exact-fit, not doubling) per the user's own explicit choice, to keep
+the number of `mremap` calls down:
+
+- **`DynBytes`** (`Edsger\Dynamic`) — the workhorse: per-file source
+  buffers, the LLVM-IR output buffer, path/error scratch buffers.
+  `FileBuf.bytes` (previously `uint8[65536]`) is now an *owned*
+  `DynBytes`; every function that used to take `*(uint8[65536])`
+  (~35 signatures across all four modules) now takes `*DynBytes`, with
+  `(*buf)[i]`-style sized-array indexing replaced by `(*buf).ptr[i]`
+  throughout.
+- **`DynNodePool`** (`Edsger\Parser`, next to `ASTNode` itself) —
+  replaces the AST arena (`ASTNode[50000]`, ~4.85 MiB at that size;
+  `alloc_node` is now its only touch point).
+- **`DynTokens`** (`Edsger\Parser`) — replaces the three parallel
+  `int32`/`uint64[20000]` token arrays with one struct, all three
+  regions grown together by one `dyntokens_ensure` call.
+- **`DynSymbols`** (`Edsger\Sema`) — replaces `Symbol[256]`; needed for
+  real, since `codegen.ptl`'s own top-level decl count already exceeds
+  it.
+- **`DynBindings`** (`Edsger\Sema`) — replaces `LocalBinding[64]`;
+  needed for real, since `codegen.ptl`'s own `main()` alone declares
+  over a hundred top-level locals.
+- **`FileSet`'s file-count arrays** (`buffers`/`lens`/`paths`/
+  `path_lens`/`programs`, previously fixed at `[24]`) stay fixed-size
+  for now (a modest cap is enough for the handful of real module files
+  Edsger itself currently has) — the per-file *content* they point to
+  (`FileBuf.bytes`) is the part that actually needed to be unbounded,
+  and is.
+
+**A second real bug found and fixed while wiring this up, distinct from
+the dry run's own five**: every `sys_mremap` call initially passed
+`flags := 0`. Without `MREMAP_MAYMOVE` (`1`), the kernel refuses to grow
+a mapping it can't extend in place and returns failure — silently
+producing an invalid pointer that then corrupts memory the moment
+anything reads or writes through it. This surfaced as an immediate
+segfault on *any* input, the instant a real growth past the first chunk
+actually happened (a small test buffer growing by tiny 4-byte chunks
+had enough neighboring free address space to *usually* extend in
+place, masking the bug in isolation; a 1 MiB source buffer trying to
+grow essentially never does). Fixed by passing `1` everywhere `sys_
+mremap` is called.
+
+**Verified end-to-end, not just unit-tested**: `opt -passes=verify`
+accepts the self-compiled IR; `llc`/`ld` succeed with **no crash**
+(the dry run's own open problem); the resulting `build/codegen`
+runs the full `codegen_cases/` fixture suite correctly — all 9 —
+**with no raised stack limit**, unlike `codegen_selfhost` (confirming
+the rewrite's whole point: heap-backed buffers don't inflate a
+function's own stack frame the way fixed local arrays did). The build
+itself is a real two-stage bootstrap, documented in `scripts/build.sh`'s
+own header: `hoare` compiles `codegen_selfhost.ptl` (still needed,
+only as a throwaway tool with a large-enough fixed capacity to read the
+modular source's own files), which then compiles `src/modular/main.ptl`
+into the real `build/codegen` — the binary `edsger` and the test
+runners actually use, unchanged from before.
+
 ## 5. What's deliberately not in this plan
 
 Everything the reference's §11 lists as **deferred beyond v1** stays
