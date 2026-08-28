@@ -1,0 +1,49 @@
+name: Test Hoare (manual)
+
+# Manually-triggered dry run of Hoare's release pipeline -- builds and
+# tests the dev + release images and the self-contained tarball, but
+# does NOT publish anything (no GHCR push, no GitHub Release). Exists
+# so CI-environment-specific bugs can be shaken out by re-running this
+# from the Actions tab as many times as needed, without spending a
+# hoare-vX.Y.Z tag per attempt. Shares its actual build/test commands
+# with release-hoare.yml via Hoare/scripts/ci_build_and_test.sh so the
+# two can't drift apart.
+#
+# Only push a real hoare-vX.Y.Z tag (which triggers release-hoare.yml
+# for real, including the GHCR push and GitHub Release) once a run of
+# this workflow is fully green.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test images
+        run: Hoare/scripts/ci_build_and_test.sh
+
+      - name: Build the self-contained tarball
+        run: Hoare/scripts/bundle_release.sh dev-test dist
+
+      # Extracts the tarball into a completely separate, bare
+      # ubuntu:24.04 container (no docker build/run against the images
+      # above involved at all from this point on) so a pass here rules
+      # out the attestation-manifest theory specifically: if this still
+      # fails with "cannot execute binary file", the problem is in the
+      # bundled ELF binaries themselves, not in how the images above
+      # were built or run.
+      - name: Smoke-test the tarball on a bare container
+        run: |
+          docker run --rm -v "$PWD/dist:/dist" ubuntu:24.04 bash -c "
+            set -e
+            tar -xzf /dist/postulate-hoare-dev-test-linux-x86_64.tar.gz -C /tmp
+            cd /tmp/postulate-hoare-dev-test-linux-x86_64
+            set +e
+            ./hoare
+            code=\$?
+            set -e
+            echo \"hoare with no args exited \$code (64 = usage error is expected/healthy)\"
+            [ \"\$code\" = \"64\" ]
+          "
