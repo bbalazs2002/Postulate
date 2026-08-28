@@ -186,6 +186,10 @@ docker run --rm --entrypoint cat postulate-hoare-release /opt/hoare/docs/postula
 
 ## Published releases
 
+The version number here tracks Hoare **the tool**'s own release
+maturity, not the Postulate v0 language it compiles — `v1.0.0` reflects
+that Hoare itself is done: a complete, frozen Stage 0.
+
 Pushing a `hoare-vX.Y.Z` tag runs `.github/workflows/release-hoare.yml`:
 it builds and tests the dev image (exactly "Build and test" above),
 re-packages the release image, and publishes it two ways:

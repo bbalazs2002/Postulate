@@ -195,6 +195,12 @@ docker run --rm --entrypoint cat postulate-edsger-release /opt/edsger/docs/postu
 
 ## Published releases
 
+The version number here tracks Edsger **the tool**'s own release
+maturity, not the Postulate v1.0 language it compiles — `v0.1.0`
+reflects that Edsger itself is still early: recently self-hosted, with
+real, known gaps against its own target language (§8 of the
+[v1.0 reference](../docs/postulate_v1_0_language_reference.md)).
+
 Pushing an `edsger-vX.Y.Z` tag runs `.github/workflows/release-edsger.yml`:
 builds and tests the dev image, builds and tests the release image
 (the two-stage bootstrap above, plus the fixture suite run directly
