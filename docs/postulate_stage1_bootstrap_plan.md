@@ -56,6 +56,22 @@ same relational/predicate-transformer tradition §7 of the v1 reference
 draws its verification vocabulary from). Every version from the rewrite
 onward is "Edsger `v1.1.n`."
 
+**Directory name.** Edsger's own working directory in the repository is
+`Edsger_v0/` (renamed from a plain `Edsger/` on 2026-08-28), *not* a
+second compiler-generation counter of its own — that's still tracked by
+the `v1.0.n`/`v1.1.n` scheme above, currently sitting at generation `0`
+(the rewrite itself; see the "Resolved checkpoint"/"Tracked" sections
+below for what's landed inside it since). The suffix names what's
+already true of everything under it: this generation's entire source
+tree is v0 syntax, compiled by Hoare — the same fact the module
+docstrings already state ("Written in Postulate v0, compiled by Hoare
+(Stage 0)"), now also visible at the path level. It is unrelated to
+`Stage1/` (§0's "proof of concept," a separate, older, already-retired
+codebase this plan's own opening paragraph describes — not a second
+attempt at Edsger under a different name). See "A self-hosting dry
+run," below, for what `_v0` will stop meaning once `v1.1.13` actually
+closes the self-hosting loop.
+
 **Verification discipline.** Every step ships only once actually
 **run** against real fixtures with checked exit codes/output, not just
 "it parses" or "it compiles" — unchanged from how `v1.0.2`/`v1.0.3`
@@ -341,7 +357,7 @@ its job.
 | `v1.0.3` | **Done.** Composite (struct/array) parameters and return values in Stage 1's own codegen — v0 parity. Structs, arrays, broadcast-init (scalar **or** struct source, both at decl-init and at plain assignment — reference §4.1/§4.2, `v1.1.12` below), pointers (scalar and composite pointees, including self-referential struct fields), and the by-value calling convention. Its own design doc (`postulate_stage1_v1_0_3_composites_design.md`) has since been deleted; its broadcast-init scope finding and its `_start`/`main`-return-width note are preserved in `v1.1.12` and the "Tracked checkpoint" section below, respectively. | Implemented directly against LLVM IR's native aggregate types — §2. |
 | `v1.0.4` | **Retired.** Was true separate compilation, designed against `#include`'s textual-splice model. Never implemented. What it was trying to achieve is now the namespace system's own design property (§6.2c), not a separate mechanism to build. Its own design doc (`postulate_stage1_v1_0_4_separate_compilation_design.md`, describing a mechanism the current language design doesn't need) has since been deleted — nothing in it survived its own retirement, since none of it was ever built. | See "Revision note" above. |
 | **`v1.0.5`** *(placeholder — see `v1.1.2`)* | *(retired slot — optimization moved to `v1.1.2`; kept blank rather than reused, so no future step is ever ambiguously "the same number as something else.")* | — |
-| **`v1.0.6`** | **The Edsger rewrite. Generation `0` ends here.** Namespaces/`use`/`@autoload` (dependency resolution only, no caching); `char` + `as`; pointer arithmetic/`*void`/`uintptr`/`sizeof`/`lengthof`; full modular architecture (lexer/AST/parser/semantic-analyzer-and-type-checker/codegen as real, separate modules; pointer-linked `ASTNode` tree replacing the index arena). Built and verified **module by module**, each module covering the whole feature batch, each checked by hand before the next starts (§3). Its own design doc (`postulate_stage1_v1_0_6_edsger_design.md`) has since been deleted — it described *how* to build what this row and §3 above already fully describe, and Edsger's own shipped source (`Edsger/src/*.ptl`) is now the more authoritative, more precise record of the actual result. | §1/§3 — the module system is the architecture's own foundation, not an add-on to it; `char`/`as`/pointer arithmetic front-loaded so Edsger's own later stages are comfortable to write. |
+| **`v1.0.6`** | **The Edsger rewrite. Generation `0` ends here.** Namespaces/`use`/`@autoload` (dependency resolution only, no caching); `char` + `as`; pointer arithmetic/`*void`/`uintptr`/`sizeof`/`lengthof`; full modular architecture (lexer/AST/parser/semantic-analyzer-and-type-checker/codegen as real, separate modules; pointer-linked `ASTNode` tree replacing the index arena). Built and verified **module by module**, each module covering the whole feature batch, each checked by hand before the next starts (§3). Its own design doc (`postulate_stage1_v1_0_6_edsger_design.md`) has since been deleted — it described *how* to build what this row and §3 above already fully describe, and Edsger's own shipped source (`Edsger_v0/src/*.ptl`) is now the more authoritative, more precise record of the actual result. | §1/§3 — the module system is the architecture's own foundation, not an add-on to it; `char`/`as`/pointer arithmetic front-loaded so Edsger's own later stages are comfortable to write. |
 | **`v1.1.1`** *(generation `1` begins — Edsger proper)* | Incremental compilation: skip recompiling a module whose own source is unchanged **and** whose `use`d dependencies' own *interfaces* — not merely their compiled bodies — are unchanged since its last successful compile (§6.2c's caching half, deliberately deferred out of `v1.0.6`). Cache-key scope is deliberately narrow: a module's own source hash, plus, per direct `use`d dependency, that dependency's *interface* hash as of this module's last compile — never a dependency's full body hash, and never anything from further down the transitive chain. This is what keeps a body-only edit in one module from cascading into recompiling everything that (even indirectly) depends on it. | Genuinely separable from `v1.0.6`'s dependency-*resolution* work; not worth the risk of getting both right at once. |
 | `v1.1.2` | Optimization turned on: each module's LLVM IR routed through `opt` at a chosen level before `llc`. | Moved here from the old `v1.0.5` — rides on the same LLVM IR switch (§2), but no longer competes with the rewrite for priority; verified by re-running the full fixture suite under optimization. |
 | `v1.1.3` | Statement sugar: `elseif` (§4.3), `break`/`continue` (§4.6), compound assignment `:+ :- :* :/` (§4.2), `++`/`--` (§4.2a). | Pure desugaring, no new types — deliberately left out of `v1.0.6` (its own note) since it has no dependency relationship to that batch. |
@@ -391,15 +407,15 @@ a real inline-asm syscall wrapper instead of an unresolvable `declare`),
 and a fix to `gen_call` itself, which had been unconditionally rejecting
 any callee that wasn't a plain `FUNCTION_DECL` — silently dropping a
 call to an `extern function` from the output entirely even once its own
-wrapper existed. `Edsger/edsger` now links by default (`ld -static
+wrapper existed. `Edsger_v0/edsger` now links by default (`ld -static
 -no-pie -e _start`), exactly like `Hoare/hoare` already does. Verified
 end-to-end, not just unit-tested: a real program calling `sys_write`/
 `sys_mmap`/`sys_munmap`/`sys_gettid` compiles, assembles, links, and
 **runs** correctly (real stdout output, correct exit code) via
-`Edsger/Dockerfile.release`'s own release image — new fixture `Edsger/
+`Edsger_v0/Dockerfile.release`'s own release image — new fixture `Edsger_v0/
 tests/codegen_cases/codegen_test_09_extern_syscalls.ptl`.
 
-This was found while building `Edsger/edsger` (the CLI script mirroring
+This was found while building `Edsger_v0/edsger` (the CLI script mirroring
 `Hoare/hoare`) and while deleting the now-superseded `postulate_stage1_
 v1_0_2_llvm_backend_design.md`/`postulate_stage1_v1_0_3_composites_
 design.md`, which had already worked out the exact technique once for
@@ -465,6 +481,227 @@ those now-deleted files:
 Landed as a direct fix to `v1.0.6`'s own Codegen module (above), not a
 new `v1.1.n` step — this was completing that module's own original,
 already-scoped intent, not adding new v1-language surface.
+
+### A self-hosting dry run against `codegen.ptl` itself (2026-08-28)
+
+**Not `v1.1.13` itself, and doesn't close it** — recorded here as a
+preliminary finding directly relevant to that step, the same way the
+two checkpoints above record findings relevant to steps other than the
+one that produced them. Prompted by a plain question — would
+`Edsger_v0/src/codegen.ptl`, Edsger's own ~6,730-line, 304,772-byte
+source, compile if fed to Edsger's own binary right now? — answered by
+actually trying it, on a disposable copy, rather than reasoning about
+it in the abstract.
+
+**Two files, two very different roles — do not confuse them:**
+
+- **`Edsger_v0/src/codegen.ptl`** is the real, shipped, unmodified
+  compiler — Module 3+4 (§3), what `Edsger_v0/scripts/build.sh` builds,
+  what `Edsger_v0/edsger` and `Edsger_v0/Dockerfile.release` both
+  ultimately run, and what every existing fixture in `Edsger_v0/tests/
+  codegen_cases/` is checked against. **Untouched by this dry run.**
+- **`Edsger_v0/src/codegen_selfhost.ptl`** is a **throwaway research
+  copy**, made specifically so this experiment could poke at real bugs
+  without any risk to the working compiler above. It is **not**
+  referenced by `scripts/build.sh`, `edsger`, either Dockerfile, or any
+  test runner — nothing builds it by default, and nothing will start
+  doing so by accident. It exists purely as the recorded evidence for
+  the findings below; it is not a step toward being merged back as-is
+  (see "What this does and doesn't mean," below, for what should
+  actually happen to each fix inside it).
+
+**Method.** `codegen_selfhost.ptl` was fed a copy of `codegen.ptl`
+prefixed with a bare `namespace \Main;` line — the one syntactic
+accommodation this dry run needed, since `codegen.ptl` is v0 source
+(no `namespace_decl` of its own) but Edsger's parser enforces v1's
+"mandatory, first" namespace declaration (reference §6.2) regardless of
+what it's compiling. Failures with no usable diagnostic (three of the
+five below) were isolated by bisection: feeding successively larger
+*prefixes* of `codegen.ptl`'s own top-level declarations through
+repeated builds to find the smallest one that broke, then — once
+execution ran silently to completion without crashing but still
+reported failure — by adding temporary stderr trace-byte writes at
+every function entry/exit and at every existing `had_error := true`
+site, removed again once the real cause (fix 5, below) was found. No
+trace of that instrumentation remains in either file.
+
+**Five real bugs found, all still present in `codegen.ptl` as shipped:**
+
+1. **Unbounded writes into fixed-capacity `Parser`/`Sema`/`Codegen`
+   arrays.** `Parser.src`/`FileBuf.bytes` (`uint8[65536]`),
+   `Parser.toks_kind`/`toks_offset`/`toks_length` (`int32`/
+   `uint64[20000]`), `Parser.pool` (`ASTNode[50000]`),
+   `Sema.symbols`/`main`'s `symbols_arr` (`Symbol[256]`), and
+   `Codegen.out`/`main`'s `out_buf` (`uint8[131072]`) are all written
+   through their own tracked `_len`/`_count`/`pos` index with **no
+   bounds check against the array's own declared size** — `alloc_node`
+   (§3's own AST-pool description) is the clearest example:
+   `&(*(*p).pool)[(*p).node_count]` with nothing stopping `node_count`
+   from reaching `50000`. Real-world input the size of `codegen.ptl`
+   itself overruns several of these well before reaching the file's
+   own end, corrupting adjacent memory — undefined behavior, so its
+   *symptom* varied run to run with the exact same input (a plain
+   segfault in one run, a nonsense "sema error"/"unknown identifier" in
+   another), consistent with which nearby memory a given overrun
+   happened to land on. `codegen_selfhost.ptl` raises these five to
+   `uint8[1048576]` (1 MiB), `int32`/`uint64[200000]`,
+   `ASTNode[400000]`, `Symbol[2048]`, and `uint8[8388608]` (8 MiB)
+   respectively — sized against this one dry run's own needs, not a
+   general fix (see "What this does and doesn't mean," below). The same
+   dry run also shrank `FileSet`/`Sema`'s `MAX_FILES` (`FileBuf[24]`,
+   `uint64[24]`, `PathBuf[24]`, `*ASTNode[24]`, and the matching `>= 24`
+   check) down to `[1]`, since this experiment only ever compiles the
+   one self-contained file — a memory-saving choice specific to this
+   dry run, not a claim that Edsger should only ever support one file.
+2. **A unary-minus-wrapped literal didn't inherit its context's
+   expected type.** `mut matched_rule : int64 := -1;` (real code,
+   `codegen.ptl` line 2350) failed as "expected type 'int64', found
+   'int32'": `check_expected`'s existing "an untyped literal adopts
+   whatever integer type context expects" mechanism
+   (`decorate_literal_with_expected`) only recognized a *bare* literal
+   node, not a `UNARY_EXPR` (`-`) wrapping one, so the literal `1`
+   silently defaulted to `int32` before the unary minus was ever
+   considered. Fixed by special-casing exactly that shape in
+   `check_expected` — but **only** when the expected type is a
+   genuinely *signed* integer type, so the existing, deliberate v1
+   tightening ("unary `-` requires a signed operand," already
+   documented in `codegen.ptl` itself) still correctly rejects
+   `mut x : uint64 := -1;` by falling through to the ordinary path
+   unchanged.
+3. **Array broadcast-init (`v1.1.12`, above) is exactly as unimplemented
+   as that row already says**, confirmed by `codegen.ptl`'s own source
+   actually needing it: `mut seen_arr : bool[64] := false;` and a
+   dozen-plus `uint8`/`int32`/`uint64[N] := 0;` locals (including
+   `out_buf`'s own 8-MiB array) all failed the same way `v1.1.12`
+   predicts. Fixed **only for the `DECL_STMT` shape** (`mut x : T[N] :=
+   value;`) — Sema now checks a non-array-literal initializer against
+   the array's own *element* type, and Codegen evaluates the source
+   value once, then either emits one `store <arraytype>
+   zeroinitializer, ptr %slot` (when the source is a compile-time-zero
+   immediate — the *only* shape `codegen.ptl` itself ever uses, and the
+   reason a naive per-element loop had to be avoided at all: an
+   unrolled loop over `out_buf`'s own 8,388,608 elements would emit
+   millions of IR lines and overrun the very output buffer fix 1 just
+   enlarged) or, for any other source value, a general — correct, but
+   `O(n)` — unrolled loop of per-element `getelementptr`+`store` pairs.
+   The plain-assignment half of broadcast (`arr := value;`, an
+   `ASSIGN_STMT`, not a `DECL_STMT`) and the struct-source half
+   (reference §4.1/§4.2's `mut pts : Point[4] := p;`) are **not**
+   touched — `codegen.ptl` never needs either, so both are left for
+   whenever `v1.1.12` itself is actually implemented, for real, as its
+   own step.
+4. **`Scope.bindings` (`LocalBinding[64]`, shared by `decorate_
+   function` and `gen_function`) silently overflows past 64 locals in
+   one function.** `codegen.ptl`'s own `main()` alone declares 101 —
+   `scope_add`'s `(*(*sc).bindings)[(*sc).count] := ...` has the same
+   "no bounds check" shape as fix 1, just a different array. Raised to
+   `LocalBinding[256]` (and, found alongside it, `CastWarning[64]` to
+   `[256]` for the same reason, though nothing in `codegen.ptl` itself
+   happens to exercise that one).
+5. **`gen_addr` had no case for a struct/array-*valued* function call
+   used directly as a field or index base, with no intermediate
+   variable of its own** — `codegen.ptl`'s own `expr_pos_tok(cast_
+   warnings_arr[w].node).offset` is exactly this shape: `expr_pos_tok`
+   returns a `Token` **by value**, and `.offset` reads a field straight
+   off that returned value. `gen_addr`'s `FIELD_EXPR`/`INDEX_EXPR`
+   cases already recurse into `gen_addr` for a non-pointer base to get
+   its address, but had no case at all for a `CALL_EXPR` base, falling
+   through to the function's generic "unsupported" tail (silently
+   setting `had_error`, no message — the one failure in this list that
+   genuinely had no diagnostic to bisect toward, hence the trace-byte
+   instrumentation described under "Method," above). Fixed by giving
+   `gen_addr` a `CALL_EXPR` case: evaluate the call via the already-
+   correct `gen_expr` (which already knows how to materialize a struct/
+   array-returning call's result, the same alloca-then-load shape
+   `STRUCT_LIT`/`ARRAY_LIT` already use elsewhere in the same file),
+   spill that value into a *fresh* temporary `alloca`, and hand back
+   that slot's own address — the same "materialize a value to get an
+   address" idiom, applied to one more case that needed it.
+
+**The stack-limit requirement, and a recommended minimum.** Every array
+fix 1 enlarges is an ordinary v0 **stack**-local (the same "big fixed
+array as a local, not a heap allocation" shape §3's own rewrite section
+already documents for the AST pool, `alloc_node`'s own paragraph
+above) — `main()`'s own locals in `codegen_selfhost.ptl` now add up to
+roughly **53–54 MiB**: the node pool alone is ≈39.7 MiB (400,000 ×
+≈104 bytes per `ASTNode`, matching the ≈101.7-bytes/node figure the
+original `MAX_FILES=24` design comment already measured), the output
+buffer is a further 8 MiB, the three token arrays ≈3.8 MiB combined
+(200,000 × 20 bytes), and the source/path/symbol buffers and everything
+smaller add under 2 MiB more. That is far past the platform's ordinary
+8 MiB default (`ulimit -s`), so `build/codegen_selfhost` cannot even
+**start** — it segfaults immediately, on any input at all, including a
+trivial one — unless the invoking shell's own stack limit is raised
+*before* running it:
+
+```sh
+ulimit -s 262144   # 256 MiB — see below for why this figure, not the ~54 MiB floor
+./build/codegen_selfhost < input.ptl > output.ll
+```
+
+**Recommended minimum: `ulimit -s 262144` (256 MiB).** This is the
+*only* value this dry run actually exercised, successfully, end to end
+(see the run outcome below) — it is a generous margin over the ~54 MiB
+figure above, which counts only the fixed arrays themselves and not the
+additional stack ordinary recursive-descent parsing/decoration call
+depth needs on top of them. A tighter limit closer to that ~54 MiB
+floor was never tried and so isn't recommended, for that reason alone —
+not because it's known to fail, simply because it's unverified. This
+requirement is specific to `codegen_selfhost.ptl`'s own enlarged
+arrays; the real, shipped `codegen.ptl` (still at the original,
+smaller capacities) has never needed a raised stack limit and still
+doesn't.
+
+**Run outcome.** With that limit set, `build/codegen_selfhost` fed the
+namespace-prefixed copy of `codegen.ptl` described under "Method"
+**exits `0`** and emits ≈2.08 MiB of LLVM IR text — every one of the
+~6,700 lines' worth of real constructs `codegen.ptl` itself exercises,
+parsed, type-checked, and code-generated successfully. `opt
+-passes=verify` accepts that IR without complaint — it is valid LLVM
+IR, not merely "didn't crash." Assembling it with `llc -filetype=obj`,
+however, **crashes `llc` itself** (a segfault inside LLVM's own
+SelectionDAG instruction selector while lowering `@main`, not a
+Postulate-level error) — almost certainly LLVM's own backend struggling
+with one function whose stack frame is tens of megabytes wide, the
+direct consequence of fix 1's own array sizes, not a defect in the
+(already-verified-valid) IR. This was not chased further: the fix is
+already anticipated, not a new idea — `codegen.ptl`'s own §3 rewrite
+notes above already explain that the fixed-array-as-stack-local shape
+was a deliberate stand-in ("what actually blocked \[a real
+pointer-linked tree\] before was reaching for heap allocation... a
+large, fixed-capacity local array... produces real, individually-
+addressable `*ASTNode` values with no cast and no heap involved at
+all"), and the `FileSet`/`MAX_FILES` design comment quoted under
+"Resolved checkpoint," above, already names `sys_mmap` as the specific,
+not-yet-taken path to a heap-backed version of these exact same
+buffers. Moving `codegen.ptl`'s source/token/node/output buffers from
+stack locals to `sys_mmap`-backed heap allocations is expected to
+remove the stack-limit requirement above *and* fix this `llc` crash in
+one move, since an ordinary heap allocation doesn't inflate whichever
+function requested it the way a giant local array does.
+
+**What this does and doesn't mean for `v1.1.13`.** This dry run does
+**not** close `v1.1.13` — that step needs Edsger to accept its own
+*real* source (a genuine leading `namespace \Main;`, one real v1
+program, no capacity workarounds) and produce a linked, running binary
+from it that agrees with itself across two generations, exactly as that
+row already describes. What it does establish: (a) once `v1.1.12` is
+actually implemented as its own real step — not this dry run's
+narrower, `codegen.ptl`-shaped stand-in — the front end and codegen
+have no other *language-level* gap standing between Edsger and
+compiling its own real source, since every other construct `codegen.
+ptl`'s ~6,700 lines exercise already round-trips correctly; (b) fixes
+1/4/5 above are real, previously-undetected memory-safety bugs in the
+*shipped* `codegen.ptl`, findable only by throwing a real, large program
+at it — the hand-written `codegen_cases/` fixture suite was never going
+to exercise a 101-local function or a >65 KiB input — and are worth
+fixing on their own merits whenever someone next touches those code
+paths, self-hosting or not; (c) the LLVM backend itself, not just
+Edsger, needs the already-planned fixed-array-to-heap migration before
+self-hosting can get past assembling its own output. None of the five
+fixes above have been ported into the real `Edsger_v0/src/codegen.ptl`
+— `codegen_selfhost.ptl` stays exactly what its name says: a disposable
+record of this one dry run, not a pending patch.
 
 ## 5. What's deliberately not in this plan
 
