@@ -2,7 +2,9 @@
 temp/**
 
 // build artifacts
+*/build/**
 Hoare/build/**
+Edsger/build/**
 
 // node module files
 */node_modules/**
