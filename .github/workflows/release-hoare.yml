@@ -53,6 +53,20 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: Hoare/scripts/bundle_release.sh "$VERSION" dist
 
+      # A scoped alternative to GitHub's own auto-attached "Source code"
+      # zip/tar.gz (which always contains the WHOLE monorepo -- both
+      # compilers, every doc -- and can't be turned off): just Hoare/
+      # itself plus its own language reference, nothing Edsger-related.
+      - name: Build a scoped source archive
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          NAME="postulate-hoare-${VERSION}-source"
+          mkdir -p dist
+          tar -czf "dist/$NAME.tar.gz" --transform "s,^,$NAME/," \
+            --exclude='Hoare/build' \
+            Hoare docs/postulate_v0_language_reference.md
+
       - name: Create the GitHub Release
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -60,10 +74,12 @@ jobs:
         run: |
           gh release create "${{ github.ref_name }}" \
             "dist/postulate-hoare-${VERSION}-linux-x86_64.tar.gz" \
+            "dist/postulate-hoare-${VERSION}-source.tar.gz" \
             --title "Hoare $VERSION" \
             --notes "Postulate v0 compiler (Stage 0).
 
           - **Docker (recommended)**: \`docker run --rm -v \${PWD}:/work ghcr.io/${{ github.repository_owner }}/postulate-hoare:$VERSION test.ptl\`
-          - **Standalone tarball**: download the asset below, extract it, run \`./hoare test.ptl\`. Bundles nasm/ld and their shared libraries — no separate install needed on a compatible x86-64 Linux host (see Hoare/README.md's own \"Release\" section for exactly what that covers).
+          - **Standalone tarball**: download \`postulate-hoare-$VERSION-linux-x86_64.tar.gz\`, extract it, run \`./hoare test.ptl\`. Bundles nasm/ld and their shared libraries — no separate install needed on a compatible x86-64 Linux host (see Hoare/README.md's own \"Release\" section for exactly what that covers).
+          - **Source, Hoare only**: \`postulate-hoare-$VERSION-source.tar.gz\` — just the \`Hoare/\` directory and its language reference. GitHub's own \"Source code\" zip/tar.gz below is the whole monorepo (both compilers, all docs); use this one instead if you only want Hoare's.
 
           Language reference: [docs/postulate_v0_language_reference.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/postulate_v0_language_reference.md)"
