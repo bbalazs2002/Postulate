@@ -35,14 +35,22 @@ docker build "${BUILD_FLAGS[@]}" -f Edsger_v0/Dockerfile.release -t postulate-ed
 docker inspect postulate-edsger-release --format 'postulate-edsger-release: Os={{.Os}} Architecture={{.Architecture}}'
 
 # codegen_cases fixtures, run directly against the real, released
-# build/codegen (not the historical single-file src/codegen.ptl that
-# Edsger_v0/tests/run_all_tests.sh's own run_codegen_tests.sh checks).
-docker run --rm -v "$PWD/Edsger_v0:/workspace/Edsger" --entrypoint bash postulate-edsger -c "
+# build/codegen -- baked into postulate-edsger-release at
+# /opt/edsger/build/codegen (not the historical single-file
+# src/codegen.ptl that Edsger_v0/tests/run_all_tests.sh's own
+# run_codegen_tests.sh checks). Deliberately NOT run against
+# postulate-edsger (the dev image): that image never bakes in Edsger's
+# own source or a built binary (see its own header comment) -- only
+# postulate-edsger-release's own build stage actually produces
+# build/codegen, so testing against it is what makes this check mean
+# anything on a fresh checkout, not just on a machine that happens to
+# have a stray local build/codegen already lying around.
+docker run --rm -v "$PWD/Edsger_v0/tests:/tests" --entrypoint bash postulate-edsger-release -c "
   set -e
-  for f in tests/codegen_cases/*.ptl; do
+  for f in /tests/codegen_cases/*.ptl; do
     base=\"\${f%.ptl}\"
     out=\$(mktemp); err=\$(mktemp)
-    ./build/codegen < \"\$f\" > \"\$out\" 2> \"\$err\"
+    /opt/edsger/build/codegen < \"\$f\" > \"\$out\" 2> \"\$err\"
     diff -q \"\$base.expected.stdout\" \"\$out\"
     diff -q \"\$base.expected.stderr\" \"\$err\"
     rm -f \"\$out\" \"\$err\"
