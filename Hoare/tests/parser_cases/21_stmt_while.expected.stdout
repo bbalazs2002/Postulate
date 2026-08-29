@@ -1,1 +1,0 @@
-(while (binary > (ident e) (int 0)) (block (assign (pair (ident e) (binary - (ident e) (int 1))))))

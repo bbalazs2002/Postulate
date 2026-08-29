@@ -1,10 +1,23 @@
-# Edsger's own test/dev image. Builds Hoare (Stage 0) once, at image-
-# build time, so every container started from this image already has a
-# working `hoare` CLI ready to use -- Edsger's own source and tests are
-# deliberately NOT baked in here (see docker-compose.yml's own volume
-# mount instead), so editing a .ptl file or a test fixture under
-# Edsger/ never requires rebuilding this image; only a change to
-# Hoare's own source does.
+# Edsger's own test/dev image. Needs a working `hoare` CLI ready before
+# Edsger's own source and tests are ever touched (see docker-compose.
+# yml's own volume mount instead of baking those in here) -- editing a
+# .ptl file or a test fixture under Edsger_v0/ never requires rebuilding
+# this image.
+#
+# This is the edsger-release branch: `./Hoare` here is just the
+# **finished, already-built** Hoare compiler (the `hoare` wrapper
+# script + its `build/codegen` binary, both checked in directly) rather
+# than Hoare's full source tree -- Edsger's own two-stage bootstrap
+# genuinely needs a working `hoare` to compile itself with, but not
+# Hoare's source, tests, or its own Docker/release tooling, none of
+# which belongs in a release meant to be just Edsger's own source. See
+# the main Postulate repository's Hoare/ directory for how these two
+# files are actually built from source.
+#
+# nasm/binutils stay installed below because `hoare` itself calls out
+# to them (nasm/ld) at runtime to compile whatever it's given, `build/
+# codegen` included -- it's not just a build-time dependency of Hoare's
+# own source.
 #
 # Build context must be the repository root (this Dockerfile reaches
 # ./Hoare, a sibling of Edsger_v0/, not something inside Edsger_v0/
@@ -23,8 +36,7 @@ RUN apt-get update \
 WORKDIR /workspace
 COPY ./Hoare /workspace
 
-RUN chmod +x hoare scripts/build.sh
-RUN ./scripts/build.sh
+RUN chmod +x hoare build/codegen
 
 ENV PATH="/workspace:${PATH}"
 

@@ -1,1 +1,0 @@
-semantic error: function 'f' may not return a value on every execution path at line 1, col 10 (byte offset 9)

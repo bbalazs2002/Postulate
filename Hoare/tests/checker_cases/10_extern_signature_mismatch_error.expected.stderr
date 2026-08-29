@@ -1,1 +1,0 @@
-semantic error: extern function 'sys_exit' does not match its required signature at line 1, col 17 (byte offset 16)

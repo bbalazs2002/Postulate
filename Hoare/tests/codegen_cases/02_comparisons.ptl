@@ -1,9 +1,0 @@
-function main() : int32 {
-  mut a: int32 := 5;
-  mut b: int32 := 3;
-  if (a > b) {
-    return 1;
-  } else {
-    return 0;
-  }
-}

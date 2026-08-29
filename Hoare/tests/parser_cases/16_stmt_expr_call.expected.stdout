@@ -1,1 +1,0 @@
-(expr_stmt (call (ident mult) (int 4)))

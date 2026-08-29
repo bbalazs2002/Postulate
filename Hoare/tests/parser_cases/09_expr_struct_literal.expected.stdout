@@ -1,1 +1,0 @@
-(struct Pair (field a (int 8)) (field b (int 15)))

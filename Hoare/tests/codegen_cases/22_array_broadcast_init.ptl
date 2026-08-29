@@ -1,4 +1,0 @@
-function main() : int32 {
-  mut arr: int32[5] := 7;
-  return arr[0] + arr[4];
-}

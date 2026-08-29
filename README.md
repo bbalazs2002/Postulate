@@ -62,10 +62,15 @@ docker build -f Edsger_v0/Dockerfile -t postulate-edsger .
 ```
 
 (Build context is the **repository root** — this Dockerfile reaches
-`./Hoare`, a sibling directory, not something inside `Edsger_v0/`.)
+`./Hoare`, a sibling directory, not something inside `Edsger_v0/`. On
+this branch, `Hoare/` is just the **finished, already-built** Hoare
+compiler — the `hoare` script and its `build/codegen` binary, checked
+in directly — not Hoare's full source; Edsger's own two-stage bootstrap
+below genuinely needs a working `hoare` to compile itself with, but
+nothing else Hoare's source tree provides. See the main Postulate
+repository for Hoare's actual source and how these two files get built.)
 
-This assembles Hoare inside the image (`Edsger_v0/Dockerfile`'s own
-job), then — from inside a container built from that image — running
+Then — from inside a container built from that image — running
 `scripts/build.sh` does Edsger's own **two-stage bootstrap**:
 
 1. `hoare` compiles `src/codegen_selfhost.ptl` (a throwaway,

@@ -1,8 +1,0 @@
-struct Point {
-  x : int32;
-  y : int32;
-}
-
-function f() : void {
-  mut p: Point := Point { x := 1, y := 2 };
-}

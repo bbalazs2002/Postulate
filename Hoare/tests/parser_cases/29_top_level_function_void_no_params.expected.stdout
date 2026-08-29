@@ -1,1 +1,0 @@
-(function noop (params) void (func_block (decls) (stmts (return))))

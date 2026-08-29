@@ -1,6 +1,0 @@
-struct Pair { a: int32; b: int32; }
-
-function main() : int32 {
-  mut arr: Pair[2] := {Pair { a := 1, b := 2 }, Pair { a := 3, b := 4 }};
-  return arr[0].a + arr[0].b + arr[1].a + arr[1].b;
-}

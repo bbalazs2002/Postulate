@@ -1,1 +1,0 @@
-(binary - (binary + (int 1) (binary * (int 2) (int 3))) (binary / (int 4) (int 2)))

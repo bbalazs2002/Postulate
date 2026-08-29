@@ -1,1 +1,0 @@
-(if (binary > (ident x) (int 0)) (block (assign (pair (ident y) (int 1)))) (block (assign (pair (ident y) (int 2)))))

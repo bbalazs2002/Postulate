@@ -1,3 +1,0 @@
-function f(a: int32) : int32 {
-  return a[0];
-}

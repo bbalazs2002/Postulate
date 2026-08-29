@@ -1,7 +1,0 @@
-struct Point { x: int32; y: int32; }
-
-function main() : int32 {
-  mut p: Point := Point { x := 3, y := 4 };
-  p.x := p.x + 10;
-  return p.x + p.y;
-}

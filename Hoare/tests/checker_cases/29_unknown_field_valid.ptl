@@ -1,7 +1,0 @@
-struct Point {
-  x : int32;
-}
-
-function f(p: Point) : int32 {
-  return p.x;
-}

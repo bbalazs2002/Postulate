@@ -1,8 +1,0 @@
-struct Pair { a: int32; b: int32; }
-
-function main() : int32 {
-  mut n: int32 := 5;
-  mut p: Pair := Pair { a := 0, b := 0 };
-  p := Pair { a := n, b := n * 2 }, n := 99;
-  return p.a * 10 + p.b;
-}

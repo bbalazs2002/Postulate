@@ -1,1 +1,0 @@
-(array_lit (int 1) (call (ident mult) (int 4)) (int 9))

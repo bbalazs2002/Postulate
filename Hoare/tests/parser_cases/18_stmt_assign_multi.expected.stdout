@@ -1,1 +1,0 @@
-(assign (pair (ident a) (ident b)) (pair (ident b) (ident a)))

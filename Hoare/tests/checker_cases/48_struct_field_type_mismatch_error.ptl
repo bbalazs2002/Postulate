@@ -1,7 +1,0 @@
-struct Point {
-  x : int32;
-}
-
-function f() : void {
-  mut p: Point := Point { x := true };
-}

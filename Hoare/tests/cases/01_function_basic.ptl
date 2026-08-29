@@ -1,5 +1,0 @@
-function is_even(n : int32) : bool {
-  mut remainder : int32;
-  remainder := n % 2;
-  return remainder == 0;
-}

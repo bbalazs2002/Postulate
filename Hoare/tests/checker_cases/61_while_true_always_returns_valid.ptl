@@ -1,5 +1,0 @@
-function f() : int32 {
-  while (true) {
-    return 1;
-  }
-}

@@ -1,2 +1,0 @@
-function f(a: int32, a: int32) : void {
-}

@@ -1,2 +1,0 @@
-STMT
-while (a == b) return;

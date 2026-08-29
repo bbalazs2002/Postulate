@@ -1,5 +1,0 @@
-function f() : void {
-  mut x: int32 := 1;
-  if (x == 1) {
-  }
-}

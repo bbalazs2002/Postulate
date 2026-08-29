@@ -1,8 +1,0 @@
-PROGRAM
-struct Node {
-  value : int32;
-}
-
-function get_value(n: Node) : int32 {
-  return n.value;
-}

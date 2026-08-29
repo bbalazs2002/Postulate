@@ -1,1 +1,0 @@
-(struct_decl Point (fields (field_decl x (base int32)) (field_decl y (base int32))))

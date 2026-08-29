@@ -1,5 +1,0 @@
-extern function sys_exit(code: int64) : void;
-
-function main() : void {
-  sys_exit(2 * 21);
-}

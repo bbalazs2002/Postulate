@@ -1,1 +1,0 @@
-(program (function index_of_first_negative (params (param arr (array (base int32) 5))) (base int32) (func_block (decls (decl_mut i (base int32) (int 0))) (stmts (while (binary < (ident i) (int 5)) (block (if (binary < (index (ident arr) (ident i)) (int 0)) (block (return (ident i)))) (assign (pair (ident i) (binary + (ident i) (int 1)))))) (return (unary - (int 1)))))))

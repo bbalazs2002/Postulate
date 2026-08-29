@@ -1,1 +1,0 @@
-(func_block (decls (decl_mut remainder (base int32))) (stmts (assign (pair (ident remainder) (binary % (ident n) (int 2)))) (return (binary == (ident remainder) (int 0)))))

@@ -1,2 +1,0 @@
-STMT
-while (e > 0) { e := e - 1; }

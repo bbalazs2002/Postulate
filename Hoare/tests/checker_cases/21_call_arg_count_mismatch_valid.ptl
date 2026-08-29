@@ -1,6 +1,0 @@
-function g(a: int32) : void {
-}
-
-function f() : void {
-  g(1);
-}

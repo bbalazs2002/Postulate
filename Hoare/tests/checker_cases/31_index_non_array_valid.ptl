@@ -1,3 +1,0 @@
-function f(arr: int32[3]) : int32 {
-  return arr[0];
-}
