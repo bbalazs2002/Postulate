@@ -372,18 +372,37 @@ its job.
 | `v1.1.12` | Array **broadcast-init and broadcast-assignment** (reference §4.1/§4.2): a single expression whose type exactly matches an array-typed `mut`/`const`/`lvalue`'s own element type — a scalar, **or a struct exactly matching an array-of-that-struct's element type** (`mut pts : Point[4] := p;`, not scalar-only) — as a `decl` initializer or a plain `:=` right-hand side, coerced/copied exactly once and that one value stored into every element (never re-evaluated per element). Already real, working v1 behavior once — Stage 1's own pre-rewrite proof of concept implements both the scalar and the struct-source shape, at both decl-init and assignment (`v1.0.3`'s own composite work, table row above; the struct-source shape was itself a mid-implementation discovery there, cross-checked directly against `Hoare/src/sema_stmt.asm`'s `check_array_broadcast_compatible` after an initial, too-narrow "scalar only" assumption) — but never carried into Edsger's Sema/Codegen: `v1.0.6`'s composite-type round (types, locals, parameters/return, field/index access, whole-value copy, struct/array literals) has no broadcast path of any kind, in either `check_expected`/`decorate_literal_with_expected` (Sema) or the codegen side. Found during that round and deliberately left unfixed there rather than touched after the round had already shipped and passed its own test suite. A source whose type doesn't exactly match the element type (scalar-vs-struct-element, or two different structs) must be a codegen/Sema error, not a silent miscompile — the old proof of concept's own testing caught a real bug of exactly this shape (see "Tracked checkpoint," below, for the general lesson about GEP index shapes that bug illustrates). | Small and fully self-contained — depends only on `v1.0.6`'s existing array-type support, nothing from `v1.1.1`–`v1.1.11`. Sequenced last among the ordinary feature steps (immediately before self-hosting closure) simply because it was found after this list was already drafted, not because anything here actually depends on the rest of generation `1`. |
 | `v1.1.13` | Self-hosting closure: Edsger compiles itself (Hoare → Edsger₁ from source; Edsger₁ → Edsger₂ from the same source; Edsger₂'s output agrees with Edsger₁'s). | The actual bootstrap goal (`Stage1/README.md`'s opening line) — only meaningful once the full v1.0 surface exists, since Edsger's own source will by then use most of it. |
 
-### Tracked checkpoint: struct-field layout, before `v1.0.6`
+### Decided checkpoint: struct-field layout (resolved 2026-08-29)
 
 `v1.0.3`'s composite sub-pass represents struct fields packed, with
 zero padding between them — matching v0's own language-level layout
 guarantee exactly (`postulate_v0_language_reference.md` §2.6) via
-LLVM's native packed struct type. Whether that guarantee itself should
-ever change (e.g. toward natural/ABI alignment, for raw-memory-access
-performance or a future FFI's sake) is **explicitly not decided now** —
-deliberately deferred, not silently carried forward as permanent. This
-is a placeholder to make sure it gets a real look before `v1.0.6`
-closes out the still-single-file proof-of-concept era, rather than
-being forgotten between now and then.
+LLVM's native packed struct type. This was originally left as an open
+placeholder here ("explicitly not decided now"), to make sure it got a
+real look before `v1.0.6` closed out the still-single-file
+proof-of-concept era rather than being silently carried forward as
+permanent — it has now been looked at and decided:
+
+**v1's default struct layout changes from packed to natural/ABI
+alignment.** Most target ABIs (POSIX included) expect aligned struct
+layout; packed was only ever v0's own choice, not a requirement v1
+needs to inherit. The compiler is free to reorder fields to minimize
+padding (the language does not guarantee declaration order = memory
+order once this lands). **Packed layout itself doesn't disappear from
+the roadmap** — v2/Fothi (bare-metal, raw hardware layout — see
+`project_postulate_roadmap.md`'s own Fothi scope) brings it back as an
+explicit, opt-in annotation on a `struct`, never the default there
+either.
+
+**Real implementation impact, not yet applied:** `Edsger_v0/src/
+modular/Edsger/Codegen.ptl` currently emits every struct as an LLVM
+*packed* struct type (`%struct.Name = type <{ ... }>`) — this decision
+means that becomes a plain, natural-alignment struct type (`{ ... }`,
+no angle brackets) once implemented, and field-reordering-for-minimal-
+padding (if done at all) would be a Sema/Codegen change, not just a
+codegen-emission-syntax one. Not yet started — queued for the same
+language-reference batch update as the rest of §6 below, not an
+isolated fix to make right now.
 
 ### Resolved checkpoint: extern/syscall calls and `_start`
 
@@ -790,6 +809,138 @@ language-level data-race protection. None of them are scheduled as a
 step in this plan. Namespaces are **not** on this list anymore — they
 are core v1 (§6.2), built as part of `v1.0.6` above, not a future
 language generation.
+
+## 6. Decided language-reference changes, queued for the next batch update
+
+Reviewed 2026-08-29, from a list of proposed v1 additions/fixes the
+user drafted in `temp/New-v1-language-reference.md`'s own "Javasolt
+bővítések és javítások" section. Each item below is **decided**, but
+deliberately **not yet applied** to `postulate_v1_language_reference.md`
+— per the user's own instruction, these get introduced into the
+reference together, in one batch, rather than one at a time as each is
+decided. Items from the same review that still need discussion before
+a decision (recursive-function `decreases`/`invariant`; float literals
+in other bases; the `@autoload` first-match fallback; nested block
+comments; lambda/function-typed values; static heap-free verification;
+pointer-to-const syntax; the operator-overload `use ... as` renaming
+question; `sizeof`/`lengthof`'s own return type) are **not** listed
+here — they stay in the conversation that produced this list, not in
+this document, until each is actually settled.
+
+- **`decreases` becomes mandatory on every recursive function, not just
+  `pure` ones** (§5.3/§7.2 currently only require it for `pure`
+  recursive functions). Decided after reviewing the whole recursive-
+  function correctness model against the Why3/Hoare-logic tradition
+  the language already follows: termination should be as symmetric a
+  requirement for recursion as it already is for `while` (§7.1 already
+  mandates at least one `decreases` on every loop) — an ordinary
+  recursive function getting a free pass on termination while every
+  loop doesn't was the actual gap, not something to preserve. A
+  companion idea (a separate `invariant`-like clause for functions,
+  analogous to a loop invariant) was considered and explicitly
+  **rejected** — Why3 and the broader tradition this language follows
+  don't have a function-level invariant concept because a function's
+  own `requires`/`ensures`, used inductively (assume the recursive
+  call's `ensures` holds, justified by `decreases` giving a
+  well-founded measure; prove the body then satisfies the same
+  `ensures`) already *is* the complete recursive correctness proof
+  obligation — adding a separate invariant would be redundant with
+  `ensures` at best, and has no established formal role to fill
+  otherwise, unlike the loop invariant's well-defined one.
+
+One item from the same review turned out to need **no change at all**:
+unary `-` on an unsigned integer operand is **already** a compile
+error in the current v1 reference (§3.4's own unary-operators note,
+"Unary `-` on an integer now requires a *signed* integer type") — a
+v0→v1 tightening that already exists, not a new decision.
+
+- **Pointer-arithmetic `+` becomes non-commutative.** Currently (§2.5)
+  both `p + n` and `n + p` are valid, and `p[i]` desugars to `*(p + i)`
+  with no operand-order restriction — mirroring C, where `p[i]` and
+  `i[p]` are both legal and mean the same thing. v1 instead requires
+  the pointer to be the **first** operand: `p + n` valid, `n + p` a
+  type error, `p[i]` stays valid, `i[p]`/`*(i + p)` (pointer as the
+  *second* operand to `+`) becomes an error. Pure consistency gain — C
+  itself has never had a real use for the commutative form.
+- **Float literals gain a based form, reusing the existing integer
+  `based_form` machinery** (§1.5: `based_form ::= digit+ "n"
+  value_digit+`, bases 2/8/10/16). Extended grammar:
+  `based_form ::= digit+ "n" value_digit+ ("." value_digit+)?
+  (exponent)?`, where a fractional part makes the literal a float
+  untyped constant (joins the existing float-family anchoring, §3.7)
+  instead of an integer one — e.g. `2n101.001` = `5.125` (binary
+  `101.001`), `16nf.0p3` = `15.0 * 16^3` = `61440.0`. **Every supported
+  base gets an exponent, and the exponent's own multiplier is that same
+  base** — not always base-10 or always base-2 the way e.g. C's hex
+  floats fix the exponent to a power of 2 regardless of the mantissa's
+  own hex digits; here `BASEn...eN`/`BASEn...pN` always means
+  `mantissa * BASE^N`. **Exponent marker is `e`/`E` for every base
+  except base 16, which uses `p`/`P` instead** — forced by the base-16
+  digit alphabet itself including `e`/`f`, the same reason C's own hex
+  floats use `p`. The exponent's own digits are always plain decimal,
+  regardless of the literal's base (only the mantissa digits and the
+  power's own base follow `BASE`).
+- **A real, native `string` type**, not just something buildable out of
+  `*char`/`char[N]` in the standard library. A string literal can be
+  either a fixed-`N`-element `char` array or a real `string` value — an
+  anchor (in the same family as the existing integer/(planned) float
+  anchors) will be needed on the literal itself to say which one a
+  given `"..."` should be.
+- **`->` as implicit pointer dereference**, alongside the existing
+  explicit `*p`/`(*p).field` forms — e.g. `p->field` instead of
+  `(*p).field`. Exact desugaring and precedence still need pinning down
+  when this is actually written into the reference (presumably
+  postfix, same tier as `.`/`[]`/`()`, §3.1's own precedence table).
+- **A compiler warning when an anchored numeric literal overflows its
+  own anchor's type** — e.g. `300n8` (a base-anchored literal that
+  can't fit in the width the anchor implies). Diagnostic-only, no
+  change to what compiles or runs.
+- **`elseif` becomes a real, direct n-way branch construct, not sugar
+  for nested `if`/`else`.** §4.3 currently states explicitly that
+  `elseif` "is pure sugar for that nesting" (desugars to nested
+  `if`/`else` before or during semantic analysis). This reverses that:
+  the AST/semantic representation keeps an `elseif` chain as one flat,
+  n-branch construct, matching the general n-branch guarded-command
+  shape §7's own branch-correctness rule already reasons about (the
+  same section that currently justifies `elseif` as sugar precisely
+  *because* the two shapes were considered equivalent for proof
+  purposes) — chosen because a flat representation is what that
+  proof rule wants to see directly, not reconstructed from nesting
+  depth. `elseif` is not implemented in Edsger yet, so this changes a
+  design decision only, no shipped behavior. A `switch`/`match`
+  construct was considered and explicitly rejected — redundant once
+  `elseif` chains are real, top-level branches.
+- **`std` syscall-wrapper naming: swap which of `sys_exit`/
+  `sys_exit_group` gets the shorter, more obvious `std` name.** A
+  caller reaching for "exit" almost always means "end the whole
+  process," not "end this one thread" — so the `std` wrapper around
+  `sys_exit_group` should get the short name (`std:exit`), and the one
+  around `sys_exit` the longer, more specific one (`std:exit_thread`),
+  the reverse of naming them in raw-syscall order. `std` itself doesn't
+  exist yet (§5 lists a standard library as deferred beyond this plan
+  entirely) — recorded here so the naming is already decided whenever
+  a `std` actually gets built.
+- **Remove a misleading note from §5.3a (`ref` parameters).** The
+  current text ("A `ref` parameter may not also be a composite type
+  passed alongside §3.9's by-value copying rule...") reads as if `ref`
+  is restricted away from struct/array types — it isn't (the language
+  has no syntax to mark a parameter "by-value" in the first place, so
+  a parameter being *both* `ref` and by-value-copied was never
+  reachable to begin with; the note was trying to state that
+  impossibility, confusingly). Delete it outright rather than
+  reword it — it isn't adding information once the actual by-value
+  default is understood.
+- **A documented (non-enforced) naming convention**: `std` struct/
+  function names start lowercase, user-defined ones start uppercase.
+  Not a compiler-checked rule — just written down as guidance, since
+  following it sidesteps name collisions between `std` and user code
+  without the language needing to arbitrate them itself.
+- **A custom `[]` (indexing) operator overload for structs — considered
+  and explicitly left out of v1.** §5.4 currently allows overloading
+  only §3.2–§3.4's binary operators (arithmetic/bitwise/comparison/
+  logical) — `[]` isn't among them, and stays that way. This is real,
+  future Noam (v3, OOP) scope, not v1 — no reference change needed now,
+  this line exists only so the idea doesn't get silently lost.
 
 ## Beyond this plan
 
