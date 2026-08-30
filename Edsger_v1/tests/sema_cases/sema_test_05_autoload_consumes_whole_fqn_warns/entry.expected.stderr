@@ -1,0 +1,1 @@
+sema warning: autoload pattern '\Vendor\Math\' matches the whole name '\Vendor\Math' with nothing left for a filename -- skipped

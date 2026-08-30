@@ -9,14 +9,14 @@
 # -- this image adds no new logic of its own beyond building Edsger's
 # own `build/codegen` from its real source (`src/modular/`, via the
 # two-stage bootstrap `scripts/build.sh` documents in full -- the dev
-# image never bakes Edsger's own source in, only Hoare's, so that build
-# step has to happen here instead), and otherwise only re-packages
-# verified artifacts (docker build -t postulate-edsger
-# -f Edsger_v0/Dockerfile . must succeed first).
+# image already carries the vendored `hoare` this needs, see Dockerfile's
+# own header comment), and otherwise only re-packages verified artifacts
+# (docker build -t postulate-edsger -f Edsger_v0/Dockerfile Edsger_v0
+# must succeed first).
 #
-# Build (from the repository ROOT, so the build context includes both
-# Edsger_v0/ and docs/):
-#   docker build -f Edsger_v0/Dockerfile.release -t postulate-edsger-release .
+# Build context is this directory itself (self-contained, see
+# Dockerfile's own header comment for why):
+#   docker build -f Edsger_v0/Dockerfile.release -t postulate-edsger-release Edsger_v0
 #
 # Use:
 #   docker run --rm -v ${PWD}:/work postulate-edsger-release file.ptl
@@ -30,7 +30,7 @@
 
 FROM postulate-edsger:latest AS builder
 
-COPY ./Edsger_v0 .
+COPY . .
 RUN chmod +x edsger scripts/build.sh && ./scripts/build.sh
 
 FROM ubuntu:24.04
@@ -42,7 +42,7 @@ RUN apt-get update \
 WORKDIR /opt/edsger
 COPY --from=builder /workspace/Edsger/edsger ./edsger
 COPY --from=builder /workspace/Edsger/build/codegen ./build/codegen
-COPY docs/postulate_v1_0_language_reference.md ./docs/postulate_v1_0_language_reference.md
+COPY vendor/docs/postulate_v1_0_language_reference.md ./docs/postulate_v1_0_language_reference.md
 
 RUN ln -s /opt/edsger/edsger /usr/local/bin/edsger
 

@@ -1,0 +1,3 @@
+USE \Vendor\Math\Sqrt -> first/src/Math/Sqrt.ptl
+SYM F main
+SYM F sqrt_noop

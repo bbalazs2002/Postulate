@@ -25,13 +25,13 @@ docker version --format 'Docker {{.Server.Version}} (server arch {{.Server.Arch}
 # `--entrypoint bash` instead of passing "bash" as part of the command.
 BUILD_FLAGS=(--provenance=false --sbom=false)
 
-docker build "${BUILD_FLAGS[@]}" -f Edsger_v0/Dockerfile -t postulate-edsger .
+docker build "${BUILD_FLAGS[@]}" -f Edsger_v0/Dockerfile -t postulate-edsger Edsger_v0
 docker inspect postulate-edsger --format 'postulate-edsger: Os={{.Os}} Architecture={{.Architecture}}'
 
 # Runs Edsger_v0/scripts/build.sh's own two-stage bootstrap (codegen_
 # selfhost, then the real src/modular/ source) inside its builder
 # stage; see Edsger_v0/Dockerfile.release's own header comment.
-docker build "${BUILD_FLAGS[@]}" -f Edsger_v0/Dockerfile.release -t postulate-edsger-release .
+docker build "${BUILD_FLAGS[@]}" -f Edsger_v0/Dockerfile.release -t postulate-edsger-release Edsger_v0
 docker inspect postulate-edsger-release --format 'postulate-edsger-release: Os={{.Os}} Architecture={{.Architecture}}'
 
 # codegen_cases fixtures, run directly against the real, released

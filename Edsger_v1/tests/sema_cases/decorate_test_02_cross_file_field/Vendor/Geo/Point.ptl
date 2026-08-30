@@ -1,0 +1,6 @@
+namespace \Vendor\Geo;
+
+struct Point {
+  x : int32;
+  y : int32;
+}

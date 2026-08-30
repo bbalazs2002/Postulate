@@ -10,8 +10,8 @@
 # Docker image itself).
 #
 # Requires `postulate-edsger-release` already built
-# (docker build -f Edsger_v0/Dockerfile.release -t postulate-edsger-release .
-# from the repository root) and Docker available to run it.
+# (docker build -f Edsger_v0/Dockerfile.release -t postulate-edsger-release Edsger_v0)
+# and Docker available to run it.
 set -euo pipefail
 
 VERSION="${1:?usage: bundle_release.sh <version> <outdir>}"

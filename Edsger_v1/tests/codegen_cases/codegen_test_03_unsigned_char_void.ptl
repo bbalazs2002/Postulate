@@ -1,0 +1,29 @@
+namespace \Main;
+
+function divmod(a: uint32, b: uint32) : uint32 {
+  return a / b;
+}
+
+function cmpUnsigned(a: uint32, b: uint32) : bool {
+  return a < b;
+}
+
+function notFn(x: bool) : bool {
+  return !x;
+}
+
+function charFn(c: char) : bool {
+  return c == 'a';
+}
+
+function noRet() : int32 {
+  mut x : int32 := 1;
+}
+
+function voidFn(x: int32) : void {
+  return;
+}
+
+function main() : int32 {
+  return 0;
+}

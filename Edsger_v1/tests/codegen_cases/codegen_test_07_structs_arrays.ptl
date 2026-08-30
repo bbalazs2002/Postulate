@@ -1,0 +1,37 @@
+namespace \Main;
+
+struct Point {
+  x : int32;
+  y : int32;
+}
+
+function makeSum(p: Point) : int32 {
+  return p.x + p.y;
+}
+
+function bump(pp: *Point) : void {
+  pp.x := pp.x + 1;
+  return;
+}
+
+function structDemo() : int32 {
+  mut p : Point;
+  p.x := 3;
+  p.y := 4;
+  bump(&p);
+  return makeSum(p);
+}
+
+function arrayDemo() : int32 {
+  mut arr : int32[3];
+  mut i : int32 := 0;
+  arr[0] := 10;
+  arr[1] := 20;
+  arr[2] := 30;
+  i := 1;
+  return arr[0] + arr[i] + arr[2];
+}
+
+function main() : int32 {
+  return structDemo() + arrayDemo();
+}

@@ -27,8 +27,8 @@
 # finished .tar.gz avoids that entirely, on any host.
 #
 # Requires `postulate-hoare-release` already built
-# (docker build -f Hoare/Dockerfile.release -t postulate-hoare-release .
-# from the repository root) and Docker available to run it.
+# (docker build -f Hoare/Dockerfile.release -t postulate-hoare-release Hoare)
+# and Docker available to run it.
 set -euo pipefail
 
 VERSION="${1:?usage: bundle_release.sh <version> <outdir>}"

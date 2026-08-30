@@ -1,0 +1,848 @@
+namespace \Edsger\Lexer;
+use \Edsger\Dynamic;
+
+// Edsger -- lexer module (Module 1). Written in Postulate v0, compiled
+// by Hoare (Stage 0). Turns raw source bytes (a *DynBytes, via
+// SourceReader) into a flat Token stream; `lex_next` is the only entry
+// point Parser.ptl calls. No knowledge of grammar/declarations/types
+// lives here -- see Parser.ptl/Sema.ptl for those.
+//
+// v1.1.n update (docs/postulate_stage1_bootstrap_plan.md's own
+// `v1.1.n` phase): extended for every new token the full v1.1.n syntax
+// batch needs -- statement-sugar keywords/operators, floating point
+// (plain and based-form literals, `**`/`_/`), `ref`/`operator`/`pure`,
+// the native `string` keyword, `->`, `::`, `@shadow`, and real nested
+// block comments -- following this module's own error-reporting
+// discipline (the bootstrap plan's own "Error-reporting discipline"
+// note): a lexical error no longer has to mean "stop"; every scan_*
+// function below still reports its own error precisely, but `lex_next`
+// itself never aborts the overall token stream over one bad token.
+//
+// (Note, fixed 2026-08-29: this file's own header previously described
+// Sema-module responsibilities -- symbol tables, struct-size cycle
+// detection, `use`/`@autoload` resolution -- copy-pasted from Sema.ptl
+// at some point and never corrected. None of that ever lived here; the
+// body below has only ever been the lexer.)
+//
+// --- Token kind reference (canonical -- previously scattered only as
+// magic numbers across this file and Parser.ptl; written down here
+// since nowhere else names them) ---
+//
+//   0   EOF
+//   1   IDENT
+//   2   INT_LIT             (decimal or based-form, integer)
+//   3   CHAR_LIT
+//   4   STRING_LIT
+//   5   FLOAT_LIT           (plain decimal or based-form, has a '.')
+//
+//   10  function   11 struct    12 extern     13 mut       14 const
+//   15  if         16 else      17 while      18 return    19 true
+//   20  false      21 null      22 int8       23 int16     24 int
+//   25  int32      26 int64     27 uint8      28 uint16    29 uint
+//   30  uint32     31 uint64    32 bool       33 void      34 as
+//   35  use        36 char      37 verified   38 unverified
+//   39  namespace  40 @autoload (whole directive, one token)
+//   41  sizeof     42 lengthof  43 uintptr
+//
+//   44  elseif     45 break     46 continue   47 ref       48 operator
+//   49  pure
+//   90  float32    91 float64   92 float      93 ufloat32  94 ufloat64
+//   95  ufloat     96 string
+//   97  @shadow (whole directive, one token, alongside `40 @autoload`)
+//
+//   50  :  (lone)             51  ;      52  ,      53  .      54  (
+//   55  )  56  {   57  }      58  [      59  ]      60  \  (namespace
+//                                                        path separator)
+//   70  :=  71 ==  72 !=  73 <=  74 >=  75 <<  76 >>  77 &&  78 ||
+//   79  !  (lone)  80 -  (lone) 81 *  (lone)  82 &  (lone)
+//   83  /  (lone, not a comment) 84 %  85 +  (lone)  86 <  (lone)
+//   87  >  (lone)  88 ^  89 |  (lone)
+//
+//   161 ->   162 ::   163 ++   164 --   165 **   166 _/
+//   167 :+   168 :-   169 :*   170 :/
+//
+//   247 unterminated string      248 char literal not closed (garbage
+//       scanned to find a closing quote or newline)
+//   249 bad escape in char literal   250 empty char literal ('')
+//   251 unterminated char literal    252 based-form literal with no
+//       value digits after 'n' (or, now, no digits after the point/
+//       exponent marker of a based-form float -- same kind, see
+//       NumberResult's own error_at)
+//   253 unterminated block comment (see skip_trivia's own nesting note)
+//   254 UNKNOWN (an unrecognized byte, or the never-valid bare `=`)
+
+extern function sys_read(fd: int64, buf: *uint8, count: uint64) : int64;
+extern function sys_write(fd: int64, buf: *uint8, count: uint64) : int64;
+extern function sys_exit(code: int64) : void;
+extern function sys_openat(dirfd: int64, path: *uint8, flags: int64, mode: int64) : int64;
+extern function sys_close(fd: int64) : int64;
+
+// ---------------------------------------------------------------------
+// Embedded lexer -- byte-for-byte the same design as lexer.ptl (see
+// that file's own header for the reasoning); copied rather than
+// shared, since v0 has no mechanism to share it. Buffer access goes
+// exclusively through reader_peek/reader_advance/reader_match/
+// reader_is_eof, exactly as there.
+// ---------------------------------------------------------------------
+
+struct SourceReader {
+  buffer : *DynBytes;
+  length : uint64;
+  cursor : uint64;
+}
+
+function reader_is_eof(r: *SourceReader) : bool {
+  return (*r).cursor >= (*r).length;
+}
+
+function reader_peek(r: *SourceReader) : uint8 {
+  if (reader_is_eof(r)) {
+    return 0;
+  }
+  return (*(*r).buffer).ptr[(*r).cursor];
+}
+
+function reader_advance(r: *SourceReader) : void {
+  if (reader_is_eof(r) == false) {
+    (*r).cursor := (*r).cursor + 1;
+  }
+}
+
+// Reads the byte `ahead` positions past the cursor without moving it --
+// still just reading, same as reader_peek (offset 0); never seeks
+// backward, and never used to "undo" an advance. New for v1.1.n, needed
+// once to disambiguate the standalone `_` identifier from the leading
+// `_` of the `_/` (root) operator one byte before committing to either
+// scan path -- see lex_next's own use of it.
+function reader_peek_at(r: *SourceReader, ahead: uint64) : uint8 {
+  if ((*r).cursor + ahead >= (*r).length) {
+    return 0;
+  }
+  return (*(*r).buffer).ptr[(*r).cursor + ahead];
+}
+
+struct Token {
+  kind : int32;
+  offset : uint64;
+  length : uint64;
+}
+
+struct TriviaResult {
+  had_error : bool;
+  comment_start : uint64;
+  found_slash_token : bool;
+  slash_offset : uint64;
+}
+
+struct NumberResult {
+  had_error : bool;
+  error_at : uint64;
+  // v1.1.n: true for either a plain decimal float (digit+ . digit+
+  // (exponent)?) or a based-form float (digit+ n value_digit+ . ...) --
+  // lex_next uses this alone to pick FLOAT_LIT (5) over INT_LIT (2),
+  // the same "one scan_* function, one Result struct with everything
+  // the caller needs" shape every other literal scanner here already
+  // uses.
+  is_float : bool;
+}
+
+struct CharLitResult {
+  had_error : bool;
+  err_kind : int32;
+  error_at : uint64;
+}
+
+struct StringLitResult {
+  had_error : bool;
+}
+
+struct LineCol {
+  line : uint64;
+  col : uint64;
+}
+
+function is_digit(b: uint8) : bool {
+  return b >= 48 && b <= 57;
+}
+
+function is_hex_digit(b: uint8) : bool {
+  return (b >= 48 && b <= 57) || (b >= 97 && b <= 102) || (b >= 65 && b <= 70);
+}
+
+function is_alpha(b: uint8) : bool {
+  return (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || b == 95;
+}
+
+function is_alnum(b: uint8) : bool {
+  return is_alpha(b) || is_digit(b);
+}
+
+function is_ws(b: uint8) : bool {
+  return b == 32 || b == 9 || b == 13 || b == 10;
+}
+
+function skip_trivia(r: *SourceReader) : TriviaResult {
+  mut had_error : bool := false;
+  mut comment_start : uint64 := 0;
+  mut found_slash_token : bool := false;
+  mut slash_offset : uint64 := 0;
+  mut looping : bool := true;
+  mut slash_at : uint64 := 0;
+  mut terminated : bool := false;
+  mut inner_looping : bool := true;
+  mut depth : uint64 := 0;
+
+  while (looping) {
+    if (reader_is_eof(r)) {
+      looping := false;
+    } else {
+      if (is_ws(reader_peek(r))) {
+        reader_advance(r);
+      } else {
+        if (reader_peek(r) == 47) {
+          slash_at := (*r).cursor;
+          reader_advance(r);
+          if (reader_peek(r) == 47) {
+            reader_advance(r);
+            inner_looping := true;
+            while (inner_looping) {
+              if (reader_is_eof(r)) {
+                inner_looping := false;
+              } else {
+                if (reader_peek(r) == 10) {
+                  reader_advance(r);
+                  inner_looping := false;
+                } else {
+                  reader_advance(r);
+                }
+              }
+            }
+          } else {
+            if (reader_peek(r) == 42) {
+              // v1.1.13: real nesting (matches OCaml/SML/Rust/Swift/D,
+              // not C's own first-`*/`-wins rule) -- a depth counter,
+              // `/*` increments, `*/` decrements, the comment ends at
+              // depth 0. `*/` can never take depth negative here (it's
+              // only checked once depth > 0, i.e. once we're already
+              // inside a comment), so the "depth would go negative"
+              // lexer error the language design calls for is instead
+              // enforced by lex_next itself, for a `*/` seen OUTSIDE
+              // any comment -- see lex_next's own handling of a lone
+              // `*` there.
+              reader_advance(r);
+              terminated := false;
+              depth := 1;
+              inner_looping := true;
+              while (inner_looping) {
+                if (reader_is_eof(r)) {
+                  inner_looping := false;
+                } else {
+                  if (reader_peek(r) == 47) {
+                    reader_advance(r);
+                    if (reader_peek(r) == 42) {
+                      reader_advance(r);
+                      depth := depth + 1;
+                    }
+                  } else {
+                    if (reader_peek(r) == 42) {
+                      reader_advance(r);
+                      if (reader_peek(r) == 47) {
+                        reader_advance(r);
+                        depth := depth - 1;
+                        if (depth == 0) {
+                          terminated := true;
+                          inner_looping := false;
+                        }
+                      }
+                    } else {
+                      reader_advance(r);
+                    }
+                  }
+                }
+              }
+              if (!terminated) {
+                had_error := true;
+                comment_start := slash_at;
+                looping := false;
+              }
+            } else {
+              found_slash_token := true;
+              slash_offset := slash_at;
+              looping := false;
+            }
+          }
+        } else {
+          looping := false;
+        }
+      }
+    }
+  }
+
+  return TriviaResult {
+    had_error := had_error,
+    comment_start := comment_start,
+    found_slash_token := found_slash_token,
+    slash_offset := slash_offset
+  };
+}
+
+// v1.1.n: also scans float literals -- plain decimal (digit+ . digit+
+// (exponent)?) and based-form (digit+ n value_digit+ (. value_digit+
+// (exponent)?)?). The exponent marker for a based-form float depends on
+// the base's own numeric value (`p`/`P` for base 16, since its own
+// digit alphabet already includes `e`/`f`; `e`/`E` for every other
+// base) -- `base_value` accumulates the leading digit+ run's own
+// decimal value for exactly this one check, nothing else. Exponent
+// digits themselves are always plain decimal, regardless of the
+// literal's own base.
+function scan_number(r: *SourceReader) : NumberResult {
+  mut had_error : bool := false;
+  mut error_at : uint64 := 0;
+  mut is_float : bool := false;
+  mut n_pos : uint64 := 0;
+  mut has_value_digit : bool := false;
+  mut looping : bool := true;
+  mut base_value : uint64 := 0;
+  mut dot_pos : uint64 := 0;
+  mut exp_pos : uint64 := 0;
+  mut exp_marker_hi : uint8 := 101;  // 'e'
+  mut exp_marker_lo : uint8 := 69;   // 'E'
+  mut has_exp_digit : bool := false;
+
+  while (looping) {
+    if (is_digit(reader_peek(r))) {
+      base_value := base_value * 10 + ((reader_peek(r) as uint64) - 48);
+      reader_advance(r);
+    } else {
+      looping := false;
+    }
+  }
+
+  if (reader_peek(r) == 110) {
+    // Based form: digit+ 'n' value_digit+, optionally '.' value_digit+,
+    // optionally an exponent.
+    n_pos := (*r).cursor;
+    reader_advance(r);
+    has_value_digit := false;
+    looping := true;
+    while (looping) {
+      if (is_hex_digit(reader_peek(r))) {
+        has_value_digit := true;
+        reader_advance(r);
+      } else {
+        looping := false;
+      }
+    }
+    if (!has_value_digit) {
+      had_error := true;
+      error_at := n_pos + 1;
+    } else {
+      if (reader_peek(r) == 46 && is_hex_digit(reader_peek_at(r, 1))) {
+        is_float := true;
+        dot_pos := (*r).cursor;
+        reader_advance(r);
+        looping := true;
+        while (looping) {
+          if (is_hex_digit(reader_peek(r))) {
+            reader_advance(r);
+          } else {
+            looping := false;
+          }
+        }
+        if (base_value == 16) {
+          exp_marker_hi := 112;  // 'p'
+          exp_marker_lo := 80;   // 'P'
+        } else {
+          exp_marker_hi := 101;  // 'e'
+          exp_marker_lo := 69;   // 'E'
+        }
+        if (reader_peek(r) == exp_marker_hi || reader_peek(r) == exp_marker_lo) {
+          exp_pos := (*r).cursor;
+          reader_advance(r);
+          if (reader_peek(r) == 43 || reader_peek(r) == 45) {
+            reader_advance(r);
+          }
+          has_exp_digit := false;
+          looping := true;
+          while (looping) {
+            if (is_digit(reader_peek(r))) {
+              has_exp_digit := true;
+              reader_advance(r);
+            } else {
+              looping := false;
+            }
+          }
+          if (!has_exp_digit) {
+            had_error := true;
+            error_at := exp_pos + 1;
+          }
+        }
+      }
+    }
+  } else {
+    if (reader_peek(r) == 46 && is_digit(reader_peek_at(r, 1))) {
+      // Plain decimal float: digit+ '.' digit+, optionally an 'e'/'E'
+      // exponent -- always base 10, so no 'p'/'P' question here.
+      is_float := true;
+      dot_pos := (*r).cursor;
+      reader_advance(r);
+      looping := true;
+      while (looping) {
+        if (is_digit(reader_peek(r))) {
+          reader_advance(r);
+        } else {
+          looping := false;
+        }
+      }
+      if (reader_peek(r) == 101 || reader_peek(r) == 69) {
+        exp_pos := (*r).cursor;
+        reader_advance(r);
+        if (reader_peek(r) == 43 || reader_peek(r) == 45) {
+          reader_advance(r);
+        }
+        has_exp_digit := false;
+        looping := true;
+        while (looping) {
+          if (is_digit(reader_peek(r))) {
+            has_exp_digit := true;
+            reader_advance(r);
+          } else {
+            looping := false;
+          }
+        }
+        if (!has_exp_digit) {
+          had_error := true;
+          error_at := exp_pos + 1;
+        }
+      }
+    }
+  }
+
+  return NumberResult { had_error := had_error, error_at := error_at, is_float := is_float };
+}
+
+// v1.1.n: how many UTF-8 *continuation* bytes follow a given leading
+// byte -- 0 for plain ASCII (single-byte literal, stays fixed-type
+// `char`, unchanged), 1/2/3 for a real multi-byte code point (becomes
+// an untyped char/rune-family constant -- a Sema-level distinction,
+// made later by inspecting this same token's own byte length; the
+// lexer's only job is accepting the whole sequence as one char_body
+// instead of erroring on it). A stray/invalid leading byte (a bare
+// continuation byte, or 0xF8-0xFF) is treated as ordinary ASCII width
+// (0 extra) -- not valid UTF-8, but the lexer stays permissive here and
+// lets whatever reads the token's text later reject it if it matters.
+function utf8_extra_bytes(lead: uint8) : uint64 {
+  if (lead >= 240 && lead <= 247) { return 3; }
+  if (lead >= 224 && lead <= 239) { return 2; }
+  if (lead >= 192 && lead <= 223) { return 1; }
+  return 0;
+}
+
+function scan_char_literal(r: *SourceReader) : CharLitResult {
+  mut had_error : bool := false;
+  mut err_kind : int32 := 0;
+  mut error_at : uint64 := (*r).cursor;
+  mut b : uint8 := 0;
+  mut b2 : uint8 := 0;
+  mut body_ok : bool := false;
+  mut scanning : bool := false;
+  mut esc_at : uint64 := 0;
+  mut extra : uint64 := 0;
+  mut i : uint64 := 0;
+
+  reader_advance(r);
+
+  if (reader_is_eof(r)) {
+    had_error := true;
+    err_kind := 1;
+  } else {
+    b := reader_peek(r);
+    if (b == 39) {
+      had_error := true;
+      err_kind := 2;
+      reader_advance(r);
+    } else {
+      if (b == 10 || b == 13) {
+        had_error := true;
+        err_kind := 1;
+      } else {
+        if (b == 92) {
+          esc_at := (*r).cursor;
+          reader_advance(r);
+          if (reader_is_eof(r)) {
+            had_error := true;
+            err_kind := 1;
+          } else {
+            b2 := reader_peek(r);
+            if (b2 == 110 || b2 == 116 || b2 == 114 || b2 == 48 || b2 == 92 || b2 == 39) {
+              reader_advance(r);
+              body_ok := true;
+            } else {
+              had_error := true;
+              err_kind := 3;
+              error_at := esc_at;
+              reader_advance(r);
+            }
+          }
+        } else {
+          extra := utf8_extra_bytes(b);
+          reader_advance(r);
+          i := 0;
+          while (i < extra) {
+            if (reader_is_eof(r) || reader_peek(r) == 10 || reader_peek(r) == 39) {
+              i := extra;
+            } else {
+              reader_advance(r);
+              i := i + 1;
+            }
+          }
+          body_ok := true;
+        }
+      }
+    }
+
+    if (!had_error && body_ok) {
+      if (reader_is_eof(r)) {
+        had_error := true;
+        err_kind := 1;
+      } else {
+        if (reader_peek(r) == 39) {
+          reader_advance(r);
+        } else {
+          if (reader_peek(r) == 10) {
+            had_error := true;
+            err_kind := 1;
+          } else {
+            had_error := true;
+            err_kind := 4;
+            scanning := true;
+            while (scanning) {
+              if (reader_is_eof(r)) {
+                scanning := false;
+              } else {
+                if (reader_peek(r) == 39) {
+                  reader_advance(r);
+                  scanning := false;
+                } else {
+                  if (reader_peek(r) == 10) {
+                    scanning := false;
+                  } else {
+                    reader_advance(r);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return CharLitResult { had_error := had_error, err_kind := err_kind, error_at := error_at };
+}
+
+function scan_string_literal(r: *SourceReader) : StringLitResult {
+  mut had_error : bool := false;
+  mut looping : bool := true;
+
+  reader_advance(r);
+
+  while (looping) {
+    if (reader_is_eof(r)) {
+      had_error := true;
+      looping := false;
+    } else {
+      if (reader_peek(r) == 34) {
+        reader_advance(r);
+        looping := false;
+      } else {
+        if (reader_peek(r) == 10 || reader_peek(r) == 13) {
+          had_error := true;
+          looping := false;
+        } else {
+          reader_advance(r);
+        }
+      }
+    }
+  }
+
+  return StringLitResult { had_error := had_error };
+}
+
+function classify_word(r: *SourceReader, off: uint64, len: uint64) : int32 {
+  mut result : int32 := 1;
+  mut buf : *DynBytes := (*r).buffer;
+
+  if (len == 2) {
+    if ((*buf).ptr[off + 0] == 105 && (*buf).ptr[off + 1] == 102) { result := 15; }
+    if ((*buf).ptr[off + 0] == 97 && (*buf).ptr[off + 1] == 115) { result := 34; }
+  }
+  if (len == 3) {
+    if ((*buf).ptr[off + 0] == 109 && (*buf).ptr[off + 1] == 117 && (*buf).ptr[off + 2] == 116) { result := 13; }
+    if ((*buf).ptr[off + 0] == 105 && (*buf).ptr[off + 1] == 110 && (*buf).ptr[off + 2] == 116) { result := 24; }
+    if ((*buf).ptr[off + 0] == 117 && (*buf).ptr[off + 1] == 115 && (*buf).ptr[off + 2] == 101) { result := 35; }
+    if ((*buf).ptr[off + 0] == 114 && (*buf).ptr[off + 1] == 101 && (*buf).ptr[off + 2] == 102) { result := 47; }
+  }
+  if (len == 4) {
+    if ((*buf).ptr[off + 0] == 101 && (*buf).ptr[off + 1] == 108 && (*buf).ptr[off + 2] == 115 && (*buf).ptr[off + 3] == 101) { result := 16; }
+    if ((*buf).ptr[off + 0] == 116 && (*buf).ptr[off + 1] == 114 && (*buf).ptr[off + 2] == 117 && (*buf).ptr[off + 3] == 101) { result := 19; }
+    if ((*buf).ptr[off + 0] == 110 && (*buf).ptr[off + 1] == 117 && (*buf).ptr[off + 2] == 108 && (*buf).ptr[off + 3] == 108) { result := 21; }
+    if ((*buf).ptr[off + 0] == 105 && (*buf).ptr[off + 1] == 110 && (*buf).ptr[off + 2] == 116 && (*buf).ptr[off + 3] == 56) { result := 22; }
+    if ((*buf).ptr[off + 0] == 98 && (*buf).ptr[off + 1] == 111 && (*buf).ptr[off + 2] == 111 && (*buf).ptr[off + 3] == 108) { result := 32; }
+    if ((*buf).ptr[off + 0] == 118 && (*buf).ptr[off + 1] == 111 && (*buf).ptr[off + 2] == 105 && (*buf).ptr[off + 3] == 100) { result := 33; }
+    if ((*buf).ptr[off + 0] == 117 && (*buf).ptr[off + 1] == 105 && (*buf).ptr[off + 2] == 110 && (*buf).ptr[off + 3] == 116) { result := 29; }
+    if ((*buf).ptr[off + 0] == 99 && (*buf).ptr[off + 1] == 104 && (*buf).ptr[off + 2] == 97 && (*buf).ptr[off + 3] == 114) { result := 36; }
+    if ((*buf).ptr[off + 0] == 112 && (*buf).ptr[off + 1] == 117 && (*buf).ptr[off + 2] == 114 && (*buf).ptr[off + 3] == 101) { result := 49; }
+  }
+  if (len == 5) {
+    if ((*buf).ptr[off + 0] == 99 && (*buf).ptr[off + 1] == 111 && (*buf).ptr[off + 2] == 110 && (*buf).ptr[off + 3] == 115 && (*buf).ptr[off + 4] == 116) { result := 14; }
+    if ((*buf).ptr[off + 0] == 119 && (*buf).ptr[off + 1] == 104 && (*buf).ptr[off + 2] == 105 && (*buf).ptr[off + 3] == 108 && (*buf).ptr[off + 4] == 101) { result := 17; }
+    if ((*buf).ptr[off + 0] == 102 && (*buf).ptr[off + 1] == 97 && (*buf).ptr[off + 2] == 108 && (*buf).ptr[off + 3] == 115 && (*buf).ptr[off + 4] == 101) { result := 20; }
+    if ((*buf).ptr[off + 0] == 105 && (*buf).ptr[off + 1] == 110 && (*buf).ptr[off + 2] == 116 && (*buf).ptr[off + 3] == 49 && (*buf).ptr[off + 4] == 54) { result := 23; }
+    if ((*buf).ptr[off + 0] == 105 && (*buf).ptr[off + 1] == 110 && (*buf).ptr[off + 2] == 116 && (*buf).ptr[off + 3] == 51 && (*buf).ptr[off + 4] == 50) { result := 25; }
+    if ((*buf).ptr[off + 0] == 105 && (*buf).ptr[off + 1] == 110 && (*buf).ptr[off + 2] == 116 && (*buf).ptr[off + 3] == 54 && (*buf).ptr[off + 4] == 52) { result := 26; }
+    if ((*buf).ptr[off + 0] == 117 && (*buf).ptr[off + 1] == 105 && (*buf).ptr[off + 2] == 110 && (*buf).ptr[off + 3] == 116 && (*buf).ptr[off + 4] == 56) { result := 27; }
+    if ((*buf).ptr[off + 0] == 98 && (*buf).ptr[off + 1] == 114 && (*buf).ptr[off + 2] == 101 && (*buf).ptr[off + 3] == 97 && (*buf).ptr[off + 4] == 107) { result := 45; }
+    if ((*buf).ptr[off + 0] == 102 && (*buf).ptr[off + 1] == 108 && (*buf).ptr[off + 2] == 111 && (*buf).ptr[off + 3] == 97 && (*buf).ptr[off + 4] == 116) { result := 92; }
+  }
+  if (len == 6) {
+    if ((*buf).ptr[off + 0] == 115 && (*buf).ptr[off + 1] == 116 && (*buf).ptr[off + 2] == 114 && (*buf).ptr[off + 3] == 117 && (*buf).ptr[off + 4] == 99 && (*buf).ptr[off + 5] == 116) { result := 11; }
+    if ((*buf).ptr[off + 0] == 101 && (*buf).ptr[off + 1] == 120 && (*buf).ptr[off + 2] == 116 && (*buf).ptr[off + 3] == 101 && (*buf).ptr[off + 4] == 114 && (*buf).ptr[off + 5] == 110) { result := 12; }
+    if ((*buf).ptr[off + 0] == 114 && (*buf).ptr[off + 1] == 101 && (*buf).ptr[off + 2] == 116 && (*buf).ptr[off + 3] == 117 && (*buf).ptr[off + 4] == 114 && (*buf).ptr[off + 5] == 110) { result := 18; }
+    if ((*buf).ptr[off + 0] == 117 && (*buf).ptr[off + 1] == 105 && (*buf).ptr[off + 2] == 110 && (*buf).ptr[off + 3] == 116 && (*buf).ptr[off + 4] == 49 && (*buf).ptr[off + 5] == 54) { result := 28; }
+    if ((*buf).ptr[off + 0] == 117 && (*buf).ptr[off + 1] == 105 && (*buf).ptr[off + 2] == 110 && (*buf).ptr[off + 3] == 116 && (*buf).ptr[off + 4] == 51 && (*buf).ptr[off + 5] == 50) { result := 30; }
+    if ((*buf).ptr[off + 0] == 117 && (*buf).ptr[off + 1] == 105 && (*buf).ptr[off + 2] == 110 && (*buf).ptr[off + 3] == 116 && (*buf).ptr[off + 4] == 54 && (*buf).ptr[off + 5] == 52) { result := 31; }
+    if ((*buf).ptr[off + 0] == 115 && (*buf).ptr[off + 1] == 105 && (*buf).ptr[off + 2] == 122 && (*buf).ptr[off + 3] == 101 && (*buf).ptr[off + 4] == 111 && (*buf).ptr[off + 5] == 102) { result := 41; }
+    if ((*buf).ptr[off + 0] == 101 && (*buf).ptr[off + 1] == 108 && (*buf).ptr[off + 2] == 115 && (*buf).ptr[off + 3] == 101 && (*buf).ptr[off + 4] == 105 && (*buf).ptr[off + 5] == 102) { result := 44; }
+    if ((*buf).ptr[off + 0] == 117 && (*buf).ptr[off + 1] == 102 && (*buf).ptr[off + 2] == 108 && (*buf).ptr[off + 3] == 111 && (*buf).ptr[off + 4] == 97 && (*buf).ptr[off + 5] == 116) { result := 95; }
+    if ((*buf).ptr[off + 0] == 115 && (*buf).ptr[off + 1] == 116 && (*buf).ptr[off + 2] == 114 && (*buf).ptr[off + 3] == 105 && (*buf).ptr[off + 4] == 110 && (*buf).ptr[off + 5] == 103) { result := 96; }
+  }
+  if (len == 7) {
+    if ((*buf).ptr[off + 0] == 117 && (*buf).ptr[off + 1] == 105 && (*buf).ptr[off + 2] == 110 && (*buf).ptr[off + 3] == 116 && (*buf).ptr[off + 4] == 112 && (*buf).ptr[off + 5] == 116 && (*buf).ptr[off + 6] == 114) { result := 43; }
+    if ((*buf).ptr[off + 0] == 102 && (*buf).ptr[off + 1] == 108 && (*buf).ptr[off + 2] == 111 && (*buf).ptr[off + 3] == 97 && (*buf).ptr[off + 4] == 116 && (*buf).ptr[off + 5] == 51 && (*buf).ptr[off + 6] == 50) { result := 90; }
+    if ((*buf).ptr[off + 0] == 102 && (*buf).ptr[off + 1] == 108 && (*buf).ptr[off + 2] == 111 && (*buf).ptr[off + 3] == 97 && (*buf).ptr[off + 4] == 116 && (*buf).ptr[off + 5] == 54 && (*buf).ptr[off + 6] == 52) { result := 91; }
+  }
+  if (len == 8) {
+    if ((*buf).ptr[off + 0] == 102 && (*buf).ptr[off + 1] == 117 && (*buf).ptr[off + 2] == 110 && (*buf).ptr[off + 3] == 99 && (*buf).ptr[off + 4] == 116 && (*buf).ptr[off + 5] == 105 && (*buf).ptr[off + 6] == 111 && (*buf).ptr[off + 7] == 110) { result := 10; }
+    if ((*buf).ptr[off + 0] == 118 && (*buf).ptr[off + 1] == 101 && (*buf).ptr[off + 2] == 114 && (*buf).ptr[off + 3] == 105 && (*buf).ptr[off + 4] == 102 && (*buf).ptr[off + 5] == 105 && (*buf).ptr[off + 6] == 101 && (*buf).ptr[off + 7] == 100) { result := 37; }
+    if ((*buf).ptr[off + 0] == 108 && (*buf).ptr[off + 1] == 101 && (*buf).ptr[off + 2] == 110 && (*buf).ptr[off + 3] == 103 && (*buf).ptr[off + 4] == 116 && (*buf).ptr[off + 5] == 104 && (*buf).ptr[off + 6] == 111 && (*buf).ptr[off + 7] == 102) { result := 42; }
+    if ((*buf).ptr[off + 0] == 99 && (*buf).ptr[off + 1] == 111 && (*buf).ptr[off + 2] == 110 && (*buf).ptr[off + 3] == 116 && (*buf).ptr[off + 4] == 105 && (*buf).ptr[off + 5] == 110 && (*buf).ptr[off + 6] == 117 && (*buf).ptr[off + 7] == 101) { result := 46; }
+    if ((*buf).ptr[off + 0] == 111 && (*buf).ptr[off + 1] == 112 && (*buf).ptr[off + 2] == 101 && (*buf).ptr[off + 3] == 114 && (*buf).ptr[off + 4] == 97 && (*buf).ptr[off + 5] == 116 && (*buf).ptr[off + 6] == 111 && (*buf).ptr[off + 7] == 114) { result := 48; }
+    if ((*buf).ptr[off + 0] == 117 && (*buf).ptr[off + 1] == 102 && (*buf).ptr[off + 2] == 108 && (*buf).ptr[off + 3] == 111 && (*buf).ptr[off + 4] == 97 && (*buf).ptr[off + 5] == 116 && (*buf).ptr[off + 6] == 51 && (*buf).ptr[off + 7] == 50) { result := 93; }
+    if ((*buf).ptr[off + 0] == 117 && (*buf).ptr[off + 1] == 102 && (*buf).ptr[off + 2] == 108 && (*buf).ptr[off + 3] == 111 && (*buf).ptr[off + 4] == 97 && (*buf).ptr[off + 5] == 116 && (*buf).ptr[off + 6] == 54 && (*buf).ptr[off + 7] == 52) { result := 94; }
+  }
+  if (len == 9) {
+    if ((*buf).ptr[off + 0] == 110 && (*buf).ptr[off + 1] == 97 && (*buf).ptr[off + 2] == 109 && (*buf).ptr[off + 3] == 101 && (*buf).ptr[off + 4] == 115 && (*buf).ptr[off + 5] == 112 && (*buf).ptr[off + 6] == 97 && (*buf).ptr[off + 7] == 99 && (*buf).ptr[off + 8] == 101) { result := 39; }
+  }
+  if (len == 10) {
+    if ((*buf).ptr[off + 0] == 117 && (*buf).ptr[off + 1] == 110 && (*buf).ptr[off + 2] == 118 && (*buf).ptr[off + 3] == 101 && (*buf).ptr[off + 4] == 114 && (*buf).ptr[off + 5] == 105 && (*buf).ptr[off + 6] == 102 && (*buf).ptr[off + 7] == 105 && (*buf).ptr[off + 8] == 101 && (*buf).ptr[off + 9] == 100) { result := 38; }
+  }
+
+  return result;
+}
+
+function lex_next(r: *SourceReader) : Token {
+  mut trivia : TriviaResult := skip_trivia(r);
+  mut tok_offset : uint64 := 0;
+  mut b : uint8 := 0;
+  mut num : NumberResult := NumberResult { had_error := false, error_at := 0, is_float := false };
+  mut cl : CharLitResult := CharLitResult { had_error := false, err_kind := 0, error_at := 0 };
+  mut sl : StringLitResult := StringLitResult { had_error := false };
+  mut is_autoload : bool := false;
+  mut is_shadow : bool := false;
+  mut j : uint64 := 0;
+  mut next_b : uint8 := 0;
+
+  // ':' is handled in its own block below, not this table -- it now
+  // has more than two possible two-byte continuations (:=, :+, :-, :*,
+  // :/, ::), past what this table's own byte1/byte2 shape supports.
+  mut ext_first    : uint8[9] := {61, 33, 60, 62, 38, 124, 43, 45, 42};
+  mut ext_byte1    : uint8[9] := {61, 61, 61, 61, 38, 124, 43, 62, 42};
+  mut ext_kind1    : int32[9] := {71, 72, 73, 74, 77, 78, 163, 161, 165};
+  mut ext_byte2    : uint8[9] := {0, 0, 60, 62, 0, 0, 0, 45, 0};
+  mut ext_kind2    : int32[9] := {0, 0, 75, 76, 0, 0, 0, 164, 0};
+  mut ext_lone_kind : int32[9] := {254, 79, 86, 87, 82, 89, 85, 80, 81};
+
+  mut single_byte : uint8[13] := {59, 44, 46, 40, 41, 123, 125, 91, 93, 92, 47, 37, 94};
+  mut single_kind : int32[13] := {51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 83, 84, 88};
+
+  if (trivia.had_error) {
+    return Token { kind := 253, offset := trivia.comment_start, length := 0 };
+  }
+
+  if (trivia.found_slash_token) {
+    return Token { kind := 83, offset := trivia.slash_offset, length := 1 };
+  }
+
+  if (reader_is_eof(r)) {
+    return Token { kind := 0, offset := (*r).cursor, length := 0 };
+  }
+
+  tok_offset := (*r).cursor;
+  b := reader_peek(r);
+
+  // `_/` (root, v1.1.n) has to be checked before is_alpha claims the
+  // leading `_` as an identifier start -- only fires for a standalone
+  // `_` immediately followed by `/`, never for a real identifier that
+  // merely starts with `_` (which always has more is_alnum text right
+  // after it, so the peek-ahead byte there is never exactly `/`).
+  if (b == 95 && reader_peek_at(r, 1) == 47) {
+    reader_advance(r);
+    reader_advance(r);
+    return Token { kind := 166, offset := tok_offset, length := 2 };
+  }
+
+  if (is_alpha(b)) {
+    while (is_alnum(reader_peek(r))) {
+      reader_advance(r);
+    }
+    return Token {
+      kind := classify_word(r, tok_offset, (*r).cursor - tok_offset),
+      offset := tok_offset,
+      length := (*r).cursor - tok_offset
+    };
+  }
+
+  if (is_digit(b)) {
+    num := scan_number(r);
+    if (num.had_error) {
+      return Token { kind := 252, offset := num.error_at, length := 0 };
+    }
+    if (num.is_float) {
+      return Token { kind := 5, offset := tok_offset, length := (*r).cursor - tok_offset };
+    }
+    return Token { kind := 2, offset := tok_offset, length := (*r).cursor - tok_offset };
+  }
+
+  if (b == 39) {
+    cl := scan_char_literal(r);
+    if (cl.had_error) {
+      if (cl.err_kind == 1) {
+        return Token { kind := 251, offset := tok_offset, length := 0 };
+      }
+      if (cl.err_kind == 2) {
+        return Token { kind := 250, offset := tok_offset, length := 0 };
+      }
+      if (cl.err_kind == 3) {
+        return Token { kind := 249, offset := cl.error_at, length := 0 };
+      }
+      return Token { kind := 248, offset := tok_offset, length := 0 };
+    }
+    return Token { kind := 3, offset := tok_offset, length := (*r).cursor - tok_offset };
+  }
+
+  if (b == 34) {
+    sl := scan_string_literal(r);
+    if (sl.had_error) {
+      return Token { kind := 247, offset := tok_offset, length := 0 };
+    }
+    return Token { kind := 4, offset := tok_offset, length := (*r).cursor - tok_offset };
+  }
+
+  if (b == 64) {
+    is_autoload := false;
+    is_shadow := false;
+    if (tok_offset + 9 <= (*r).length) {
+      if ((*(*r).buffer).ptr[tok_offset + 1] == 97 && (*(*r).buffer).ptr[tok_offset + 2] == 117 && (*(*r).buffer).ptr[tok_offset + 3] == 116 && (*(*r).buffer).ptr[tok_offset + 4] == 111 && (*(*r).buffer).ptr[tok_offset + 5] == 108 && (*(*r).buffer).ptr[tok_offset + 6] == 111 && (*(*r).buffer).ptr[tok_offset + 7] == 97 && (*(*r).buffer).ptr[tok_offset + 8] == 100) {
+        if (!(tok_offset + 9 < (*r).length && is_alnum((*(*r).buffer).ptr[tok_offset + 9]))) {
+          is_autoload := true;
+        }
+      }
+    }
+    if (is_autoload) {
+      j := 0;
+      while (j < 9) {
+        reader_advance(r);
+        j := j + 1;
+      }
+      return Token { kind := 40, offset := tok_offset, length := 9 };
+    }
+    // v1.1.n: "@shadow", same fixed-token-directive shape as
+    // "@autoload" just above -- 7 bytes total (`@` + 6-letter "shadow"),
+    // not itself followed by another identifier byte (so "@shadowy"
+    // stays an ordinary, if unknown, `@`-prefixed word, not this
+    // directive).
+    if (!is_autoload && tok_offset + 7 <= (*r).length) {
+      if ((*(*r).buffer).ptr[tok_offset + 1] == 115 && (*(*r).buffer).ptr[tok_offset + 2] == 104 && (*(*r).buffer).ptr[tok_offset + 3] == 97 && (*(*r).buffer).ptr[tok_offset + 4] == 100 && (*(*r).buffer).ptr[tok_offset + 5] == 111 && (*(*r).buffer).ptr[tok_offset + 6] == 119) {
+        if (!(tok_offset + 7 < (*r).length && is_alnum((*(*r).buffer).ptr[tok_offset + 7]))) {
+          is_shadow := true;
+        }
+      }
+    }
+    if (is_shadow) {
+      j := 0;
+      while (j < 7) {
+        reader_advance(r);
+        j := j + 1;
+      }
+      return Token { kind := 97, offset := tok_offset, length := 7 };
+    }
+    reader_advance(r);
+    return Token { kind := 254, offset := tok_offset, length := 1 };
+  }
+
+  // ':' -- pulled out of the generic ext-table above (its own header
+  // comment explains why: six real continuations, not the table's own
+  // "up to two" shape): ':=' (assign, unchanged), ':+ :- :* :/'
+  // (v1.1.n compound assignment), '::' (v1.1.n namespace/symbol
+  // separator), or a lone ':' (unchanged).
+  if (b == 58) {
+    reader_advance(r);
+    next_b := reader_peek(r);
+    if (next_b == 61) {
+      reader_advance(r);
+      return Token { kind := 70, offset := tok_offset, length := 2 };
+    }
+    if (next_b == 43) {
+      reader_advance(r);
+      return Token { kind := 167, offset := tok_offset, length := 2 };
+    }
+    if (next_b == 45) {
+      reader_advance(r);
+      return Token { kind := 168, offset := tok_offset, length := 2 };
+    }
+    if (next_b == 42) {
+      reader_advance(r);
+      return Token { kind := 169, offset := tok_offset, length := 2 };
+    }
+    if (next_b == 47) {
+      reader_advance(r);
+      return Token { kind := 170, offset := tok_offset, length := 2 };
+    }
+    if (next_b == 58) {
+      reader_advance(r);
+      return Token { kind := 162, offset := tok_offset, length := 2 };
+    }
+    return Token { kind := 50, offset := tok_offset, length := 1 };
+  }
+
+  j := 0;
+  while (j < 9) {
+    if (b == ext_first[j]) {
+      reader_advance(r);
+      next_b := reader_peek(r);
+      if (next_b == ext_byte1[j]) {
+        reader_advance(r);
+        return Token { kind := ext_kind1[j], offset := tok_offset, length := 2 };
+      }
+      if (ext_byte2[j] != 0 && next_b == ext_byte2[j]) {
+        reader_advance(r);
+        return Token { kind := ext_kind2[j], offset := tok_offset, length := 2 };
+      }
+      return Token { kind := ext_lone_kind[j], offset := tok_offset, length := 1 };
+    }
+    j := j + 1;
+  }
+
+  j := 0;
+  while (j < 13) {
+    if (b == single_byte[j]) {
+      reader_advance(r);
+      return Token { kind := single_kind[j], offset := tok_offset, length := 1 };
+    }
+    j := j + 1;
+  }
+
+  reader_advance(r);
+  return Token { kind := 254, offset := tok_offset, length := 1 };
+}

@@ -1,0 +1,10 @@
+namespace \Main;
+
+struct Node {
+  value : int32;
+  next : *Node;
+}
+
+function main() : int32 {
+  return 0;
+}

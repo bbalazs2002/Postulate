@@ -1,0 +1,28 @@
+namespace \Main;
+
+@autoload("\Vendor\Math\", "libs/math/src");
+
+use \Vendor\Math\Sqrt as Root;
+use \Core\Collections;
+
+struct Point {
+  x : int32;
+  y : int32;
+}
+
+struct Line {
+  a : Point;
+  b : Point;
+  tag : char;
+}
+
+struct Wrapper {
+  p : *Point;
+  arr : int32[4];
+}
+
+extern function sys_write(fd: int64, buf: *uint8, count: uint64) : int64;
+
+function main() : int32 {
+  return 0;
+}

@@ -154,12 +154,12 @@ Nothing from the dev/test toolchain (`build/lexer`/`build/parser`/
 exist first), so a release is always exactly what the full test suite
 just verified — no separate logic of its own.
 
-Build from the **repository root** (the context needs to see both
-`Hoare/` and `docs/`):
+Build with `Hoare/` as the context — self-contained, the language
+reference it packages is vendored in at `vendor/docs/`:
 
 ```powershell
 docker build -t postulate-hoare Hoare
-docker build -f Hoare/Dockerfile.release -t postulate-hoare-release .
+docker build -f Hoare/Dockerfile.release -t postulate-hoare-release Hoare
 ```
 
 Use — `hoare` is the image's `ENTRYPOINT`, and `WORKDIR` is `/work`, so

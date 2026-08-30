@@ -1,0 +1,32 @@
+define i32 @add(i32 %p0, i32 %p1) {
+entry:
+  %r0 = alloca i32
+  store i32 %p0, ptr %r0
+  %r1 = alloca i32
+  store i32 %p1, ptr %r1
+  %r2 = load i32, ptr %r0
+  %r3 = load i32, ptr %r1
+  %r4 = add i32 %r2, %r3
+  ret i32 %r4
+}
+
+define i32 @main() {
+entry:
+  %r5 = alloca i32
+  %r6 = alloca i32
+  store i32 5, ptr %r5
+  store i32 3, ptr %r6
+  %r7 = load i32, ptr %r5
+  %r8 = load i32, ptr %r6
+  %r9 = call i32 @add(i32 %r7, i32 %r8)
+  ret i32 %r9
+}
+
+define void @_start() {
+entry:
+  %r10 = call i32 @main()
+  %r11 = zext i32 %r10 to i64
+  %r12 = call i64 asm sideeffect "syscall", "={rax},{rax},{rdi},~{rcx},~{r11},~{memory}"(i64 231, i64 %r11)
+  unreachable
+}
+

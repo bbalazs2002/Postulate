@@ -32,5 +32,5 @@ docker inspect postulate-hoare --format 'postulate-hoare: Os={{.Os}} Architectur
 
 # Re-packages the already-tested binaries above; see
 # Hoare/Dockerfile.release's own header comment.
-docker build "${BUILD_FLAGS[@]}" -f Hoare/Dockerfile.release -t postulate-hoare-release .
+docker build "${BUILD_FLAGS[@]}" -f Hoare/Dockerfile.release -t postulate-hoare-release Hoare
 docker inspect postulate-hoare-release --format 'postulate-hoare-release: Os={{.Os}} Architecture={{.Architecture}}'

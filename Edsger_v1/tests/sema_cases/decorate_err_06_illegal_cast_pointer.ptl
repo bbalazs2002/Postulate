@@ -1,0 +1,7 @@
+namespace \Main;
+
+function main() : int32 {
+  mut p : *int32 := null;
+  mut x : int64 := p as int64;
+  return 0;
+}

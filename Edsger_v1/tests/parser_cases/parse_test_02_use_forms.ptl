@@ -1,0 +1,9 @@
+namespace \Main;
+
+use \Vendor\Math\Sqrt as Root;
+use \Vendor\Math\{Pow, Abs as A};
+use \Core\Collections;
+
+function main() : int32 {
+  return 0;
+}

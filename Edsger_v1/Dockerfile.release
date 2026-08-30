@@ -1,0 +1,41 @@
+# Postulate Edsger v1.1.n (in-progress rewrite) -- release image: just
+# the compiler binary, the language reference, and the tools `./edsger`
+# needs at runtime (llc, ld, bash) -- nothing from the dev/test
+# toolchain (the `.ptl` sources, the tests/ fixtures). Meant for anyone
+# who wants to try the in-progress v1.1.n language ahead of an actual
+# tagged release.
+#
+# Built FROM the already fully-tested dev image (see Edsger_v1/Dockerfile)
+# -- this image adds no new logic of its own beyond building Edsger's
+# own `build/codegen` from its real source (`src/modular/`, via
+# scripts/build.sh's own single-stage build -- the dev image already
+# carries the vendored codegen_selfhost this needs), and otherwise only
+# re-packages verified artifacts (docker build -t postulate-edsger-v1
+# -f Edsger_v1/Dockerfile Edsger_v1 must succeed first).
+#
+# Build context is this directory itself, self-contained:
+#   docker build -f Edsger_v1/Dockerfile.release -t postulate-edsger-v1-release Edsger_v1
+#
+# Use:
+#   docker run --rm -v ${PWD}:/work postulate-edsger-v1-release file.ptl
+
+FROM postulate-edsger-v1:latest AS builder
+
+COPY . .
+RUN chmod +x edsger scripts/build.sh && ./scripts/build.sh
+
+FROM ubuntu:24.04
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends llvm binutils bash \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/edsger
+COPY --from=builder /workspace/Edsger/edsger ./edsger
+COPY --from=builder /workspace/Edsger/build/codegen ./build/codegen
+COPY vendor/docs/postulate_v1_0_language_reference.md ./docs/postulate_v1_0_language_reference.md
+
+RUN ln -s /opt/edsger/edsger /usr/local/bin/edsger
+
+WORKDIR /work
+ENTRYPOINT ["edsger"]

@@ -1,0 +1,6 @@
+namespace \Main;
+function main() : int32 {
+  mut ok : bool := true;
+  mut r : bool := -ok;
+  return 0;
+}

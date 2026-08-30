@@ -1,0 +1,7 @@
+namespace \Main;
+
+use \Nonexistent\Thing;
+
+function main() : int32 {
+  return 0;
+}

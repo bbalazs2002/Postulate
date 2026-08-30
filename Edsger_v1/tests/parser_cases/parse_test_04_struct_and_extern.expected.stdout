@@ -1,0 +1,32 @@
+#100
+  #101
+    #102 Main
+  #110 Point
+    #111 x
+      T:
+        #120 int32
+    #111 y
+      T:
+        #120 int32
+  #112 sys_write
+    T:
+      #120 int64
+    #114 fd
+      T:
+        #120 int64
+    #114 buf
+      T:
+        #121
+          L:
+            #120 uint8
+    #114 count
+      T:
+        #120 uint64
+  #113 main
+    X:
+      #130
+        #133 return
+          L:
+            #141 0 v=0
+    T:
+      #120 int32

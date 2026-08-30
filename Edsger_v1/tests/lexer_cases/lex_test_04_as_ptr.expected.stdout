@@ -1,0 +1,48 @@
+KW function
+IDENT g
+LPAREN
+IDENT p
+COLON
+OP *
+KW int32
+COMMA
+IDENT n
+COLON
+KW uint64
+RPAREN
+COLON
+KW int64
+LBRACE
+KW mut
+IDENT q
+COLON
+OP *
+KW int32
+OP :=
+IDENT p
+OP +
+INT 1
+SEMI
+KW mut
+IDENT diff
+COLON
+KW int64
+OP :=
+IDENT q
+OP -
+IDENT p
+SEMI
+KW mut
+IDENT v
+COLON
+KW uint64
+OP :=
+IDENT diff
+KW as
+KW uint64
+SEMI
+KW return
+IDENT diff
+SEMI
+RBRACE
+EOF

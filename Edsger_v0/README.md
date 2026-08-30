@@ -58,14 +58,14 @@ you're curious.
 ## Build and test
 
 ```powershell
-docker build -f Edsger_v0/Dockerfile -t postulate-edsger .
+docker build -f Edsger_v0/Dockerfile -t postulate-edsger Edsger_v0
 ```
 
-(Build context is the **repository root** — this Dockerfile reaches
-`./Hoare`, a sibling directory, not something inside `Edsger_v0/`.)
+(Build context is `Edsger_v0/` itself — self-contained: the Stage-0
+`hoare` toolchain it needs is vendored in as an already-built binary,
+`vendor/hoare/`, not rebuilt from `../Hoare/`'s own source.)
 
-This assembles Hoare inside the image (`Edsger_v0/Dockerfile`'s own
-job), then — from inside a container built from that image — running
+Then — from inside a container built from that image — running
 `scripts/build.sh` does Edsger's own **two-stage bootstrap**:
 
 1. `hoare` compiles `src/codegen_selfhost.ptl` (a throwaway,
@@ -159,11 +159,11 @@ building Edsger (or Hoare, which it no longer needs at runtime) from
 source. Built `FROM` the already-tested dev image, so a release is
 always exactly what the dev image's own build just produced.
 
-Build from the **repository root**:
+Build with `Edsger_v0/` as the context (self-contained, see above):
 
 ```powershell
-docker build -f Edsger_v0/Dockerfile -t postulate-edsger .
-docker build -f Edsger_v0/Dockerfile.release -t postulate-edsger-release .
+docker build -f Edsger_v0/Dockerfile -t postulate-edsger Edsger_v0
+docker build -f Edsger_v0/Dockerfile.release -t postulate-edsger-release Edsger_v0
 ```
 
 Use — `edsger` is the image's `ENTRYPOINT`, `WORKDIR` is `/work`:

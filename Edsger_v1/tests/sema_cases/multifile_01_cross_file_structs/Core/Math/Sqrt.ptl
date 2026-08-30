@@ -1,0 +1,9 @@
+namespace \Core\Math;
+
+struct Sqrt {
+  value : int32;
+}
+
+function compute(x : int32) : int32 {
+  return x;
+}

@@ -34,7 +34,8 @@
 # exactly like every other Edsger invocation.
 #
 # Requires `hoare`, `llc`, and `ld` on PATH (the Edsger dev image
-# already provides all three -- see ../Dockerfile).
+# already provides all three, `hoare` vendored in as an already-built
+# binary -- see ../Dockerfile).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

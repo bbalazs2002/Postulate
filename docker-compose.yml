@@ -1,8 +1,8 @@
 services:
   edsger-dev:
     build:
-      context: .
-      dockerfile: Edsger_v0/Dockerfile
+      context: ./Edsger_v0
+      dockerfile: Dockerfile
     image: postulate-edsger
     container_name: postulate-edsger-dev
     stdin_open: true  # -i opció (interaktív bemenet)
@@ -10,4 +10,3 @@ services:
     entrypoint: ["/bin/bash"]
     volumes:
       - ./Edsger_v0:/workspace/Edsger
-      - ./Hoare:/workspace/Hoare

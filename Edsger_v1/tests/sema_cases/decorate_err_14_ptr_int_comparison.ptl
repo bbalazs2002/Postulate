@@ -1,0 +1,7 @@
+namespace \Main;
+function main() : int32 {
+  mut p : *int32 := null;
+  mut a : int32 := 1;
+  mut r : bool := p == a;
+  return 0;
+}

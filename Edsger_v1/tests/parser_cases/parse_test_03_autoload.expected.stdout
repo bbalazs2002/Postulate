@@ -1,0 +1,26 @@
+#100
+  #101
+    #102 Main
+  #105 v=0
+    L:
+      #143 "\Vendor\Math\"
+    R:
+      #143 "libs/math/src"
+  #105 v=1
+    L:
+      #143 "\Plugin\:module\"
+    R:
+      #143 "plugins/:module/src"
+  #105 v=2
+    L:
+      #143 "\Std\"
+    R:
+      #143 "stdlib/src"
+  #113 main
+    X:
+      #130
+        #133 return
+          L:
+            #141 0 v=0
+    T:
+      #120 int32

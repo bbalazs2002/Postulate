@@ -1,0 +1,7 @@
+namespace \Main;
+
+@autoload("\Vendor\Math\", "libs/math/src", maybe);
+
+function main() : int32 {
+  return 0;
+}

@@ -1,0 +1,20 @@
+namespace \Main;
+
+function find(arr : int[10], val : int) : int {
+    mut index : int := 10n11;
+    mut count : int := 0;
+    while (count < 10) {
+        if (arr[count] == val) {
+            return count;
+        }
+        count := count + 1;
+    }
+    return index;
+}
+function main() : void {
+    const arr : int[10] := {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+    const val : int := 2 * 3;
+    mut index : int;
+
+    index := find(arr, val);
+}

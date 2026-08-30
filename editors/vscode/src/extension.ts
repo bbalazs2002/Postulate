@@ -30,6 +30,8 @@ const TOKEN_TYPES = [
   'number',
   'operator',
   'comment',
+  'namespace',
+  'string',
 ] as const;
 
 const legend = new vscode.SemanticTokensLegend([...TOKEN_TYPES], []);
@@ -50,6 +52,8 @@ const CAPTURE_TO_TOKEN_TYPE: Record<string, (typeof TOKEN_TYPES)[number]> = {
   'constant.builtin': 'keyword', // null
   operator: 'operator',
   comment: 'comment',
+  namespace: 'namespace', // namespace/use paths, use ... as Alias
+  string: 'string', // char/string literals, @autoload's own string args
 };
 
 let tsModulePromise: Promise<TreeSitterModule> | undefined;

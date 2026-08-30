@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# The unified Postulate/Hoare compiler CLI: one command instead of the
+# four-stage manual pipeline (build/codegen -> nasm -> ld) scripts/
+# run_codegen_tests.sh drives internally -- parses, checks (build/
+# codegen already runs the checker internally), generates NASM,
+# assembles, and links a single .ptl file into a runnable ELF binary.
+#
+# Requires nasm and ld on PATH, and build/codegen already built (see
+# scripts/build.sh) -- same requirement as every other script in this
+# directory. Run this from inside the Docker image (or an equivalent
+# Linux toolchain), not directly on a Windows host -- see README.md.
+set -uo pipefail
+
+# readlink -f resolves through a symlink (e.g. /usr/local/bin/hoare ->
+# /opt/hoare/hoare in the release image, see Dockerfile.release) to the
+# real script path, so build/codegen is still found relative to where
+# this file actually lives, not wherever it was invoked from.
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+CODEGEN="$SCRIPT_DIR/build/codegen"
+
+usage() {
+    echo "usage: $(basename "$0") <file.ptl> [-o <output>] [--stack-trace]" >&2
+    echo "  -o <output>     output binary path (default: <file> with .ptl stripped)" >&2
+    echo "  --stack-trace   compile with the debug-only stack-corruption self-check" >&2
+    echo "                  (POSTULATE_STACK_CHECK=1 -- see README.md)" >&2
+}
+
+input=""
+output=""
+stack_trace=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --stack-trace)
+            stack_trace=1
+            shift
+            ;;
+        -o)
+            if [[ $# -lt 2 ]]; then
+                echo "hoare: -o requires an argument" >&2
+                usage
+                exit 64
+            fi
+            output="$2"
+            shift 2
+            ;;
+        -*)
+            echo "hoare: unrecognized option '$1'" >&2
+            usage
+            exit 64
+            ;;
+        *)
+            if [[ -n "$input" ]]; then
+                echo "hoare: only one input file may be given (already have '$input', got '$1')" >&2
+                usage
+                exit 64
+            fi
+            input="$1"
+            shift
+            ;;
+    esac
+done
+
+if [[ -z "$input" ]]; then
+    echo "hoare: no input file given" >&2
+    usage
+    exit 64
+fi
+if [[ ! -f "$input" ]]; then
+    echo "hoare: no such file: $input" >&2
+    exit 64
+fi
+if [[ ! -x "$CODEGEN" ]]; then
+    echo "hoare: $CODEGEN not found -- build it first (see scripts/build.sh)" >&2
+    exit 64
+fi
+
+if [[ -z "$output" ]]; then
+    base=$(basename -- "$input")
+    if [[ "$base" == *.ptl ]]; then
+        output="${base%.ptl}"
+    else
+        output="${base}.out"
+    fi
+fi
+
+workdir=$(mktemp -d)
+trap 'rm -rf "$workdir"' EXIT
+
+if [[ "$stack_trace" -eq 1 ]]; then
+    POSTULATE_STACK_CHECK=1 "$CODEGEN" < "$input" > "$workdir/out.asm" 2> "$workdir/codegen.err"
+else
+    "$CODEGEN" < "$input" > "$workdir/out.asm" 2> "$workdir/codegen.err"
+fi
+codegen_code=$?
+if [[ "$codegen_code" -ne 0 ]]; then
+    cat "$workdir/codegen.err" >&2
+    exit "$codegen_code"
+fi
+
+if ! nasm -f elf64 -o "$workdir/out.o" "$workdir/out.asm" 2> "$workdir/nasm.err"; then
+    echo "hoare: internal error -- nasm rejected the generated assembly (this is a Hoare bug, please report it):" >&2
+    cat "$workdir/nasm.err" >&2
+    exit 5
+fi
+
+if ! ld -static -no-pie -e _start -o "$output" "$workdir/out.o" 2> "$workdir/ld.err"; then
+    echo "hoare: internal error -- ld failed to link the generated object (this is a Hoare bug, please report it):" >&2
+    cat "$workdir/ld.err" >&2
+    exit 6
+fi
+
+chmod +x "$output"

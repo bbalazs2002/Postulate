@@ -1,0 +1,2489 @@
+// Edsger -- parser module, v1.0.6 (see docs/postulate_stage1_bootstrap_plan.md
+// SS3 and docs/postulate_stage1_v1_0_6_edsger_design.md, "Module 2: Parser").
+// Written in Postulate v0, compiled by Hoare (Stage 0).
+//
+// Self-contained, like lexer.ptl: v0 has no separate compilation, so
+// this file embeds its own full copy of the lexer (SourceReader through
+// lex_next, unchanged from lexer.ptl) rather than "importing" it --
+// tokenizing the whole file up front into three parallel arrays
+// (kind/offset/length), the same way Stage1/src/parser.ptl's own
+// tokenize_all already did. Parsing then walks a `tok_idx` into those
+// arrays, never the byte-level SourceReader (which is done and
+// discarded once tokenizing finishes) -- so parser-level backtracking
+// (needed for `*base_type[N]` vs `*type`, and for `sizeof`/`lengthof`'s
+// `(type|expr)` ambiguity) is just resetting an ordinary uint64, with
+// no interaction with the lexer's own cursor-mutation discipline.
+//
+// Grammar scope: the full v0 statement/expression/declaration grammar,
+// unchanged, PLUS this step's own additions (postulate_stage1_bootstrap
+// _plan.md SS3 "What v1.0.6 adds", postulate_v1_language_reference.md):
+//   - namespace_decl / use_decl (single, group) / autoload_decl (SS6.1/
+//     SS6.2/SS6.2a/SS6.2b) -- program ::= namespace_decl autoload_decl*
+//     use_decl* top_level_decl+, a real grammar-enforced order, not a
+//     semantic convention.
+//   - char_literal as a primary expression (the lexer already
+//     tokenizes it; this module just needs a CHAR_LIT case).
+//   - `as` explicit conversion (SS3.7a) -- a new precedence level
+//     (parse_cast) between unary and multiplicative.
+//   - `*void`, `uintptr`, `sizeof`/`lengthof` (SS2.5-SS2.7a) -- `void` is
+//     grammar-restricted to directly-after-`*` (not a general
+//     base_type, matching Stage1/src/parser.ptl's own exclusion of it
+//     from parse_base_type); `sizeof`/`lengthof` take `(type|expr)`,
+//     disambiguated by trying `type` first and falling back to `expr`.
+//   - Pointer arithmetic itself and cross-type pointer comparison need
+//     NO new grammar -- `+`/`-`/comparison already exist; only the
+//     *type* rules change, which is Module 3's job, not this one's.
+// Deliberately NOT in scope (postulate_stage1_bootstrap_plan.md SS3
+// "still leaves out" / the roadmap's later steps): contract blocks
+// (`v1.1.9`), statement sugar, floats, operator_decl (`v1.1.7`).
+//
+// Error model: the grammar is deliberately more permissive than the
+// language's own semantics in the same handful of places Stage1/src/
+// parser.ptl already accepted this for (assignment LHS parsed as an
+// ordinary expr, not a dedicated lvalue grammar; `sizeof(x)` for a bare
+// identifier `x` always parses as a type reference, since telling "a
+// struct name" from "a variable name" needs a symbol table this module
+// doesn't have -- Module 3's job to reinterpret if `x` isn't actually a
+// struct in scope). A syntax error just stops parsing and reports the
+// offending token's position -- no per-construct error-message
+// taxonomy the way the lexer's 247-254 range has one, since this
+// module's own checkpoint is a hand-reviewed tree dump, not automated
+// pass/fail on error text.
+
+extern function sys_read(fd: int64, buf: *uint8, count: uint64) : int64;
+extern function sys_write(fd: int64, buf: *uint8, count: uint64) : int64;
+extern function sys_exit(code: int64) : void;
+
+// ---------------------------------------------------------------------
+// Embedded lexer -- byte-for-byte the same design as lexer.ptl (see
+// that file's own header for the reasoning); copied rather than
+// shared, since v0 has no mechanism to share it. Buffer access goes
+// exclusively through reader_peek/reader_advance/reader_match/
+// reader_is_eof, exactly as there.
+// ---------------------------------------------------------------------
+
+struct SourceReader {
+  buffer : *(uint8[65536]);
+  length : uint64;
+  cursor : uint64;
+}
+
+function reader_is_eof(r: *SourceReader) : bool {
+  return (*r).cursor >= (*r).length;
+}
+
+function reader_peek(r: *SourceReader) : uint8 {
+  if (reader_is_eof(r)) {
+    return 0;
+  }
+  return (*(*r).buffer)[(*r).cursor];
+}
+
+function reader_advance(r: *SourceReader) : void {
+  if (reader_is_eof(r) == false) {
+    (*r).cursor := (*r).cursor + 1;
+  }
+}
+
+struct Token {
+  kind : int32;
+  offset : uint64;
+  length : uint64;
+}
+
+struct TriviaResult {
+  had_error : bool;
+  comment_start : uint64;
+  found_slash_token : bool;
+  slash_offset : uint64;
+}
+
+struct NumberResult {
+  had_error : bool;
+  error_at : uint64;
+}
+
+struct CharLitResult {
+  had_error : bool;
+  err_kind : int32;
+  error_at : uint64;
+}
+
+struct StringLitResult {
+  had_error : bool;
+}
+
+struct LineCol {
+  line : uint64;
+  col : uint64;
+}
+
+function is_digit(b: uint8) : bool {
+  return b >= 48 && b <= 57;
+}
+
+function is_hex_digit(b: uint8) : bool {
+  return (b >= 48 && b <= 57) || (b >= 97 && b <= 102) || (b >= 65 && b <= 70);
+}
+
+function is_alpha(b: uint8) : bool {
+  return (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || b == 95;
+}
+
+function is_alnum(b: uint8) : bool {
+  return is_alpha(b) || is_digit(b);
+}
+
+function is_ws(b: uint8) : bool {
+  return b == 32 || b == 9 || b == 13 || b == 10;
+}
+
+function skip_trivia(r: *SourceReader) : TriviaResult {
+  mut had_error : bool := false;
+  mut comment_start : uint64 := 0;
+  mut found_slash_token : bool := false;
+  mut slash_offset : uint64 := 0;
+  mut looping : bool := true;
+  mut slash_at : uint64 := 0;
+  mut terminated : bool := false;
+  mut inner_looping : bool := true;
+
+  while (looping) {
+    if (reader_is_eof(r)) {
+      looping := false;
+    } else {
+      if (is_ws(reader_peek(r))) {
+        reader_advance(r);
+      } else {
+        if (reader_peek(r) == 47) {
+          slash_at := (*r).cursor;
+          reader_advance(r);
+          if (reader_peek(r) == 47) {
+            reader_advance(r);
+            inner_looping := true;
+            while (inner_looping) {
+              if (reader_is_eof(r)) {
+                inner_looping := false;
+              } else {
+                if (reader_peek(r) == 10) {
+                  reader_advance(r);
+                  inner_looping := false;
+                } else {
+                  reader_advance(r);
+                }
+              }
+            }
+          } else {
+            if (reader_peek(r) == 42) {
+              reader_advance(r);
+              terminated := false;
+              inner_looping := true;
+              while (inner_looping) {
+                if (reader_is_eof(r)) {
+                  inner_looping := false;
+                } else {
+                  if (reader_peek(r) == 42) {
+                    reader_advance(r);
+                    if (reader_peek(r) == 47) {
+                      reader_advance(r);
+                      terminated := true;
+                      inner_looping := false;
+                    }
+                  } else {
+                    reader_advance(r);
+                  }
+                }
+              }
+              if (!terminated) {
+                had_error := true;
+                comment_start := slash_at;
+                looping := false;
+              }
+            } else {
+              found_slash_token := true;
+              slash_offset := slash_at;
+              looping := false;
+            }
+          }
+        } else {
+          looping := false;
+        }
+      }
+    }
+  }
+
+  return TriviaResult {
+    had_error := had_error,
+    comment_start := comment_start,
+    found_slash_token := found_slash_token,
+    slash_offset := slash_offset
+  };
+}
+
+function scan_number(r: *SourceReader) : NumberResult {
+  mut had_error : bool := false;
+  mut error_at : uint64 := 0;
+  mut n_pos : uint64 := 0;
+  mut has_value_digit : bool := false;
+  mut looping : bool := true;
+
+  while (looping) {
+    if (is_digit(reader_peek(r))) {
+      reader_advance(r);
+    } else {
+      looping := false;
+    }
+  }
+
+  if (reader_peek(r) == 110) {
+    n_pos := (*r).cursor;
+    reader_advance(r);
+    has_value_digit := false;
+    looping := true;
+    while (looping) {
+      if (is_hex_digit(reader_peek(r))) {
+        has_value_digit := true;
+        reader_advance(r);
+      } else {
+        looping := false;
+      }
+    }
+    if (!has_value_digit) {
+      had_error := true;
+      error_at := n_pos + 1;
+    }
+  }
+
+  return NumberResult { had_error := had_error, error_at := error_at };
+}
+
+function scan_char_literal(r: *SourceReader) : CharLitResult {
+  mut had_error : bool := false;
+  mut err_kind : int32 := 0;
+  mut error_at : uint64 := (*r).cursor;
+  mut b : uint8 := 0;
+  mut b2 : uint8 := 0;
+  mut body_ok : bool := false;
+  mut scanning : bool := false;
+  mut esc_at : uint64 := 0;
+
+  reader_advance(r);
+
+  if (reader_is_eof(r)) {
+    had_error := true;
+    err_kind := 1;
+  } else {
+    b := reader_peek(r);
+    if (b == 39) {
+      had_error := true;
+      err_kind := 2;
+      reader_advance(r);
+    } else {
+      if (b == 10 || b == 13) {
+        had_error := true;
+        err_kind := 1;
+      } else {
+        if (b == 92) {
+          esc_at := (*r).cursor;
+          reader_advance(r);
+          if (reader_is_eof(r)) {
+            had_error := true;
+            err_kind := 1;
+          } else {
+            b2 := reader_peek(r);
+            if (b2 == 110 || b2 == 116 || b2 == 114 || b2 == 48 || b2 == 92 || b2 == 39) {
+              reader_advance(r);
+              body_ok := true;
+            } else {
+              had_error := true;
+              err_kind := 3;
+              error_at := esc_at;
+              reader_advance(r);
+            }
+          }
+        } else {
+          reader_advance(r);
+          body_ok := true;
+        }
+      }
+    }
+
+    if (!had_error && body_ok) {
+      if (reader_is_eof(r)) {
+        had_error := true;
+        err_kind := 1;
+      } else {
+        if (reader_peek(r) == 39) {
+          reader_advance(r);
+        } else {
+          if (reader_peek(r) == 10) {
+            had_error := true;
+            err_kind := 1;
+          } else {
+            had_error := true;
+            err_kind := 4;
+            scanning := true;
+            while (scanning) {
+              if (reader_is_eof(r)) {
+                scanning := false;
+              } else {
+                if (reader_peek(r) == 39) {
+                  reader_advance(r);
+                  scanning := false;
+                } else {
+                  if (reader_peek(r) == 10) {
+                    scanning := false;
+                  } else {
+                    reader_advance(r);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return CharLitResult { had_error := had_error, err_kind := err_kind, error_at := error_at };
+}
+
+function scan_string_literal(r: *SourceReader) : StringLitResult {
+  mut had_error : bool := false;
+  mut looping : bool := true;
+
+  reader_advance(r);
+
+  while (looping) {
+    if (reader_is_eof(r)) {
+      had_error := true;
+      looping := false;
+    } else {
+      if (reader_peek(r) == 34) {
+        reader_advance(r);
+        looping := false;
+      } else {
+        if (reader_peek(r) == 10 || reader_peek(r) == 13) {
+          had_error := true;
+          looping := false;
+        } else {
+          reader_advance(r);
+        }
+      }
+    }
+  }
+
+  return StringLitResult { had_error := had_error };
+}
+
+function classify_word(r: *SourceReader, off: uint64, len: uint64) : int32 {
+  mut result : int32 := 1;
+  mut buf : *(uint8[65536]) := (*r).buffer;
+
+  if (len == 2) {
+    if ((*buf)[off + 0] == 105 && (*buf)[off + 1] == 102) { result := 15; }
+    if ((*buf)[off + 0] == 97 && (*buf)[off + 1] == 115) { result := 34; }
+  }
+  if (len == 3) {
+    if ((*buf)[off + 0] == 109 && (*buf)[off + 1] == 117 && (*buf)[off + 2] == 116) { result := 13; }
+    if ((*buf)[off + 0] == 105 && (*buf)[off + 1] == 110 && (*buf)[off + 2] == 116) { result := 24; }
+    if ((*buf)[off + 0] == 117 && (*buf)[off + 1] == 115 && (*buf)[off + 2] == 101) { result := 35; }
+  }
+  if (len == 4) {
+    if ((*buf)[off + 0] == 101 && (*buf)[off + 1] == 108 && (*buf)[off + 2] == 115 && (*buf)[off + 3] == 101) { result := 16; }
+    if ((*buf)[off + 0] == 116 && (*buf)[off + 1] == 114 && (*buf)[off + 2] == 117 && (*buf)[off + 3] == 101) { result := 19; }
+    if ((*buf)[off + 0] == 110 && (*buf)[off + 1] == 117 && (*buf)[off + 2] == 108 && (*buf)[off + 3] == 108) { result := 21; }
+    if ((*buf)[off + 0] == 105 && (*buf)[off + 1] == 110 && (*buf)[off + 2] == 116 && (*buf)[off + 3] == 56) { result := 22; }
+    if ((*buf)[off + 0] == 98 && (*buf)[off + 1] == 111 && (*buf)[off + 2] == 111 && (*buf)[off + 3] == 108) { result := 32; }
+    if ((*buf)[off + 0] == 118 && (*buf)[off + 1] == 111 && (*buf)[off + 2] == 105 && (*buf)[off + 3] == 100) { result := 33; }
+    if ((*buf)[off + 0] == 117 && (*buf)[off + 1] == 105 && (*buf)[off + 2] == 110 && (*buf)[off + 3] == 116) { result := 29; }
+    if ((*buf)[off + 0] == 99 && (*buf)[off + 1] == 104 && (*buf)[off + 2] == 97 && (*buf)[off + 3] == 114) { result := 36; }
+  }
+  if (len == 5) {
+    if ((*buf)[off + 0] == 99 && (*buf)[off + 1] == 111 && (*buf)[off + 2] == 110 && (*buf)[off + 3] == 115 && (*buf)[off + 4] == 116) { result := 14; }
+    if ((*buf)[off + 0] == 119 && (*buf)[off + 1] == 104 && (*buf)[off + 2] == 105 && (*buf)[off + 3] == 108 && (*buf)[off + 4] == 101) { result := 17; }
+    if ((*buf)[off + 0] == 102 && (*buf)[off + 1] == 97 && (*buf)[off + 2] == 108 && (*buf)[off + 3] == 115 && (*buf)[off + 4] == 101) { result := 20; }
+    if ((*buf)[off + 0] == 105 && (*buf)[off + 1] == 110 && (*buf)[off + 2] == 116 && (*buf)[off + 3] == 49 && (*buf)[off + 4] == 54) { result := 23; }
+    if ((*buf)[off + 0] == 105 && (*buf)[off + 1] == 110 && (*buf)[off + 2] == 116 && (*buf)[off + 3] == 51 && (*buf)[off + 4] == 50) { result := 25; }
+    if ((*buf)[off + 0] == 105 && (*buf)[off + 1] == 110 && (*buf)[off + 2] == 116 && (*buf)[off + 3] == 54 && (*buf)[off + 4] == 52) { result := 26; }
+    if ((*buf)[off + 0] == 117 && (*buf)[off + 1] == 105 && (*buf)[off + 2] == 110 && (*buf)[off + 3] == 116 && (*buf)[off + 4] == 56) { result := 27; }
+  }
+  if (len == 6) {
+    if ((*buf)[off + 0] == 115 && (*buf)[off + 1] == 116 && (*buf)[off + 2] == 114 && (*buf)[off + 3] == 117 && (*buf)[off + 4] == 99 && (*buf)[off + 5] == 116) { result := 11; }
+    if ((*buf)[off + 0] == 101 && (*buf)[off + 1] == 120 && (*buf)[off + 2] == 116 && (*buf)[off + 3] == 101 && (*buf)[off + 4] == 114 && (*buf)[off + 5] == 110) { result := 12; }
+    if ((*buf)[off + 0] == 114 && (*buf)[off + 1] == 101 && (*buf)[off + 2] == 116 && (*buf)[off + 3] == 117 && (*buf)[off + 4] == 114 && (*buf)[off + 5] == 110) { result := 18; }
+    if ((*buf)[off + 0] == 117 && (*buf)[off + 1] == 105 && (*buf)[off + 2] == 110 && (*buf)[off + 3] == 116 && (*buf)[off + 4] == 49 && (*buf)[off + 5] == 54) { result := 28; }
+    if ((*buf)[off + 0] == 117 && (*buf)[off + 1] == 105 && (*buf)[off + 2] == 110 && (*buf)[off + 3] == 116 && (*buf)[off + 4] == 51 && (*buf)[off + 5] == 50) { result := 30; }
+    if ((*buf)[off + 0] == 117 && (*buf)[off + 1] == 105 && (*buf)[off + 2] == 110 && (*buf)[off + 3] == 116 && (*buf)[off + 4] == 54 && (*buf)[off + 5] == 52) { result := 31; }
+    if ((*buf)[off + 0] == 115 && (*buf)[off + 1] == 105 && (*buf)[off + 2] == 122 && (*buf)[off + 3] == 101 && (*buf)[off + 4] == 111 && (*buf)[off + 5] == 102) { result := 41; }
+  }
+  if (len == 7) {
+    if ((*buf)[off + 0] == 117 && (*buf)[off + 1] == 105 && (*buf)[off + 2] == 110 && (*buf)[off + 3] == 116 && (*buf)[off + 4] == 112 && (*buf)[off + 5] == 116 && (*buf)[off + 6] == 114) { result := 43; }
+  }
+  if (len == 8) {
+    if ((*buf)[off + 0] == 102 && (*buf)[off + 1] == 117 && (*buf)[off + 2] == 110 && (*buf)[off + 3] == 99 && (*buf)[off + 4] == 116 && (*buf)[off + 5] == 105 && (*buf)[off + 6] == 111 && (*buf)[off + 7] == 110) { result := 10; }
+    if ((*buf)[off + 0] == 118 && (*buf)[off + 1] == 101 && (*buf)[off + 2] == 114 && (*buf)[off + 3] == 105 && (*buf)[off + 4] == 102 && (*buf)[off + 5] == 105 && (*buf)[off + 6] == 101 && (*buf)[off + 7] == 100) { result := 37; }
+    if ((*buf)[off + 0] == 108 && (*buf)[off + 1] == 101 && (*buf)[off + 2] == 110 && (*buf)[off + 3] == 103 && (*buf)[off + 4] == 116 && (*buf)[off + 5] == 104 && (*buf)[off + 6] == 111 && (*buf)[off + 7] == 102) { result := 42; }
+  }
+  if (len == 9) {
+    if ((*buf)[off + 0] == 110 && (*buf)[off + 1] == 97 && (*buf)[off + 2] == 109 && (*buf)[off + 3] == 101 && (*buf)[off + 4] == 115 && (*buf)[off + 5] == 112 && (*buf)[off + 6] == 97 && (*buf)[off + 7] == 99 && (*buf)[off + 8] == 101) { result := 39; }
+  }
+  if (len == 10) {
+    if ((*buf)[off + 0] == 117 && (*buf)[off + 1] == 110 && (*buf)[off + 2] == 118 && (*buf)[off + 3] == 101 && (*buf)[off + 4] == 114 && (*buf)[off + 5] == 105 && (*buf)[off + 6] == 102 && (*buf)[off + 7] == 105 && (*buf)[off + 8] == 101 && (*buf)[off + 9] == 100) { result := 38; }
+  }
+
+  return result;
+}
+
+function lex_next(r: *SourceReader) : Token {
+  mut trivia : TriviaResult := skip_trivia(r);
+  mut tok_offset : uint64 := 0;
+  mut b : uint8 := 0;
+  mut num : NumberResult := NumberResult { had_error := false, error_at := 0 };
+  mut cl : CharLitResult := CharLitResult { had_error := false, err_kind := 0, error_at := 0 };
+  mut sl : StringLitResult := StringLitResult { had_error := false };
+  mut is_autoload : bool := false;
+  mut j : uint64 := 0;
+  mut next_b : uint8 := 0;
+
+  mut ext_first    : uint8[7] := {58, 61, 33, 60, 62, 38, 124};
+  mut ext_byte1    : uint8[7] := {61, 61, 61, 61, 61, 38, 124};
+  mut ext_kind1    : int32[7] := {70, 71, 72, 73, 74, 77, 78};
+  mut ext_byte2    : uint8[7] := {0, 0, 0, 60, 62, 0, 0};
+  mut ext_kind2    : int32[7] := {0, 0, 0, 75, 76, 0, 0};
+  mut ext_lone_kind : int32[7] := {50, 254, 79, 86, 87, 82, 89};
+
+  mut single_byte : uint8[16] := {59, 44, 46, 40, 41, 123, 125, 91, 93, 92, 45, 42, 47, 37, 43, 94};
+  mut single_kind : int32[16] := {51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 80, 81, 83, 84, 85, 88};
+
+  if (trivia.had_error) {
+    return Token { kind := 253, offset := trivia.comment_start, length := 0 };
+  }
+
+  if (trivia.found_slash_token) {
+    return Token { kind := 83, offset := trivia.slash_offset, length := 1 };
+  }
+
+  if (reader_is_eof(r)) {
+    return Token { kind := 0, offset := (*r).cursor, length := 0 };
+  }
+
+  tok_offset := (*r).cursor;
+  b := reader_peek(r);
+
+  if (is_alpha(b)) {
+    while (is_alnum(reader_peek(r))) {
+      reader_advance(r);
+    }
+    return Token {
+      kind := classify_word(r, tok_offset, (*r).cursor - tok_offset),
+      offset := tok_offset,
+      length := (*r).cursor - tok_offset
+    };
+  }
+
+  if (is_digit(b)) {
+    num := scan_number(r);
+    if (num.had_error) {
+      return Token { kind := 252, offset := num.error_at, length := 0 };
+    }
+    return Token { kind := 2, offset := tok_offset, length := (*r).cursor - tok_offset };
+  }
+
+  if (b == 39) {
+    cl := scan_char_literal(r);
+    if (cl.had_error) {
+      if (cl.err_kind == 1) {
+        return Token { kind := 251, offset := tok_offset, length := 0 };
+      }
+      if (cl.err_kind == 2) {
+        return Token { kind := 250, offset := tok_offset, length := 0 };
+      }
+      if (cl.err_kind == 3) {
+        return Token { kind := 249, offset := cl.error_at, length := 0 };
+      }
+      return Token { kind := 248, offset := tok_offset, length := 0 };
+    }
+    return Token { kind := 3, offset := tok_offset, length := (*r).cursor - tok_offset };
+  }
+
+  if (b == 34) {
+    sl := scan_string_literal(r);
+    if (sl.had_error) {
+      return Token { kind := 247, offset := tok_offset, length := 0 };
+    }
+    return Token { kind := 4, offset := tok_offset, length := (*r).cursor - tok_offset };
+  }
+
+  if (b == 64) {
+    is_autoload := false;
+    if (tok_offset + 9 <= (*r).length) {
+      if ((*(*r).buffer)[tok_offset + 1] == 97 && (*(*r).buffer)[tok_offset + 2] == 117 && (*(*r).buffer)[tok_offset + 3] == 116 && (*(*r).buffer)[tok_offset + 4] == 111 && (*(*r).buffer)[tok_offset + 5] == 108 && (*(*r).buffer)[tok_offset + 6] == 111 && (*(*r).buffer)[tok_offset + 7] == 97 && (*(*r).buffer)[tok_offset + 8] == 100) {
+        if (!(tok_offset + 9 < (*r).length && is_alnum((*(*r).buffer)[tok_offset + 9]))) {
+          is_autoload := true;
+        }
+      }
+    }
+    if (is_autoload) {
+      j := 0;
+      while (j < 9) {
+        reader_advance(r);
+        j := j + 1;
+      }
+      return Token { kind := 40, offset := tok_offset, length := 9 };
+    }
+    reader_advance(r);
+    return Token { kind := 254, offset := tok_offset, length := 1 };
+  }
+
+  j := 0;
+  while (j < 7) {
+    if (b == ext_first[j]) {
+      reader_advance(r);
+      next_b := reader_peek(r);
+      if (next_b == ext_byte1[j]) {
+        reader_advance(r);
+        return Token { kind := ext_kind1[j], offset := tok_offset, length := 2 };
+      }
+      if (ext_byte2[j] != 0 && next_b == ext_byte2[j]) {
+        reader_advance(r);
+        return Token { kind := ext_kind2[j], offset := tok_offset, length := 2 };
+      }
+      return Token { kind := ext_lone_kind[j], offset := tok_offset, length := 1 };
+    }
+    j := j + 1;
+  }
+
+  j := 0;
+  while (j < 16) {
+    if (b == single_byte[j]) {
+      reader_advance(r);
+      return Token { kind := single_kind[j], offset := tok_offset, length := 1 };
+    }
+    j := j + 1;
+  }
+
+  reader_advance(r);
+  return Token { kind := 254, offset := tok_offset, length := 1 };
+}
+
+// ---------------------------------------------------------------------
+// The AST: a pointer-linked ASTNode arena, per docs/postulate_stage1_
+// v1_0_6_edsger_design.md. `string_val`/`float_val` from that design
+// doc's own sketch are dropped here (a third small adjustment, on top
+// of its own two): every name/literal this module needs is already a
+// contiguous span of the original source at some token, reachable via
+// a node's own `tok` field -- no separate raw-text pointer is needed,
+// keeping "how do I get this node's text" uniform (always: slice `src`
+// at `tok.offset`/`tok.length`). `op_type` is `int32`, not `uint32` as
+// first sketched -- it always holds a lexer token-kind value, which is
+// `int32` throughout; keeping the field's type the same as what it
+// actually stores avoids the kind_to_u64-style bridge function
+// Stage1/src/parser.ptl needed for exactly this mismatch (v0 has no
+// implicit int32/uint32 conversion, SS2.8).
+// ---------------------------------------------------------------------
+
+struct ASTNode {
+  kind : uint32;
+  tok : Token;
+
+  first_child : *ASTNode;
+  next_sibling : *ASTNode;
+
+  data_type : *ASTNode;
+  is_mutable : bool;
+
+  int_val : int64;
+  op_type : int32;
+
+  left : *ASTNode;
+  right : *ASTNode;
+  extra : *ASTNode;
+
+  // Filled in by Module 3 (sema.ptl), never by this module -- always
+  // null/false out of alloc_node here. `symbol_ref` is `*ASTNode`, not
+  // `*Symbol` as first sketched: `Symbol` is a Module-3-only concept
+  // this file never defines, and pointing straight at the declaring
+  // node (STRUCT_DECL/FUNCTION_DECL/PARAM_DECL/DECL_STMT) is what
+  // codegen actually wants anyway.
+  symbol_ref : *ASTNode;
+  is_constant : bool;
+
+  // Also Module 3 only, always 0 out of alloc_node here. `data_type`'s
+  // tok offsets are only meaningful relative to ONE file's buffer, and
+  // once decoration walks through a struct field or a called function
+  // declared in a different file than the expression using it, that
+  // file is no longer necessarily the current one -- this is that
+  // type node's own "which buffer do its offsets mean" tag, the same
+  // role Sema's own `Symbol.file_idx` plays for a whole declaration.
+  type_file_idx : uint64;
+}
+
+// Node kinds. Grouped by hundreds purely for readability; the language
+// doesn't care. Field usage per kind (left/right/extra/first_child/
+// data_type/int_val/op_type/is_mutable/tok) is documented at each
+// parse function that builds that kind, and mirrored in dump_node.
+//
+// 100 PROGRAM        first_child = NAMESPACE_DECL, AUTOLOAD_DECL*, USE_DECL*, top_level_decl+ (source order)
+// 101 NAMESPACE_DECL first_child = PATH_SEGMENT chain (the fqn)
+// 102 PATH_SEGMENT   tok = identifier
+// 103 USE_DECL       int_val = 0 single/namespace-level, 1 group; first_child = fqn PATH_SEGMENT chain; right = alias PATH_SEGMENT (single form, nullable); extra = USE_ITEM chain (group form)
+// 104 USE_ITEM       tok = identifier; right = alias PATH_SEGMENT (nullable)
+// 105 AUTOLOAD_DECL  int_val = 0 default/1 verified/2 unverified; left = pattern STRING_LIT; right = path STRING_LIT
+// 110 STRUCT_DECL    tok = name; first_child = FIELD_DECL chain
+// 111 FIELD_DECL     tok = name; data_type = type node
+// 112 EXTERN_DECL    tok = name; first_child = PARAM_DECL chain; data_type = return type node
+// 113 FUNCTION_DECL  tok = name; first_child = PARAM_DECL chain; data_type = return type node; extra = BLOCK body
+// 114 PARAM_DECL     tok = name; data_type = type node
+// 120 TYPE_BASE      tok = base-type keyword or struct-name identifier
+// 121 TYPE_POINTER   left = inner type node
+// 122 TYPE_ARRAY     left = inner type node; int_val = size
+// 130 BLOCK          first_child = statement chain (func_block's decl* stmt* flattened into one source-order chain)
+// 131 IF_STMT        left = cond; right = then BLOCK; extra = else BLOCK or nested IF_STMT (nullable)
+// 132 WHILE_STMT     left = cond; right = body BLOCK
+// 133 RETURN_STMT    tok = `return` keyword; left = expr (nullable)
+// 134 DECL_STMT      tok = name; is_mutable = true for mut; data_type = type node; left = initializer expr (nullable)
+// 135 ASSIGN_STMT    first_child = ASSIGN_PAIR chain (SS4.2 simultaneous assignment, one pair even for an ordinary single assignment)
+// 136 EXPR_STMT      left = expr
+// 137 ASSIGN_PAIR    left = lvalue expr; right = rvalue expr
+// 140 IDENT_EXPR     tok = identifier
+// 141 INT_LIT        tok = int token; int_val = parsed value
+// 142 CHAR_LIT       tok = char token
+// 143 STRING_LIT     tok = string token
+// 144 BOOL_LIT       tok = true/false; int_val = 1/0
+// 145 NULL_LIT       tok = null
+// 146 BINARY_EXPR    op_type = operator kind; left/right = operands
+// 147 UNARY_EXPR     op_type = operator kind; left = operand
+// 148 CAST_EXPR      left = operand; data_type = target type node
+// 149 CALL_EXPR      left = callee expr; first_child = argument expr chain
+// 150 INDEX_EXPR     left = base; right = index expr
+// 151 FIELD_EXPR     left = base; tok = field name
+// 152 STRUCT_LIT     tok = struct name; first_child = FIELD_INIT chain
+// 153 ARRAY_LIT      tok = opening `{`; first_child = element expr chain
+// 154 FIELD_INIT     tok = field name; left = value expr
+// 155 SIZEOF_EXPR    tok = `sizeof`/`lengthof` keyword; left = operand expr (nullable) XOR extra = operand
+//                    type (nullable, set here by the parser); data_type
+//                    is NOT this node's own operand-type slot -- Module
+//                    3 fills it with the whole expression's OWN result
+//                    type (like every other node), so `extra` is where
+//                    the measured type actually still lives afterward
+// 156 LENGTHOF_EXPR  same as SIZEOF_EXPR
+
+struct Parser {
+  src : *(uint8[65536]);
+  src_len : uint64;
+
+  toks_kind : *(int32[20000]);
+  toks_offset : *(uint64[20000]);
+  toks_length : *(uint64[20000]);
+  tok_count : uint64;
+  tok_idx : uint64;
+
+  pool : *(ASTNode[50000]);
+  node_count : uint64;
+
+  had_error : bool;
+  err_tok_idx : uint64;
+
+  lex_error : bool;
+  lex_error_tok : Token;
+}
+
+function uint64_to_int64(n: uint64) : int64 {
+  mut result : int64 := 0;
+  mut steps : uint64 := n;
+  while (steps > 0) {
+    result := result + 1;
+    steps := steps - 1;
+  }
+  return result;
+}
+
+function byte_digit_value(b: uint8) : uint64 {
+  mut result : uint64 := 0;
+  if (b == 49) { result := 1; }
+  if (b == 50) { result := 2; }
+  if (b == 51) { result := 3; }
+  if (b == 52) { result := 4; }
+  if (b == 53) { result := 5; }
+  if (b == 54) { result := 6; }
+  if (b == 55) { result := 7; }
+  if (b == 56) { result := 8; }
+  if (b == 57) { result := 9; }
+  if (b == 97 || b == 65) { result := 10; }
+  if (b == 98 || b == 66) { result := 11; }
+  if (b == 99 || b == 67) { result := 12; }
+  if (b == 100 || b == 68) { result := 13; }
+  if (b == 101 || b == 69) { result := 14; }
+  if (b == 102 || b == 70) { result := 15; }
+  return result;
+}
+
+// decimal_form / based_form -> numeric value (same algorithm as
+// Stage1/src/parser.ptl's own compute_int_value): `10n11` is base 10,
+// digits "1","1" -> 1*10+1 -- an arbitrary-base integer literal, not
+// decimal-followed-by-garbage.
+function compute_int_value(src: *(uint8[65536]), offset: uint64, length: uint64) : uint64 {
+  mut i : uint64 := 0;
+  mut value : uint64 := 0;
+  mut looping : bool := true;
+  mut base : uint64 := 0;
+
+  while (looping) {
+    if (i >= length) {
+      looping := false;
+    } else {
+      if (is_digit((*src)[offset + i])) {
+        value := value * 10 + byte_digit_value((*src)[offset + i]);
+        i := i + 1;
+      } else {
+        looping := false;
+      }
+    }
+  }
+  if (i < length) {
+    if ((*src)[offset + i] == 110) {
+      base := value;
+      value := 0;
+      i := i + 1;
+      looping := true;
+      while (looping) {
+        if (i >= length) {
+          looping := false;
+        } else {
+          value := value * base + byte_digit_value((*src)[offset + i]);
+          i := i + 1;
+        }
+      }
+    }
+  }
+  return value;
+}
+
+// ---------------------------------------------------------------------
+// Parser-state helpers. `advance`/`fail` mutate `*p` in place -- no
+// PState/ParseResult threading needed the way Stage1/src/parser.ptl's
+// purely-functional index arena required, since a real pointer-based
+// arena and a real mutable context struct let every function just
+// mutate the shared state directly, exactly like the lexer's own
+// SourceReader already does.
+// ---------------------------------------------------------------------
+
+function cur_kind(p: *Parser) : int32 {
+  return (*(*p).toks_kind)[(*p).tok_idx];
+}
+
+function peek_kind(p: *Parser, ahead: uint64) : int32 {
+  mut i : uint64 := (*p).tok_idx + ahead;
+  if (i >= (*p).tok_count) {
+    return 0;
+  }
+  return (*(*p).toks_kind)[i];
+}
+
+function cur_tok(p: *Parser) : Token {
+  return Token {
+    kind := (*(*p).toks_kind)[(*p).tok_idx],
+    offset := (*(*p).toks_offset)[(*p).tok_idx],
+    length := (*(*p).toks_length)[(*p).tok_idx]
+  };
+}
+
+function advance(p: *Parser) : void {
+  if ((*p).tok_idx < (*p).tok_count) {
+    (*p).tok_idx := (*p).tok_idx + 1;
+  }
+}
+
+function fail(p: *Parser) : void {
+  if (!(*p).had_error) {
+    (*p).had_error := true;
+    (*p).err_tok_idx := (*p).tok_idx;
+  }
+}
+
+function expect(p: *Parser, kind: int32) : bool {
+  if (cur_kind(p) == kind) {
+    advance(p);
+    return true;
+  }
+  fail(p);
+  return false;
+}
+
+function mark(p: *Parser) : uint64 {
+  return (*p).tok_idx;
+}
+
+function reset_to(p: *Parser, idx: uint64) : void {
+  (*p).tok_idx := idx;
+  (*p).had_error := false;
+}
+
+function alloc_node(p: *Parser, kind: uint32) : *ASTNode {
+  mut n : *ASTNode := &(*(*p).pool)[(*p).node_count];
+  (*p).node_count := (*p).node_count + 1;
+  (*n).kind := kind;
+  (*n).tok := Token { kind := 0, offset := 0, length := 0 };
+  (*n).first_child := null;
+  (*n).next_sibling := null;
+  (*n).data_type := null;
+  (*n).is_mutable := false;
+  (*n).int_val := 0;
+  (*n).op_type := 0;
+  (*n).left := null;
+  (*n).right := null;
+  (*n).extra := null;
+  (*n).symbol_ref := null;
+  (*n).is_constant := false;
+  (*n).type_file_idx := 0;
+  return n;
+}
+
+// ---------------------------------------------------------------------
+// Types. Mirrors Stage1/src/parser.ptl's own PEG-style precedence
+// (postulate_v0_language_reference.md SS2.5) exactly, plus `*void`
+// (postulate_v1_language_reference.md SS2.6, terminal -- no `[N]`, no
+// further nesting), `uintptr` as an ordinary base_type keyword, and
+// chained `T[N][M]...` real nested-array declarations (postulate_v1_
+// language_reference.md SS2.7, new in v1 -- v0/Hoare's own type parser
+// only ever applies one `[N]` suffix per base type, confirmed against
+// Hoare/src/type_parser.asm directly; `int32[3][4]` there is a plain
+// syntax error, not a 3x4 array, despite an earlier draft of the v0
+// reference incorrectly claiming this already worked). `void` is
+// deliberately NOT in parse_base_type's own keyword range -- same
+// exclusion Stage1/src/parser.ptl already had -- so it can only be
+// reached through the `*void` special case here or through
+// parse_return_type's own direct check, matching the reference's
+// grammar-level restriction, not just a semantic one.
+// ---------------------------------------------------------------------
+
+function parse_base_type(p: *Parser) : *ASTNode {
+  mut k : int32 := cur_kind(p);
+  mut n : *ASTNode := null;
+  mut t : Token := cur_tok(p);
+
+  if ((k >= 22 && k <= 32) || k == 36 || k == 43) {
+    n := alloc_node(p, 120);
+    (*n).tok := t;
+    advance(p);
+    return n;
+  }
+  if (k == 1) {
+    n := alloc_node(p, 120);
+    (*n).tok := t;
+    advance(p);
+    return n;
+  }
+  fail(p);
+  return null;
+}
+
+// integer_literal only (not a general expr) -- the array-size position.
+function parse_array_size(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := null;
+  mut t : Token := cur_tok(p);
+
+  if (cur_kind(p) != 2) {
+    fail(p);
+    return null;
+  }
+  n := alloc_node(p, 141);
+  (*n).tok := t;
+  (*n).int_val := uint64_to_int64(compute_int_value((*p).src, t.offset, t.length));
+  advance(p);
+  return n;
+}
+
+function parse_type(p: *Parser) : *ASTNode {
+  mut save : uint64 := 0;
+  mut n : *ASTNode := null;
+  mut inner : *ASTNode := null;
+  mut base : *ASTNode := null;
+  mut size : *ASTNode := null;
+  mut ptr_node : *ASTNode := null;
+  mut void_base : *ASTNode := null;
+
+  if (cur_kind(p) == 81) {
+    if (peek_kind(p, 1) == 33) {
+      advance(p);
+      void_base := alloc_node(p, 120);
+      (*void_base).tok := cur_tok(p);
+      advance(p);
+      n := alloc_node(p, 121);
+      (*n).left := void_base;
+      return n;
+    }
+
+    save := mark(p);
+    advance(p);
+    base := parse_base_type(p);
+    if (!(*p).had_error && cur_kind(p) == 58) {
+      advance(p);
+      size := parse_array_size(p);
+      if (!(*p).had_error && cur_kind(p) == 59) {
+        advance(p);
+        ptr_node := alloc_node(p, 121);
+        (*ptr_node).left := base;
+        n := alloc_node(p, 122);
+        (*n).left := ptr_node;
+        (*n).int_val := (*size).int_val;
+        return n;
+      }
+    }
+    reset_to(p, save);
+    advance(p);
+    inner := parse_type(p);
+    if ((*p).had_error) {
+      return null;
+    }
+    n := alloc_node(p, 121);
+    (*n).left := inner;
+    return n;
+  }
+
+  if (cur_kind(p) == 54) {
+    advance(p);
+    inner := parse_type(p);
+    if ((*p).had_error) {
+      return null;
+    }
+    if (!expect(p, 55)) {
+      return null;
+    }
+    return inner;
+  }
+
+  base := parse_base_type(p);
+  if ((*p).had_error) {
+    return null;
+  }
+  return parse_array_suffixes(p, base);
+}
+
+// ("[" integer_literal "]")* -- new in v1 (see parse_type's own header
+// for why this needs its own loop rather than the single `if` v0's
+// actual grammar has): every bracket is collected in SOURCE order
+// first, then wrapped from the LAST one outward, so `int32[3][4]`
+// reads the familiar C way -- "3 elements, each an int32[4]" -- not
+// "4 elements, each an int32[3]".
+function parse_array_suffixes(p: *Parser, base: *ASTNode) : *ASTNode {
+  mut sizes : *ASTNode[8];
+  mut dim_count : uint64 := 0;
+  mut size : *ASTNode := null;
+  mut result : *ASTNode := base;
+  mut n : *ASTNode := null;
+  mut j : uint64 := 0;
+
+  while (cur_kind(p) == 58) {
+    advance(p);
+    size := parse_array_size(p);
+    if ((*p).had_error) {
+      return null;
+    }
+    if (!expect(p, 59)) {
+      return null;
+    }
+    sizes[dim_count] := size;
+    dim_count := dim_count + 1;
+  }
+
+  j := dim_count;
+  while (j > 0) {
+    j := j - 1;
+    n := alloc_node(p, 122);
+    (*n).left := result;
+    (*n).int_val := (*sizes[j]).int_val;
+    result := n;
+  }
+  return result;
+}
+
+// return_type ::= type | "void"
+function parse_return_type(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := null;
+
+  if (cur_kind(p) == 33) {
+    n := alloc_node(p, 120);
+    (*n).tok := cur_tok(p);
+    advance(p);
+    return n;
+  }
+  return parse_type(p);
+}
+
+// ---------------------------------------------------------------------
+// Expressions. Precedence (loosest to tightest), matching Stage1/src/
+// parser.ptl's own chain (postulate_v0_language_reference.md SS3.1)
+// exactly, with `as` (parse_cast) newly inserted between unary and
+// multiplicative: logic_or, logic_and, comparison (NOT chainable --
+// `a < b < c` is a syntax error, at most one comparison operator via a
+// single optional check, never a loop), bit_or, bit_xor, bit_and,
+// shift, additive, multiplicative, cast, unary, postfix, primary.
+// ---------------------------------------------------------------------
+
+// sizeof_expr/lengthof_expr ::= keyword "(" (type | expr) ")" --
+// disambiguated by trying `type` first (a bare identifier always
+// parses as a type here, since telling "a known struct name" from "a
+// variable name" needs a symbol table this module doesn't have --
+// Module 3's job to reinterpret an unresolved TYPE_BASE as a variable
+// reference if no such struct exists) and falling back to `expr` only
+// when `type` doesn't even parse.
+function parse_sizeof_or_lengthof(p: *Parser, node_kind: uint32) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, node_kind);
+  mut save : uint64 := 0;
+  mut ty : *ASTNode := null;
+  mut ex : *ASTNode := null;
+
+  (*n).tok := cur_tok(p);
+  advance(p);
+  if (!expect(p, 54)) { return null; }
+
+  save := mark(p);
+  ty := parse_type(p);
+  if (!(*p).had_error && cur_kind(p) == 55) {
+    (*n).extra := ty;
+    advance(p);
+    return n;
+  }
+
+  reset_to(p, save);
+  ex := parse_expr(p);
+  if ((*p).had_error) { return null; }
+  (*n).left := ex;
+  if (!expect(p, 55)) { return null; }
+  return n;
+}
+
+function parse_field_init(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := null;
+  mut t : Token := cur_tok(p);
+  mut val : *ASTNode := null;
+
+  if (cur_kind(p) != 1) { fail(p); return null; }
+  advance(p);
+  if (!expect(p, 70)) { return null; }
+  val := parse_expr(p);
+  if ((*p).had_error) { return null; }
+  n := alloc_node(p, 154);
+  (*n).tok := t;
+  (*n).left := val;
+  return n;
+}
+
+// struct_literal ::= identifier "{" field_init ("," field_init)* "}"
+function parse_struct_literal(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 152);
+  mut t : Token := cur_tok(p);
+  mut first : *ASTNode := null;
+  mut prev : *ASTNode := null;
+  mut item : *ASTNode := null;
+
+  (*n).tok := t;
+  advance(p);
+  advance(p);
+  first := parse_field_init(p);
+  if ((*p).had_error) { return null; }
+  (*n).first_child := first;
+  prev := first;
+  while (cur_kind(p) == 52) {
+    advance(p);
+    item := parse_field_init(p);
+    if ((*p).had_error) { return null; }
+    (*prev).next_sibling := item;
+    prev := item;
+  }
+  if (!expect(p, 57)) { return null; }
+  return n;
+}
+
+// array_literal ::= "{" expr ("," expr)* "}"
+function parse_array_literal(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 153);
+  mut first : *ASTNode := null;
+  mut prev : *ASTNode := null;
+  mut item : *ASTNode := null;
+
+  (*n).tok := cur_tok(p);
+  advance(p);
+  first := parse_expr(p);
+  if ((*p).had_error) { return null; }
+  (*n).first_child := first;
+  prev := first;
+  while (cur_kind(p) == 52) {
+    advance(p);
+    item := parse_expr(p);
+    if ((*p).had_error) { return null; }
+    (*prev).next_sibling := item;
+    prev := item;
+  }
+  if (!expect(p, 57)) { return null; }
+  return n;
+}
+
+// primary ::= int | char | string | true | false | null | sizeof_expr |
+//             lengthof_expr | struct_literal | identifier |
+//             array_literal | "(" expr ")"
+// `identifier "{"` (one token of lookahead) is a struct_literal, a
+// bare identifier otherwise -- same disambiguation Stage1/src/
+// parser.ptl already used.
+function parse_primary(p: *Parser) : *ASTNode {
+  mut k : int32 := cur_kind(p);
+  mut n : *ASTNode := null;
+  mut t : Token := cur_tok(p);
+  mut inner : *ASTNode := null;
+
+  if (k == 2) {
+    n := alloc_node(p, 141);
+    (*n).tok := t;
+    (*n).int_val := uint64_to_int64(compute_int_value((*p).src, t.offset, t.length));
+    advance(p);
+    return n;
+  }
+  if (k == 3) {
+    n := alloc_node(p, 142);
+    (*n).tok := t;
+    advance(p);
+    return n;
+  }
+  if (k == 4) {
+    n := alloc_node(p, 143);
+    (*n).tok := t;
+    advance(p);
+    return n;
+  }
+  if (k == 19) {
+    n := alloc_node(p, 144);
+    (*n).tok := t;
+    (*n).int_val := 1;
+    advance(p);
+    return n;
+  }
+  if (k == 20) {
+    n := alloc_node(p, 144);
+    (*n).tok := t;
+    (*n).int_val := 0;
+    advance(p);
+    return n;
+  }
+  if (k == 21) {
+    n := alloc_node(p, 145);
+    (*n).tok := t;
+    advance(p);
+    return n;
+  }
+  if (k == 41) {
+    return parse_sizeof_or_lengthof(p, 155);
+  }
+  if (k == 42) {
+    return parse_sizeof_or_lengthof(p, 156);
+  }
+  if (k == 1) {
+    if (peek_kind(p, 1) == 56) {
+      return parse_struct_literal(p);
+    }
+    n := alloc_node(p, 140);
+    (*n).tok := t;
+    advance(p);
+    return n;
+  }
+  if (k == 56) {
+    return parse_array_literal(p);
+  }
+  if (k == 54) {
+    advance(p);
+    inner := parse_expr(p);
+    if ((*p).had_error) { return null; }
+    if (!expect(p, 55)) { return null; }
+    return inner;
+  }
+  fail(p);
+  return null;
+}
+
+// postfix ::= primary ("[" expr "]" | "." identifier | "(" arg_list? ")")*
+function parse_postfix(p: *Parser) : *ASTNode {
+  mut node : *ASTNode := parse_primary(p);
+  mut looping : bool := true;
+  mut k : int32 := 0;
+  mut idx : *ASTNode := null;
+  mut n : *ASTNode := null;
+  mut t : Token := Token { kind := 0, offset := 0, length := 0 };
+  mut first : *ASTNode := null;
+  mut prev : *ASTNode := null;
+  mut arg : *ASTNode := null;
+
+  if ((*p).had_error) { return null; }
+
+  looping := true;
+  while (looping) {
+    k := cur_kind(p);
+    if (k == 58) {
+      advance(p);
+      idx := parse_expr(p);
+      if ((*p).had_error) { return null; }
+      if (!expect(p, 59)) { return null; }
+      n := alloc_node(p, 150);
+      (*n).left := node;
+      (*n).right := idx;
+      node := n;
+    } else {
+    if (k == 53) {
+      advance(p);
+      if (cur_kind(p) != 1) { fail(p); return null; }
+      t := cur_tok(p);
+      advance(p);
+      n := alloc_node(p, 151);
+      (*n).left := node;
+      (*n).tok := t;
+      node := n;
+    } else {
+    if (k == 54) {
+      advance(p);
+      n := alloc_node(p, 149);
+      (*n).left := node;
+      if (cur_kind(p) != 55) {
+        first := parse_expr(p);
+        if ((*p).had_error) { return null; }
+        (*n).first_child := first;
+        prev := first;
+        while (cur_kind(p) == 52) {
+          advance(p);
+          arg := parse_expr(p);
+          if ((*p).had_error) { return null; }
+          (*prev).next_sibling := arg;
+          prev := arg;
+        }
+      }
+      if (!expect(p, 55)) { return null; }
+      node := n;
+    } else {
+      looping := false;
+    }}}
+  }
+  return node;
+}
+
+// unary ::= ("!" | "-" | "*" | "&") unary | postfix
+function parse_unary(p: *Parser) : *ASTNode {
+  mut k : int32 := cur_kind(p);
+  mut n : *ASTNode := null;
+  mut inner : *ASTNode := null;
+
+  if (k == 79 || k == 80 || k == 81 || k == 82) {
+    advance(p);
+    inner := parse_unary(p);
+    if ((*p).had_error) { return null; }
+    n := alloc_node(p, 147);
+    (*n).op_type := k;
+    (*n).left := inner;
+    return n;
+  }
+  return parse_postfix(p);
+}
+
+// cast ::= unary ("as" type)* -- new in v1.0.6 (postulate_v1_language_
+// reference.md SS3.7a). Binds tighter than every binary operator but
+// looser than unary/postfix: `-x as int32` is `(-x) as int32`, and
+// `x as int32 + 1` is `(x as int32) + 1`.
+function parse_cast(p: *Parser) : *ASTNode {
+  mut node : *ASTNode := parse_unary(p);
+  mut n : *ASTNode := null;
+  mut ty : *ASTNode := null;
+
+  if ((*p).had_error) { return null; }
+  while (cur_kind(p) == 34) {
+    advance(p);
+    ty := parse_type(p);
+    if ((*p).had_error) { return null; }
+    n := alloc_node(p, 148);
+    (*n).left := node;
+    (*n).data_type := ty;
+    node := n;
+  }
+  return node;
+}
+
+function parse_multiplicative(p: *Parser) : *ASTNode {
+  mut node : *ASTNode := parse_cast(p);
+  mut k : int32 := 0;
+  mut n : *ASTNode := null;
+  mut rhs : *ASTNode := null;
+
+  if ((*p).had_error) { return null; }
+  k := cur_kind(p);
+  while (k == 81 || k == 83 || k == 84) {
+    advance(p);
+    rhs := parse_cast(p);
+    if ((*p).had_error) { return null; }
+    n := alloc_node(p, 146);
+    (*n).op_type := k;
+    (*n).left := node;
+    (*n).right := rhs;
+    node := n;
+    k := cur_kind(p);
+  }
+  return node;
+}
+
+function parse_additive(p: *Parser) : *ASTNode {
+  mut node : *ASTNode := parse_multiplicative(p);
+  mut k : int32 := 0;
+  mut n : *ASTNode := null;
+  mut rhs : *ASTNode := null;
+
+  if ((*p).had_error) { return null; }
+  k := cur_kind(p);
+  while (k == 85 || k == 80) {
+    advance(p);
+    rhs := parse_multiplicative(p);
+    if ((*p).had_error) { return null; }
+    n := alloc_node(p, 146);
+    (*n).op_type := k;
+    (*n).left := node;
+    (*n).right := rhs;
+    node := n;
+    k := cur_kind(p);
+  }
+  return node;
+}
+
+function parse_shift(p: *Parser) : *ASTNode {
+  mut node : *ASTNode := parse_additive(p);
+  mut k : int32 := 0;
+  mut n : *ASTNode := null;
+  mut rhs : *ASTNode := null;
+
+  if ((*p).had_error) { return null; }
+  k := cur_kind(p);
+  while (k == 75 || k == 76) {
+    advance(p);
+    rhs := parse_additive(p);
+    if ((*p).had_error) { return null; }
+    n := alloc_node(p, 146);
+    (*n).op_type := k;
+    (*n).left := node;
+    (*n).right := rhs;
+    node := n;
+    k := cur_kind(p);
+  }
+  return node;
+}
+
+function parse_bit_and(p: *Parser) : *ASTNode {
+  mut node : *ASTNode := parse_shift(p);
+  mut n : *ASTNode := null;
+  mut rhs : *ASTNode := null;
+
+  if ((*p).had_error) { return null; }
+  while (cur_kind(p) == 82) {
+    advance(p);
+    rhs := parse_shift(p);
+    if ((*p).had_error) { return null; }
+    n := alloc_node(p, 146);
+    (*n).op_type := 82;
+    (*n).left := node;
+    (*n).right := rhs;
+    node := n;
+  }
+  return node;
+}
+
+function parse_bit_xor(p: *Parser) : *ASTNode {
+  mut node : *ASTNode := parse_bit_and(p);
+  mut n : *ASTNode := null;
+  mut rhs : *ASTNode := null;
+
+  if ((*p).had_error) { return null; }
+  while (cur_kind(p) == 88) {
+    advance(p);
+    rhs := parse_bit_and(p);
+    if ((*p).had_error) { return null; }
+    n := alloc_node(p, 146);
+    (*n).op_type := 88;
+    (*n).left := node;
+    (*n).right := rhs;
+    node := n;
+  }
+  return node;
+}
+
+function parse_bit_or(p: *Parser) : *ASTNode {
+  mut node : *ASTNode := parse_bit_xor(p);
+  mut n : *ASTNode := null;
+  mut rhs : *ASTNode := null;
+
+  if ((*p).had_error) { return null; }
+  while (cur_kind(p) == 89) {
+    advance(p);
+    rhs := parse_bit_xor(p);
+    if ((*p).had_error) { return null; }
+    n := alloc_node(p, 146);
+    (*n).op_type := 89;
+    (*n).left := node;
+    (*n).right := rhs;
+    node := n;
+  }
+  return node;
+}
+
+// comparison is NOT chainable (postulate_v0_language_reference.md
+// SS3.1) -- at most one comparison operator, via a single optional
+// check, never a loop.
+function parse_comparison(p: *Parser) : *ASTNode {
+  mut node : *ASTNode := parse_bit_or(p);
+  mut k : int32 := 0;
+  mut n : *ASTNode := null;
+  mut rhs : *ASTNode := null;
+
+  if ((*p).had_error) { return null; }
+  k := cur_kind(p);
+  if (k == 71 || k == 72 || k == 73 || k == 74 || k == 86 || k == 87) {
+    advance(p);
+    rhs := parse_bit_or(p);
+    if ((*p).had_error) { return null; }
+    n := alloc_node(p, 146);
+    (*n).op_type := k;
+    (*n).left := node;
+    (*n).right := rhs;
+    node := n;
+  }
+  return node;
+}
+
+function parse_logic_and(p: *Parser) : *ASTNode {
+  mut node : *ASTNode := parse_comparison(p);
+  mut n : *ASTNode := null;
+  mut rhs : *ASTNode := null;
+
+  if ((*p).had_error) { return null; }
+  while (cur_kind(p) == 77) {
+    advance(p);
+    rhs := parse_comparison(p);
+    if ((*p).had_error) { return null; }
+    n := alloc_node(p, 146);
+    (*n).op_type := 77;
+    (*n).left := node;
+    (*n).right := rhs;
+    node := n;
+  }
+  return node;
+}
+
+function parse_logic_or(p: *Parser) : *ASTNode {
+  mut node : *ASTNode := parse_logic_and(p);
+  mut n : *ASTNode := null;
+  mut rhs : *ASTNode := null;
+
+  if ((*p).had_error) { return null; }
+  while (cur_kind(p) == 78) {
+    advance(p);
+    rhs := parse_logic_and(p);
+    if ((*p).had_error) { return null; }
+    n := alloc_node(p, 146);
+    (*n).op_type := 78;
+    (*n).left := node;
+    (*n).right := rhs;
+    node := n;
+  }
+  return node;
+}
+
+function parse_expr(p: *Parser) : *ASTNode {
+  return parse_logic_or(p);
+}
+
+// ---------------------------------------------------------------------
+// Statements, declarations, blocks (postulate_v0_language_reference.md
+// SS4). Assignment targets are parsed as ordinary `parse_expr`, over-
+// permissively (accepting shapes like a bare literal on the left of
+// `:=`) -- matching Stage1/src/parser.ptl's own established choice,
+// which its own comment there explains: the grammar is deliberately
+// more permissive than the semantics; rejecting a non-lvalue target is
+// Module 3's job, since this module has no checker phase at all.
+// ---------------------------------------------------------------------
+
+// assign_pair ::= lvalue ":=" expr -- `lv` already parsed by the caller.
+function parse_assign_pair_from(p: *Parser, lv: *ASTNode) : *ASTNode {
+  mut rv : *ASTNode := null;
+  mut n : *ASTNode := null;
+
+  advance(p);
+  rv := parse_expr(p);
+  if ((*p).had_error) { return null; }
+  n := alloc_node(p, 137);
+  (*n).left := lv;
+  (*n).right := rv;
+  return n;
+}
+
+function parse_assign_pair(p: *Parser) : *ASTNode {
+  mut lv : *ASTNode := parse_expr(p);
+  if ((*p).had_error) { return null; }
+  if (cur_kind(p) != 70) { fail(p); return null; }
+  return parse_assign_pair_from(p, lv);
+}
+
+// stmt ::= assign_stmt | if_stmt | while_stmt | return_stmt | expr_stmt
+// assign_stmt ::= assign_pair ("," assign_pair)* ";" -- "simultaneous
+// assignment" (SS4.2): every pair here hangs off ASSIGN_STMT's own
+// first_child chain, distinct from BLOCK's next_sibling statement
+// chain, so a multi-pair `a := b, b := a;` is unambiguous from "two
+// separate statements."
+function parse_stmt(p: *Parser) : *ASTNode {
+  mut k : int32 := cur_kind(p);
+  mut first : *ASTNode := null;
+  mut n : *ASTNode := null;
+  mut pair1 : *ASTNode := null;
+  mut prev : *ASTNode := null;
+  mut item : *ASTNode := null;
+
+  if (k == 15) { return parse_if_stmt(p); }
+  if (k == 17) { return parse_while_stmt(p); }
+  if (k == 18) { return parse_return_stmt(p); }
+
+  first := parse_expr(p);
+  if ((*p).had_error) { return null; }
+
+  if (cur_kind(p) == 70) {
+    n := alloc_node(p, 135);
+    pair1 := parse_assign_pair_from(p, first);
+    if ((*p).had_error) { return null; }
+    (*n).first_child := pair1;
+    prev := pair1;
+    while (cur_kind(p) == 52) {
+      advance(p);
+      item := parse_assign_pair(p);
+      if ((*p).had_error) { return null; }
+      (*prev).next_sibling := item;
+      prev := item;
+    }
+    if (!expect(p, 51)) { return null; }
+    return n;
+  }
+
+  if (!expect(p, 51)) { return null; }
+  n := alloc_node(p, 136);
+  (*n).left := first;
+  return n;
+}
+
+function parse_if_stmt(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 131);
+  mut cond : *ASTNode := null;
+  mut then_b : *ASTNode := null;
+  mut else_b : *ASTNode := null;
+
+  advance(p);
+  if (!expect(p, 54)) { return null; }
+  cond := parse_expr(p);
+  if ((*p).had_error) { return null; }
+  if (!expect(p, 55)) { return null; }
+  then_b := parse_block(p);
+  if ((*p).had_error) { return null; }
+  (*n).left := cond;
+  (*n).right := then_b;
+  if (cur_kind(p) == 16) {
+    advance(p);
+    else_b := parse_block(p);
+    if ((*p).had_error) { return null; }
+    (*n).extra := else_b;
+  }
+  return n;
+}
+
+function parse_while_stmt(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 132);
+  mut cond : *ASTNode := null;
+  mut body : *ASTNode := null;
+
+  advance(p);
+  if (!expect(p, 54)) { return null; }
+  cond := parse_expr(p);
+  if ((*p).had_error) { return null; }
+  if (!expect(p, 55)) { return null; }
+  body := parse_block(p);
+  if ((*p).had_error) { return null; }
+  (*n).left := cond;
+  (*n).right := body;
+  return n;
+}
+
+function parse_return_stmt(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 133);
+  mut e : *ASTNode := null;
+
+  (*n).tok := cur_tok(p);
+  advance(p);
+  if (cur_kind(p) == 51) {
+    advance(p);
+    return n;
+  }
+  e := parse_expr(p);
+  if ((*p).had_error) { return null; }
+  if (!expect(p, 51)) { return null; }
+  (*n).left := e;
+  return n;
+}
+
+// block ::= "{" stmt* "}" -- no decls (see parse_func_block for the
+// func-body-only decl* stmt* shape, SS4.1).
+function parse_block(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 130);
+  mut prev : *ASTNode := null;
+  mut s : *ASTNode := null;
+
+  if (!expect(p, 56)) { return null; }
+  while (cur_kind(p) != 57) {
+    if (cur_kind(p) == 0) { fail(p); return null; }
+    s := parse_stmt(p);
+    if ((*p).had_error) { return null; }
+    if (prev == null) {
+      (*n).first_child := s;
+    } else {
+      (*prev).next_sibling := s;
+    }
+    prev := s;
+  }
+  advance(p);
+  return n;
+}
+
+// decl ::= ("mut" | "const") identifier ":" type (":=" expr)? ";"
+function parse_decl_stmt(p: *Parser) : *ASTNode {
+  mut is_mut : bool := cur_kind(p) == 13;
+  mut t : Token := Token { kind := 0, offset := 0, length := 0 };
+  mut ty : *ASTNode := null;
+  mut init : *ASTNode := null;
+  mut n : *ASTNode := null;
+
+  advance(p);
+  if (cur_kind(p) != 1) { fail(p); return null; }
+  t := cur_tok(p);
+  advance(p);
+  if (!expect(p, 50)) { return null; }
+  ty := parse_type(p);
+  if ((*p).had_error) { return null; }
+  n := alloc_node(p, 134);
+  (*n).tok := t;
+  (*n).is_mutable := is_mut;
+  (*n).data_type := ty;
+  if (cur_kind(p) == 70) {
+    advance(p);
+    init := parse_expr(p);
+    if ((*p).had_error) { return null; }
+    (*n).left := init;
+  }
+  if (!expect(p, 51)) { return null; }
+  return n;
+}
+
+// func_block ::= "{" decl* stmt* "}" -- decls only ever come first
+// (grammar-enforced, SS4.1): parse decl* while the current token is
+// "mut"/"const", falling through to stmt* the moment neither matches.
+// Both halves land in the same source-order BLOCK.first_child chain --
+// nothing downstream needs to tell "was this a decl or a statement"
+// apart from the node's own kind.
+function parse_func_block(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 130);
+  mut prev : *ASTNode := null;
+  mut d : *ASTNode := null;
+  mut s : *ASTNode := null;
+  mut k : int32 := 0;
+
+  if (!expect(p, 56)) { return null; }
+  k := cur_kind(p);
+  while (k == 13 || k == 14) {
+    d := parse_decl_stmt(p);
+    if ((*p).had_error) { return null; }
+    if (prev == null) {
+      (*n).first_child := d;
+    } else {
+      (*prev).next_sibling := d;
+    }
+    prev := d;
+    k := cur_kind(p);
+  }
+  while (cur_kind(p) != 57) {
+    if (cur_kind(p) == 0) { fail(p); return null; }
+    s := parse_stmt(p);
+    if ((*p).had_error) { return null; }
+    if (prev == null) {
+      (*n).first_child := s;
+    } else {
+      (*prev).next_sibling := s;
+    }
+    prev := s;
+  }
+  advance(p);
+  return n;
+}
+
+// ---------------------------------------------------------------------
+// Top-level declarations (postulate_v0_language_reference.md SS9-SS10,
+// unchanged from v0 apart from dropping the bodyless-function form --
+// SS5.2/SS6.1 of the v1 reference -- which Stage1/src/parser.ptl never
+// had to begin with, so there is nothing to remove here either).
+// ---------------------------------------------------------------------
+
+function parse_param(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := null;
+  mut t : Token := cur_tok(p);
+  mut ty : *ASTNode := null;
+
+  if (cur_kind(p) != 1) { fail(p); return null; }
+  advance(p);
+  if (!expect(p, 50)) { return null; }
+  ty := parse_type(p);
+  if ((*p).had_error) { return null; }
+  n := alloc_node(p, 114);
+  (*n).tok := t;
+  (*n).data_type := ty;
+  return n;
+}
+
+// params ::= (param ("," param)*)? -- optional: an empty list (no
+// leading identifier) is success, not a parse error.
+function parse_params_into(p: *Parser, container: *ASTNode) : void {
+  mut first : *ASTNode := null;
+  mut prev : *ASTNode := null;
+  mut item : *ASTNode := null;
+
+  if (cur_kind(p) != 1) { return; }
+  first := parse_param(p);
+  if ((*p).had_error) { return; }
+  (*container).first_child := first;
+  prev := first;
+  while (cur_kind(p) == 52) {
+    advance(p);
+    item := parse_param(p);
+    if ((*p).had_error) { return; }
+    (*prev).next_sibling := item;
+    prev := item;
+  }
+}
+
+function parse_field_decl(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := null;
+  mut t : Token := cur_tok(p);
+  mut ty : *ASTNode := null;
+
+  if (cur_kind(p) != 1) { fail(p); return null; }
+  advance(p);
+  if (!expect(p, 50)) { return null; }
+  ty := parse_type(p);
+  if ((*p).had_error) { return null; }
+  if (!expect(p, 51)) { return null; }
+  n := alloc_node(p, 111);
+  (*n).tok := t;
+  (*n).data_type := ty;
+  return n;
+}
+
+function parse_struct_decl(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 110);
+  mut prev : *ASTNode := null;
+  mut f : *ASTNode := null;
+
+  advance(p);
+  if (cur_kind(p) != 1) { fail(p); return null; }
+  (*n).tok := cur_tok(p);
+  advance(p);
+  if (!expect(p, 56)) { return null; }
+  while (cur_kind(p) != 57) {
+    if (cur_kind(p) == 0) { fail(p); return null; }
+    f := parse_field_decl(p);
+    if ((*p).had_error) { return null; }
+    if (prev == null) {
+      (*n).first_child := f;
+    } else {
+      (*prev).next_sibling := f;
+    }
+    prev := f;
+  }
+  advance(p);
+  return n;
+}
+
+function parse_extern_decl(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 112);
+  mut rt : *ASTNode := null;
+
+  advance(p);
+  if (!expect(p, 10)) { return null; }
+  if (cur_kind(p) != 1) { fail(p); return null; }
+  (*n).tok := cur_tok(p);
+  advance(p);
+  if (!expect(p, 54)) { return null; }
+  parse_params_into(p, n);
+  if ((*p).had_error) { return null; }
+  if (!expect(p, 55)) { return null; }
+  if (!expect(p, 50)) { return null; }
+  rt := parse_return_type(p);
+  if ((*p).had_error) { return null; }
+  (*n).data_type := rt;
+  if (!expect(p, 51)) { return null; }
+  return n;
+}
+
+function parse_function(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 113);
+  mut rt : *ASTNode := null;
+  mut body : *ASTNode := null;
+
+  advance(p);
+  if (cur_kind(p) != 1) { fail(p); return null; }
+  (*n).tok := cur_tok(p);
+  advance(p);
+  if (!expect(p, 54)) { return null; }
+  parse_params_into(p, n);
+  if ((*p).had_error) { return null; }
+  if (!expect(p, 55)) { return null; }
+  if (!expect(p, 50)) { return null; }
+  rt := parse_return_type(p);
+  if ((*p).had_error) { return null; }
+  (*n).data_type := rt;
+  body := parse_func_block(p);
+  if ((*p).had_error) { return null; }
+  (*n).extra := body;
+  return n;
+}
+
+// ---------------------------------------------------------------------
+// Namespaces / use / @autoload -- new in v1.0.6 (postulate_v1_language_
+// reference.md SS6.1/SS6.2/SS6.2a/SS6.2b), replacing the retired
+// #include entirely.
+// ---------------------------------------------------------------------
+
+// fqn ::= "\" identifier ("\" identifier)*
+function parse_fqn_into(p: *Parser, container: *ASTNode) : void {
+  mut first : *ASTNode := null;
+  mut prev : *ASTNode := null;
+  mut seg : *ASTNode := null;
+
+  if (!expect(p, 60)) { return; }
+  if (cur_kind(p) != 1) { fail(p); return; }
+  seg := alloc_node(p, 102);
+  (*seg).tok := cur_tok(p);
+  advance(p);
+  first := seg;
+  prev := seg;
+  (*container).first_child := first;
+
+  while (cur_kind(p) == 60 && peek_kind(p, 1) == 1) {
+    advance(p);
+    seg := alloc_node(p, 102);
+    (*seg).tok := cur_tok(p);
+    advance(p);
+    (*prev).next_sibling := seg;
+    prev := seg;
+  }
+}
+
+function parse_namespace_decl(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 101);
+
+  if (!expect(p, 39)) { return null; }
+  parse_fqn_into(p, n);
+  if ((*p).had_error) { return null; }
+  if (!expect(p, 51)) { return null; }
+  return n;
+}
+
+// use_spec ::= identifier ("as" identifier)?
+function parse_use_item(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := null;
+  mut alias : *ASTNode := null;
+
+  if (cur_kind(p) != 1) { fail(p); return null; }
+  n := alloc_node(p, 104);
+  (*n).tok := cur_tok(p);
+  advance(p);
+  if (cur_kind(p) == 34) {
+    advance(p);
+    if (cur_kind(p) != 1) { fail(p); return null; }
+    alias := alloc_node(p, 102);
+    (*alias).tok := cur_tok(p);
+    advance(p);
+    (*n).right := alias;
+  }
+  return n;
+}
+
+// use_decl   ::= "use" (fqn_group | fqn_single) ";"
+// fqn_single ::= fqn ("as" identifier)?
+// fqn_group  ::= fqn "\" "{" use_spec ("," use_spec)* "}"
+// The single-import and namespace-level-import forms (SS6.2a) share
+// this exact grammar -- which one a given `use` turns out to be is a
+// Module 3 question (does the fqn resolve to a specific declaration or
+// to a namespace?), not something this module can or needs to tell
+// apart.
+function parse_use_decl(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 103);
+  mut alias : *ASTNode := null;
+  mut first : *ASTNode := null;
+  mut prev : *ASTNode := null;
+  mut item : *ASTNode := null;
+
+  advance(p);
+  parse_fqn_into(p, n);
+  if ((*p).had_error) { return null; }
+
+  if (cur_kind(p) == 60 && peek_kind(p, 1) == 56) {
+    advance(p);
+    advance(p);
+    (*n).int_val := 1;
+    first := parse_use_item(p);
+    if ((*p).had_error) { return null; }
+    (*n).extra := first;
+    prev := first;
+    while (cur_kind(p) == 52) {
+      advance(p);
+      item := parse_use_item(p);
+      if ((*p).had_error) { return null; }
+      (*prev).next_sibling := item;
+      prev := item;
+    }
+    if (!expect(p, 57)) { return null; }
+  } else {
+    if (cur_kind(p) == 34) {
+      advance(p);
+      if (cur_kind(p) != 1) { fail(p); return null; }
+      alias := alloc_node(p, 102);
+      (*alias).tok := cur_tok(p);
+      advance(p);
+      (*n).right := alias;
+    }
+  }
+  if (!expect(p, 51)) { return null; }
+  return n;
+}
+
+// autoload_decl ::= "@autoload" "(" pattern_string "," path_string
+//                    ("," verify_flag)? ")" ";"
+// pattern_string/path_string content-restriction (path_char |
+// :placeholder, SS6.2b) is a Module 3 concern, not checked here --
+// same "grammar more permissive than semantics" precedent as the
+// assignment-target/sizeof-argument cases above.
+function parse_autoload_decl(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 105);
+  mut pat : *ASTNode := null;
+  mut pth : *ASTNode := null;
+
+  advance(p);
+  if (!expect(p, 54)) { return null; }
+  if (cur_kind(p) != 4) { fail(p); return null; }
+  pat := alloc_node(p, 143);
+  (*pat).tok := cur_tok(p);
+  advance(p);
+  (*n).left := pat;
+  if (!expect(p, 52)) { return null; }
+  if (cur_kind(p) != 4) { fail(p); return null; }
+  pth := alloc_node(p, 143);
+  (*pth).tok := cur_tok(p);
+  advance(p);
+  (*n).right := pth;
+  if (cur_kind(p) == 52) {
+    advance(p);
+    if (cur_kind(p) == 37) {
+      (*n).int_val := 1;
+      advance(p);
+    } else {
+      if (cur_kind(p) == 38) {
+        (*n).int_val := 2;
+        advance(p);
+      } else {
+        fail(p);
+        return null;
+      }
+    }
+  }
+  if (!expect(p, 55)) { return null; }
+  if (!expect(p, 51)) { return null; }
+  return n;
+}
+
+// program ::= namespace_decl autoload_decl* use_decl* top_level_decl+
+// (SS6.1) -- a real, grammar-enforced order, not a semantic convention:
+// exactly one namespace_decl, then every @autoload, then every use,
+// then at least one struct/extern/function, until EOF.
+function parse_program(p: *Parser) : *ASTNode {
+  mut n : *ASTNode := alloc_node(p, 100);
+  mut ns : *ASTNode := null;
+  mut prev : *ASTNode := null;
+  mut item : *ASTNode := null;
+  mut k : int32 := 0;
+  mut count : uint64 := 0;
+
+  ns := parse_namespace_decl(p);
+  if ((*p).had_error) { return null; }
+  (*n).first_child := ns;
+  prev := ns;
+
+  while (cur_kind(p) == 40) {
+    item := parse_autoload_decl(p);
+    if ((*p).had_error) { return null; }
+    (*prev).next_sibling := item;
+    prev := item;
+  }
+
+  while (cur_kind(p) == 35) {
+    item := parse_use_decl(p);
+    if ((*p).had_error) { return null; }
+    (*prev).next_sibling := item;
+    prev := item;
+  }
+
+  k := cur_kind(p);
+  while (k == 10 || k == 11 || k == 12) {
+    if (k == 10) {
+      item := parse_function(p);
+    } else {
+      if (k == 11) {
+        item := parse_struct_decl(p);
+      } else {
+        item := parse_extern_decl(p);
+      }
+    }
+    if ((*p).had_error) { return null; }
+    (*prev).next_sibling := item;
+    prev := item;
+    count := count + 1;
+    k := cur_kind(p);
+  }
+
+  if (count == 0) { fail(p); return null; }
+  if (cur_kind(p) != 0) { fail(p); return null; }
+  return n;
+}
+
+// ---------------------------------------------------------------------
+// Tokenizing (upfront, into the Parser's own arrays -- see the file
+// header) and I/O/dump helpers.
+// ---------------------------------------------------------------------
+
+function tokenize_all(p: *Parser) : void {
+  mut r : SourceReader := SourceReader { buffer := (*p).src, length := (*p).src_len, cursor := 0 };
+  mut looping : bool := true;
+  mut t : Token := Token { kind := 0, offset := 0, length := 0 };
+
+  while (looping) {
+    t := lex_next(&r);
+    (*(*p).toks_kind)[(*p).tok_count] := t.kind;
+    (*(*p).toks_offset)[(*p).tok_count] := t.offset;
+    (*(*p).toks_length)[(*p).tok_count] := t.length;
+    (*p).tok_count := (*p).tok_count + 1;
+    if (t.kind == 0) {
+      looping := false;
+    } else {
+      if (t.kind >= 247 && t.kind <= 254) {
+        (*p).lex_error := true;
+        (*p).lex_error_tok := t;
+        looping := false;
+      }
+    }
+  }
+}
+
+function int64_to_uint64(n: int64) : uint64 {
+  mut result : uint64 := 0;
+  mut steps : int64 := n;
+  while (steps > 0) {
+    result := result + 1;
+    steps := steps - 1;
+  }
+  return result;
+}
+
+function int32_to_uint64(n: int32) : uint64 {
+  mut result : uint64 := 0;
+  mut steps : int32 := n;
+  while (steps > 0) {
+    result := result + 1;
+    steps := steps - 1;
+  }
+  return result;
+}
+
+function uint32_to_uint64(n: uint32) : uint64 {
+  mut result : uint64 := 0;
+  mut steps : uint32 := n;
+  while (steps > 0) {
+    result := result + 1;
+    steps := steps - 1;
+  }
+  return result;
+}
+
+function digit_to_ascii(d: uint64) : uint8 {
+  mut result : uint8 := 48;
+  if (d == 1) { result := 49; }
+  if (d == 2) { result := 50; }
+  if (d == 3) { result := 51; }
+  if (d == 4) { result := 52; }
+  if (d == 5) { result := 53; }
+  if (d == 6) { result := 54; }
+  if (d == 7) { result := 55; }
+  if (d == 8) { result := 56; }
+  if (d == 9) { result := 57; }
+  return result;
+}
+
+function append_byte(out: *(uint8[524288]), pos: uint64, b: uint8) : uint64 {
+  (*out)[pos] := b;
+  return pos + 1;
+}
+
+function append_slice(out: *(uint8[524288]), pos: uint64, src: *(uint8[65536]), off: uint64, ln: uint64) : uint64 {
+  mut i : uint64 := 0;
+  mut new_pos : uint64 := pos;
+  while (i < ln) {
+    (*out)[new_pos] := (*src)[off + i];
+    new_pos := new_pos + 1;
+    i := i + 1;
+  }
+  return new_pos;
+}
+
+function append_uint(out: *(uint8[524288]), pos: uint64, value: uint64) : uint64 {
+  mut digits : uint8[24] := 0;
+  mut count : uint64 := 0;
+  mut v : uint64 := value;
+  mut new_pos : uint64 := pos;
+  mut d : uint64 := 0;
+  mut i : uint64 := 0;
+
+  if (v == 0) {
+    digits[0] := 48;
+    count := 1;
+  } else {
+    while (v > 0) {
+      d := v % 10;
+      digits[count] := digit_to_ascii(d);
+      count := count + 1;
+      v := v / 10;
+    }
+  }
+
+  i := 0;
+  while (i < count) {
+    new_pos := append_byte(out, new_pos, digits[(count - 1) - i]);
+    i := i + 1;
+  }
+  return new_pos;
+}
+
+function write_all(fd: int64, buf: *(uint8[524288]), total: uint64) : bool {
+  mut pos : uint64 := 0;
+  mut n : int64 := 0;
+  mut ok : bool := true;
+  mut looping : bool := true;
+
+  while (looping) {
+    if (pos >= total) {
+      looping := false;
+    } else {
+      n := sys_write(fd, &(*buf)[pos], total - pos);
+      if (n < 0) {
+        ok := false;
+        looping := false;
+      } else {
+        pos := pos + int64_to_uint64(n);
+      }
+    }
+  }
+  return ok;
+}
+
+function append_str_e(out: *(uint8[256]), pos: uint64, s: *(uint8[80]), s_len: uint64) : uint64 {
+  mut i : uint64 := 0;
+  mut new_pos : uint64 := pos;
+  while (i < s_len) {
+    (*out)[new_pos] := (*s)[i];
+    new_pos := new_pos + 1;
+    i := i + 1;
+  }
+  return new_pos;
+}
+
+function append_byte_e(out: *(uint8[256]), pos: uint64, b: uint8) : uint64 {
+  (*out)[pos] := b;
+  return pos + 1;
+}
+
+function append_uint_e(out: *(uint8[256]), pos: uint64, value: uint64) : uint64 {
+  mut digits : uint8[24] := 0;
+  mut count : uint64 := 0;
+  mut v : uint64 := value;
+  mut new_pos : uint64 := pos;
+  mut d : uint64 := 0;
+  mut i : uint64 := 0;
+
+  if (v == 0) {
+    digits[0] := 48;
+    count := 1;
+  } else {
+    while (v > 0) {
+      d := v % 10;
+      digits[count] := digit_to_ascii(d);
+      count := count + 1;
+      v := v / 10;
+    }
+  }
+
+  i := 0;
+  while (i < count) {
+    new_pos := append_byte_e(out, new_pos, digits[(count - 1) - i]);
+    i := i + 1;
+  }
+  return new_pos;
+}
+
+function write_all_small(fd: int64, buf: *(uint8[256]), total: uint64) : bool {
+  mut pos : uint64 := 0;
+  mut n : int64 := 0;
+  mut ok : bool := true;
+  mut looping : bool := true;
+
+  while (looping) {
+    if (pos >= total) {
+      looping := false;
+    } else {
+      n := sys_write(fd, &(*buf)[pos], total - pos);
+      if (n < 0) {
+        ok := false;
+        looping := false;
+      } else {
+        pos := pos + int64_to_uint64(n);
+      }
+    }
+  }
+  return ok;
+}
+
+function compute_line_col(src: *(uint8[65536]), src_len: uint64, target: uint64) : LineCol {
+  mut i : uint64 := 0;
+  mut line : uint64 := 1;
+  mut last_line_start : uint64 := 0;
+  mut limit : uint64 := target;
+  mut col : uint64 := 0;
+
+  if (limit > src_len) {
+    limit := src_len;
+  }
+  while (i < limit) {
+    if ((*src)[i] == 10) {
+      line := line + 1;
+      last_line_start := i + 1;
+    }
+    i := i + 1;
+  }
+  col := (target - last_line_start) + 1;
+
+  return LineCol { line := line, col := col };
+}
+
+// ---------------------------------------------------------------------
+// dump_node -- a plain recursive walk over first_child/next_sibling,
+// printing each node's numeric kind (see the ASTNode kind table above
+// for the legend), its own token text where it has one, and whichever
+// of int_val/op_type/is_mutable that kind actually uses, indented by
+// depth; left/right/extra/data_type are walked too, each introduced by
+// a one-letter slot tag (L/R/X/T) so the tree's *shape* stays legible
+// without needing 38 separate English node-kind name tables (v0 has no
+// global storage, so every one of those would have to be re-declared,
+// as a local, in whichever function needed it -- the numeric-kind
+// dump plus this file's own kind legend is a deliberate scope cut
+// against that, for a checkpoint that's hand-reviewed once, not
+// machine-parsed).
+// ---------------------------------------------------------------------
+
+function dump_indent(out: *(uint8[524288]), pos: uint64, depth: uint64) : uint64 {
+  mut i : uint64 := 0;
+  mut new_pos : uint64 := pos;
+  while (i < depth) {
+    new_pos := append_byte(out, new_pos, 32);
+    new_pos := append_byte(out, new_pos, 32);
+    i := i + 1;
+  }
+  return new_pos;
+}
+
+// Walks the WHOLE next_sibling chain starting at `n`, not just `n`
+// itself -- every named slot this file uses (left/right/data_type, and
+// USE_DECL.extra for the *rest* of them) holds a single node with a
+// null next_sibling of its own, except USE_DECL.extra for the group
+// form (parse_use_decl), which deliberately chains its USE_ITEMs the
+// same way a first_child list would. Walking siblings here is a no-op
+// everywhere else and the correct behavior for that one case, rather
+// than giving group-use its own separate dump path.
+function dump_slot(out: *(uint8[524288]), pos: uint64, depth: uint64, tag: uint8, n: *ASTNode, src: *(uint8[65536])) : uint64 {
+  mut new_pos : uint64 := pos;
+  mut cur : *ASTNode := n;
+  if (n == null) {
+    return new_pos;
+  }
+  new_pos := dump_indent(out, new_pos, depth);
+  new_pos := append_byte(out, new_pos, tag);
+  new_pos := append_byte(out, new_pos, 58);
+  new_pos := append_byte(out, new_pos, 10);
+  while (cur != null) {
+    new_pos := dump_node(cur, src, depth + 1, out, new_pos);
+    cur := (*cur).next_sibling;
+  }
+  return new_pos;
+}
+
+function dump_node(n: *ASTNode, src: *(uint8[65536]), depth: uint64, out: *(uint8[524288]), pos: uint64) : uint64 {
+  mut new_pos : uint64 := pos;
+  mut k : uint32 := 0;
+  mut child : *ASTNode := null;
+
+  if (n == null) {
+    return new_pos;
+  }
+  k := (*n).kind;
+
+  new_pos := dump_indent(out, new_pos, depth);
+  new_pos := append_byte(out, new_pos, 35);
+  new_pos := append_uint(out, new_pos, uint32_to_uint64(k));
+  if ((*n).tok.length > 0) {
+    new_pos := append_byte(out, new_pos, 32);
+    new_pos := append_slice(out, new_pos, src, (*n).tok.offset, (*n).tok.length);
+  }
+  if (k == 141 || k == 122 || k == 144 || k == 105 || k == 103) {
+    new_pos := append_byte(out, new_pos, 32);
+    new_pos := append_byte(out, new_pos, 118);
+    new_pos := append_byte(out, new_pos, 61);
+    new_pos := append_uint(out, new_pos, int64_to_uint64((*n).int_val));
+  }
+  if (k == 146 || k == 147) {
+    new_pos := append_byte(out, new_pos, 32);
+    new_pos := append_byte(out, new_pos, 111);
+    new_pos := append_byte(out, new_pos, 61);
+    new_pos := append_uint(out, new_pos, int32_to_uint64((*n).op_type));
+  }
+  if (k == 134) {
+    new_pos := append_byte(out, new_pos, 32);
+    if ((*n).is_mutable) {
+      new_pos := append_byte(out, new_pos, 109);
+    } else {
+      new_pos := append_byte(out, new_pos, 99);
+    }
+  }
+  new_pos := append_byte(out, new_pos, 10);
+
+  new_pos := dump_slot(out, new_pos, depth + 1, 76, (*n).left, src);
+  new_pos := dump_slot(out, new_pos, depth + 1, 82, (*n).right, src);
+  new_pos := dump_slot(out, new_pos, depth + 1, 88, (*n).extra, src);
+  new_pos := dump_slot(out, new_pos, depth + 1, 84, (*n).data_type, src);
+
+  child := (*n).first_child;
+  while (child != null) {
+    new_pos := dump_node(child, src, depth + 1, out, new_pos);
+    child := (*child).next_sibling;
+  }
+
+  return new_pos;
+}
+
+function main() : int32 {
+  mut src_buf : uint8[65536] := 0;
+  mut src_len : uint64 := 0;
+  mut reading : bool := true;
+  mut n : int64 := 0;
+
+  mut toks_kind_arr : int32[20000] := 0;
+  mut toks_offset_arr : uint64[20000] := 0;
+  mut toks_length_arr : uint64[20000] := 0;
+  mut pool_arr : ASTNode[50000];
+
+  mut parser : Parser := Parser {
+    src := &src_buf,
+    src_len := 0,
+    toks_kind := &toks_kind_arr,
+    toks_offset := &toks_offset_arr,
+    toks_length := &toks_length_arr,
+    tok_count := 0,
+    tok_idx := 0,
+    pool := &pool_arr,
+    node_count := 0,
+    had_error := false,
+    err_tok_idx := 0,
+    lex_error := false,
+    lex_error_tok := Token { kind := 0, offset := 0, length := 0 }
+  };
+
+  mut program : *ASTNode := null;
+  mut out_buf : uint8[524288] := 0;
+  mut out_pos : uint64 := 0;
+  mut err_buf : uint8[256] := 0;
+  mut err_pos : uint64 := 0;
+  mut lc : LineCol := LineCol { line := 0, col := 0 };
+  mut exit_code : int64 := 0;
+  mut wrote_ok : bool := true;
+  mut err_target : uint64 := 0;
+
+  mut msg_lex : uint8[80] := {108, 101, 120, 32, 101, 114, 114, 111, 114, 32, 100, 117, 114, 105, 110, 103, 32, 112, 97, 114, 115, 101, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_parse : uint8[80] := {112, 97, 114, 115, 101, 32, 101, 114, 114, 111, 114, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_col : uint8[80] := {44, 32, 99, 111, 108, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  mut msg_nl : uint8[80] := {10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+
+  while (reading) {
+    if (src_len >= 65536) {
+      reading := false;
+    } else {
+      n := sys_read(0, &src_buf[src_len], 65536 - src_len);
+      if (n < 0) {
+        reading := false;
+      } else {
+        if (n == 0) {
+          reading := false;
+        } else {
+          src_len := src_len + int64_to_uint64(n);
+        }
+      }
+    }
+  }
+  parser.src_len := src_len;
+
+  tokenize_all(&parser);
+
+  if (parser.lex_error) {
+    exit_code := 1;
+    lc := compute_line_col(&src_buf, src_len, parser.lex_error_tok.offset);
+    err_pos := append_str_e(&err_buf, err_pos, &msg_lex, 31);
+    err_pos := append_uint_e(&err_buf, err_pos, lc.line);
+    err_pos := append_str_e(&err_buf, err_pos, &msg_col, 6);
+    err_pos := append_uint_e(&err_buf, err_pos, lc.col);
+    err_pos := append_str_e(&err_buf, err_pos, &msg_nl, 1);
+    wrote_ok := write_all_small(2, &err_buf, err_pos);
+    sys_exit(exit_code);
+    return 0;
+  }
+
+  program := parse_program(&parser);
+
+  if (parser.had_error) {
+    exit_code := 1;
+    err_target := (*parser.toks_offset)[parser.err_tok_idx];
+    lc := compute_line_col(&src_buf, src_len, err_target);
+    err_pos := append_str_e(&err_buf, err_pos, &msg_parse, 20);
+    err_pos := append_uint_e(&err_buf, err_pos, lc.line);
+    err_pos := append_str_e(&err_buf, err_pos, &msg_col, 6);
+    err_pos := append_uint_e(&err_buf, err_pos, lc.col);
+    err_pos := append_str_e(&err_buf, err_pos, &msg_nl, 1);
+    wrote_ok := write_all_small(2, &err_buf, err_pos);
+    sys_exit(exit_code);
+    return 0;
+  }
+
+  out_pos := dump_node(program, &src_buf, 0, &out_buf, out_pos);
+  wrote_ok := write_all(1, &out_buf, out_pos);
+  if (!wrote_ok) {
+    exit_code := 2;
+  }
+
+  sys_exit(exit_code);
+  return 0;
+}
