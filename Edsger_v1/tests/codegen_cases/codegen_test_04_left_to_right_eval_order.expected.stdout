@@ -28,7 +28,7 @@ entry:
   ret i32 %r7
 }
 
-define void @_start() {
+define void @_start() naked {
 entry:
   %r8 = call i32 @main()
   %r9 = zext i32 %r8 to i64

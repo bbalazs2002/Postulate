@@ -441,13 +441,36 @@ function dynsymbols_ensure(syms: *DynSymbols, needed: uint64) : void {
 // data_type/type_file_idx, target type from `(*node).data_type` in
 // THIS entry's own `file_idx`) are still reachable through it at print
 // time, so no separate type/file fields are needed here.
+// v1.1.n (2026-08-31): one accumulated semantic error -- the exact same
+// shape the old single-slot had_error/err_node/err_file_idx/err_kind/
+// err_expected_type/err_expected_file fields already carried, just
+// captured into its own array entry (mirrors CastWarning right below,
+// which already established this "collect an array instead of a
+// single slot, print all of them at the end" pattern for warnings)
+// instead of being overwritten by the next error found. Goal: an IDE
+// can show every diagnosed problem at once, not just the first one in
+// the whole program -- see set_error/set_expected_mismatch, and the
+// "rearm had_error between independent top-level declarations" note on
+// declare_program/decorate_program's own driver loops below.
+struct SemaError {
+  node : *ASTNode;
+  file_idx : uint64;
+  kind : int32;
+  expected_type : *ASTNode;
+  expected_file : uint64;
+}
+
 struct CastWarning {
   node : *ASTNode;
   file_idx : uint64;
   // v1.1.8: 0 = `as`-cast narrowing/sign-loss (the original meaning);
   // 1 = a hand-written anchored numeric literal overflowing its own
-  // anchor's implied width (add_literal_overflow_warning, below) --
-  // shares this same array/counter rather than getting its own,
+  // anchor's implied width (add_literal_overflow_warning, below);
+  // v1.1.n: 2 = an integer `**` with an unsigned exponent (add_pow_
+  // overflow_warning, below) -- the result stays integer-typed (no
+  // negative exponent is possible), but the runtime multiply loop can
+  // still overflow the base type same as any other repeated `*`.
+  // Shares this same array/counter rather than getting its own,
   // printed with a different message by kind at the one call site
   // that already walks this array (main.ptl's own warning-flush loop).
   kind : int32;
@@ -507,7 +530,9 @@ struct Sema {
                           // initialized, 20 struct literal missing a field,
                           // 21 wrong array-literal element count, 22 array
                           // literal with no array type in context, 23
-                          // `lengthof` on a non-array type/expression
+                          // `lengthof` on a non-array type/expression, ...,
+                          // 30 `main`'s own parameter list isn't `()` or
+                          // `(**char, uint16)` (v1.1.n, SS6.3)
 
   // Only meaningful when err_kind == 15: the type (and its own file,
   // exactly like type_file_idx elsewhere) that err_node's already-
@@ -521,6 +546,16 @@ struct Sema {
   // that "expected" side has to be carried separately.
   err_expected_type : *ASTNode;
   err_expected_file : uint64;
+
+  // v1.1.n (2026-08-31): every error found, not just the last one --
+  // appended to (capped at 64, same cap the parser's own panic-mode
+  // recovery and CastWarning already use) by set_error/set_expected_
+  // mismatch alongside the single-slot fields above (kept as-is, still
+  // used internally as the "stop decorating THIS declaration" signal
+  // every existing had_error check already relies on -- see the driver-
+  // loop note on declare_program/decorate_program).
+  errors : *(SemaError[64]);
+  error_count : uint64;
 
   // Synthesized TYPE_BASE/TYPE_POINTER nodes for literals that have no
   // type annotation of their own in the source -- see init_canonical_
@@ -538,10 +573,6 @@ struct Sema {
   canon_float64 : *ASTNode;
   // v1.1.8: the unanchored `sizeof`/`lengthof` default, replacing `int32`.
   canon_uintptr : *ASTNode;
-  // v1.1.9: the unanchored `string`-literal default (native `string`,
-  // not `*char` -- see base_type_size's own comment for this module's
-  // own placeholder 16-byte fat-pointer size decision, pending `std`).
-  canon_string : *ASTNode;
 
   cast_warnings : *(CastWarning[64]);
   cast_warning_count : uint64;
@@ -721,10 +752,7 @@ function declare_one(s: *Sema, decl: *ASTNode, k: uint32, file_idx: uint64, ns_f
     dup := false;
   }
   if (dup) {
-    (*s).had_error := true;
-    (*s).err_node := decl;
-    (*s).err_file_idx := file_idx;
-    (*s).err_kind := 1;
+    set_error(s, decl, file_idx, 1);
     return;
   }
 
@@ -757,10 +785,7 @@ function declare_operator(s: *Sema, decl: *ASTNode, file_idx: uint64) : void {
     i := i + 1;
   }
   if (dup) {
-    (*s).had_error := true;
-    (*s).err_node := decl;
-    (*s).err_file_idx := file_idx;
-    (*s).err_kind := 1;
+    set_error(s, decl, file_idx, 1);
     return;
   }
 
@@ -811,7 +836,17 @@ function declare_program(s: *Sema, program: *ASTNode, file_idx: uint64) : void {
 
   (*(*s).programs)[file_idx] := program;
 
-  while (child != null && !(*s).had_error) {
+  // v1.1.n (2026-08-31): no longer stops at the first bad declaration
+  // -- (*s).had_error is deliberately "rearmed" (reset to false) after
+  // EVERY top-level declaration, independent one, so a dup-decl/dup-
+  // operator error found here never blocks checking the rest of this
+  // file's own declarations (or, since decorate_program's own driver
+  // loop in main.ptl no longer stops either, any other file). The
+  // error itself isn't lost -- set_error already appended it to
+  // (*s).errors before returning; only the single-slot "stop drilling
+  // into what I'm looking at right now" flag gets cleared, exactly the
+  // same role it already had within one declaration's own decoration.
+  while (child != null) {
     k := (*child).kind;
     if (k == 110 || k == 113 || k == 112) {
       declare_one(s, child, k, file_idx, ns_first_seg);
@@ -820,6 +855,7 @@ function declare_program(s: *Sema, program: *ASTNode, file_idx: uint64) : void {
         declare_operator(s, child, file_idx);
       }
     }
+    (*s).had_error := false;
     child := (*child).next_sibling;
   }
 }
@@ -889,15 +925,17 @@ function base_type_size(kind: int32) : uint64 {
   if (kind == 93) { sz := 4; }
   if (kind == 94) { sz := 8; }
   if (kind == 95) { sz := 8; }
-  // v1.1.9: native `string` -- the bootstrap plan's own design notes
-  // describe *that* a real `string` type exists (a literal anchors to
-  // it or to a fixed `char[N]`) but never pin down its concrete
-  // representation, so this is this module's own placeholder decision,
-  // not a settled language-reference fact: a 16-byte fat pointer
-  // (`ptr : *char; length : uint64;`), matching the `{ptr, len}` shape
-  // this exact codebase's own DynBytes/PathBuf already use everywhere
-  // else. Revisit once `std`'s own design actually settles this.
-  if (kind == 96) { sz := 16; }
+  // v1.1.n: `rune` -- a builtin 4-byte Unicode codepoint value (Go's
+  // own `rune = int32` precedent), reusing the kind-96 slot freed when
+  // native `string` moved out of the compiler entirely (see below).
+  if (kind == 96) { sz := 4; }
+  // v1.1.n: `string` is NOT a builtin type -- the language only ever
+  // produces char[N]/rune[N] array literals; `string` itself is a
+  // std-defined struct (a heap pointer + length), resolved exactly like
+  // any other user struct name via the find_struct_symbol fallback
+  // wherever a builtin doesn't match here. See docs/postulate_stage1_
+  // bootstrap_plan.md for the (2026-08-31) design discussion that
+  // settled this, replacing an earlier native-`string`-type attempt.
   return sz;
 }
 
@@ -989,10 +1027,7 @@ function compute_struct_size(s: *Sema, idx: uint64) : uint64 {
     return (*s).symbols.ptr[idx].size;
   }
   if ((*s).symbols.ptr[idx].sizing_state == 1) {
-    (*s).had_error := true;
-    (*s).err_node := decl;
-    (*s).err_file_idx := (*s).symbols.ptr[idx].file_idx;
-    (*s).err_kind := 2;
+    set_error(s, decl, (*s).symbols.ptr[idx].file_idx, 2);
     return 0;
   }
 
@@ -1089,10 +1124,7 @@ function field_type_size(s: *Sema, ty: *ASTNode, file_idx: uint64) : uint64 {
 
   lr := find_struct_symbol(s, file_idx, (*ty).tok.offset, (*ty).tok.length);
   if (!lr.found) {
-    (*s).had_error := true;
-    (*s).err_node := ty;
-    (*s).err_file_idx := file_idx;
-    (*s).err_kind := 3;
+    set_error(s, ty, file_idx, 3);
     return 0;
   }
   return compute_struct_size(s, lr.index);
@@ -1100,9 +1132,13 @@ function field_type_size(s: *Sema, ty: *ASTNode, file_idx: uint64) : uint64 {
 
 function compute_all_struct_sizes(s: *Sema) : void {
   mut i : uint64 := 0;
-  while (i < (*s).symbol_count && !(*s).had_error) {
+  // v1.1.n (2026-08-31): same "rearm between independent units" fix as
+  // declare_program -- one struct's cycle error shouldn't block sizing
+  // every OTHER struct.
+  while (i < (*s).symbol_count) {
     if ((*s).symbols.ptr[i].kind == 1 && (*s).symbols.ptr[i].sizing_state == 0) {
       compute_struct_size(s, i);
+      (*s).had_error := false;
     }
     i := i + 1;
   }
@@ -1319,13 +1355,24 @@ function symbol_individually_used(s: *Sema, sym_idx: uint64, file_idx: uint64, n
     if ((*child).kind == 103) {
       if ((*child).int_val == 2) {
         // Three-way check, all required: the query asks for this
-        // import's own exposed name; THIS import's own named symbol
+        // import's own exposed name (its `as` alias, `child.right`,
+        // when one was given -- 2026-08-31 fix: this used to compare
+        // the query against `child.tok` -- the import's ORIGIN name --
+        // unconditionally, so an aliased `::`-qualified use, e.g. `use
+        // \Vendor\Math::Add as Plus;`, silently never exposed `Plus`
+        // at all; only querying the never-aliased-away original name
+        // "Add" ever matched); THIS import's own named symbol
         // (child.tok) is actually `sym_idx` (its name, not just its
         // namespace -- two symbols can share a namespace, e.g. a
         // function and a struct, and only one of them is what this
         // particular `use ...::name;` actually names); and the
         // namespace matches too.
-        if (bytes_equal_cross(query_src, (*child).tok.offset, (*child).tok.length, query_src, name_off, name_len)) {
+        if ((*child).right != null) {
+          exposed_matches := bytes_equal_cross(query_src, (*(*child).right).tok.offset, (*(*child).right).tok.length, query_src, name_off, name_len);
+        } else {
+          exposed_matches := bytes_equal_cross(query_src, (*child).tok.offset, (*child).tok.length, query_src, name_off, name_len);
+        }
+        if (exposed_matches) {
           if (bytes_equal_cross(query_src, (*child).tok.offset, (*child).tok.length, sym_src(s, sym_idx), (*sym_decl(s, sym_idx)).tok.offset, (*sym_decl(s, sym_idx)).tok.length) && fqn_chain_equal(query_src, (*child).first_child, sym_src(s, sym_idx), (*s).symbols.ptr[sym_idx].ns_first_seg)) {
             return true;
           }
@@ -1499,7 +1546,6 @@ function init_canonical_types(s: *Sema, p: *Parser) : void {
   (*s).canon_null := make_type_pointer(p, null);
   (*s).canon_float64 := make_type_base(p, 91);
   (*s).canon_uintptr := make_type_base(p, 43);
-  (*s).canon_string := make_type_base(p, 96);
 }
 
 // v1.1.8: the largest value tok_kind's own width/signedness can hold --
@@ -1528,23 +1574,20 @@ function value_fits_anchor(val: uint64, tok_kind: int32) : bool {
   return val <= max_value_for_anchor(tok_kind);
 }
 
-// v1.1.9: is `ty` a reference to a struct literally NAMED `rune`?
-// Matched by spelling, not by full symbol resolution -- by the time
-// literal anchoring runs (decorate_program, always after
-// compute_all_struct_sizes), a `rune`-named type that isn't a real,
-// declared struct would already have failed as an unknown type
-// earlier, so checking the name alone here is safe. Nominal, not
-// structural, matching -- exactly like `char` vs `uint8` (SS2.10)
-// refuse to interconvert despite matching size, `rune` is deliberately
-// never satisfied by some OTHER same-shaped struct with a different
-// name.
+// v1.1.n: is `ty` the builtin `rune` type? A plain token-kind check now
+// (kind 96, Lexer.ptl's own keyword table), exactly like every other
+// builtin base type -- `rune` used to be matched by SPELLING alone (a
+// struct name, since it was meant to live entirely in `std`), but that
+// left the compiler simultaneously "not knowing" what `rune` is while
+// already hardcoding UTF-8 codepoint-counting/decoding logic that only
+// makes sense for one specific, fixed representation -- an unavoidable
+// inconsistency once decided (2026-08-31) `rune` should be a real
+// builtin instead, matching Go's own `rune = int32` precedent: no
+// `std` dependency needed just to use a multi-byte char literal or
+// build a `rune[N]` array from a string literal. `s`/`file_idx` are
+// kept as parameters purely so every existing call site is unchanged.
 function is_rune_type(s: *Sema, ty: *ASTNode, file_idx: uint64) : bool {
-  mut src : *DynBytes := &(*(*s).buffers)[file_idx].bytes;
-  mut off : uint64 := 0;
-  if (ty == null || (*ty).kind != 120) { return false; }
-  if ((*ty).tok.length != 4) { return false; }
-  off := (*ty).tok.offset;
-  return (*src).ptr[off] == 114 && (*src).ptr[off + 1] == 117 && (*src).ptr[off + 2] == 110 && (*src).ptr[off + 3] == 101;
+  return ty != null && (*ty).kind == 120 && (*ty).tok.kind == 96;
 }
 
 // v1.1.9: same leading-byte range check Lexer.ptl's own
@@ -1555,6 +1598,30 @@ function utf8_extra_bytes_sema(lead: uint8) : uint64 {
   if (lead >= 224 && lead <= 239) { return 2; }
   if (lead >= 192 && lead <= 223) { return 1; }
   return 0;
+}
+
+// v1.1.n (bug fix, 2026-08-31): whether a CHAR_LIT's own content
+// decodes to more than one byte -- NOT the same thing as its raw TOKEN
+// being longer than 3 bytes (`'x'`), which every one of this module's
+// six backslash escapes (`\n \t \r \0 \\ \'`) also is (`'\n'` is 4 raw
+// bytes: quote, backslash, n, quote) despite decoding to exactly ONE
+// byte. Checking the raw token length instead of this made EVERY
+// escaped char literal in the entire language permanently unusable
+// (always hit the "needs std::rune" error below, since `rune` doesn't
+// exist to anchor to) -- a real, load-bearing bug, not a cosmetic one,
+// since it's decoded byte count that matters everywhere this result
+// feeds into (whether `char` can hold the value at all, and -- via
+// count_decoded_string_bytes' identical reasoning -- how many elements
+// a string literal's own char[N]/rune[N] anchor needs). A literal
+// that's genuinely multi-byte (no backslash, its own leading byte is a
+// real multi-byte UTF-8 lead byte) is unaffected by this fix -- it was
+// already, correctly, being rejected without `std::rune`, just for
+// re-derived reasons that happened to look similar for the common
+// unescaped case.
+function char_literal_is_multibyte(src: *DynBytes, tok_offset: uint64) : bool {
+  mut b : uint8 := (*src).ptr[tok_offset + 1];
+  if (b == 92) { return false; }
+  return utf8_extra_bytes_sema(b) > 0;
 }
 
 // v1.1.9: how many Unicode code points (not bytes) does this UTF-8
@@ -1568,6 +1635,28 @@ function count_utf8_codepoints(src: *DynBytes, offset: uint64, length: uint64) :
   while (i < length) {
     extra := utf8_extra_bytes_sema((*src).ptr[offset + i]);
     i := i + 1 + extra;
+    count := count + 1;
+  }
+  return count;
+}
+
+// v1.1.n: how many actual bytes a string literal's own content (offset/
+// length already excluding the surrounding quotes) decodes to -- a
+// backslash escape (`\n \t \r \0 \\ \"`) collapses two raw source bytes
+// into one real byte, everything else is already one-to-one. Mirrors
+// Codegen's own decode_string_byte_at exactly (same "does this byte
+// start a two-byte escape" rule), which is the whole point: the
+// char[N] anchor check right below and Codegen's own per-element
+// array-store loop must always agree on the element count.
+function count_decoded_string_bytes(src: *DynBytes, offset: uint64, length: uint64) : uint64 {
+  mut i : uint64 := 0;
+  mut count : uint64 := 0;
+  while (i < length) {
+    if ((*src).ptr[offset + i] == 92 && i + 1 < length) {
+      i := i + 2;
+    } else {
+      i := i + 1;
+    }
     count := count + 1;
   }
   return count;
@@ -1595,11 +1684,64 @@ function is_lvalue_expr(e: *ASTNode) : bool {
   return false;
 }
 
+// v1.1.n (2026-08-31): is `e` (already decorated -- `is_lvalue_expr`
+// already confirmed it's a real storage location) actually WRITABLE,
+// or does writing to it violate a `const` somewhere along the way?
+// Two independent sources of const-ness, both need checking:
+//   - a `const`-declared local (DECL_STMT.is_mutable == false) --
+//     PARAM_DECL is deliberately excluded here even though it reuses
+//     the same field: PARAM_DECL.is_mutable means "this is a `ref`
+//     parameter" (v1.1.5), not "this parameter is read-only", so an
+//     ordinary by-value parameter must stay freely reassignable.
+//   - a `*const T` pointee (TYPE_POINTER.is_mutable == false, v1.1.11)
+//     dereferenced either explicitly (`*p := ...`) or implicitly
+//     (`p.field := ...`/`p->field := ...` auto-deref, `p[i] := ...`).
+// FIELD_EXPR/INDEX_EXPR whose base is a plain (non-pointer) struct/
+// array value recurse into the base, so writing through a `const`-
+// declared struct/array's own field/element is caught too.
+function is_const_lvalue(e: *ASTNode) : bool {
+  mut k : uint32 := (*e).kind;
+  mut decl : *ASTNode := null;
+  mut base : *ASTNode := null;
+  mut base_ty : *ASTNode := null;
+  mut inner : *ASTNode := null;
+  mut inner_ty : *ASTNode := null;
+
+  if (k == 140) {
+    decl := (*e).symbol_ref;
+    if (decl != null && (*decl).kind == 134) {
+      return !(*decl).is_mutable;
+    }
+    return false;
+  }
+  if (k == 147 && (*e).op_type == 81) {
+    inner := (*e).left;
+    inner_ty := (*inner).data_type;
+    if (inner_ty != null && (*inner_ty).kind == 121) {
+      return !(*inner_ty).is_mutable;
+    }
+    return false;
+  }
+  if (k == 150 || k == 151) {
+    base := (*e).left;
+    base_ty := (*base).data_type;
+    if (base_ty != null && (*base_ty).kind == 121) {
+      return !(*base_ty).is_mutable;
+    }
+    return is_const_lvalue(base);
+  }
+  return false;
+}
+
 function set_error(s: *Sema, node: *ASTNode, file_idx: uint64, kind: int32) : void {
   (*s).had_error := true;
   (*s).err_node := node;
   (*s).err_file_idx := file_idx;
   (*s).err_kind := kind;
+  if ((*s).error_count < 64) {
+    (*(*s).errors)[(*s).error_count] := SemaError { node := node, file_idx := file_idx, kind := kind, expected_type := null, expected_file := 0 };
+    (*s).error_count := (*s).error_count + 1;
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -1629,16 +1771,17 @@ function cast_category(ty: *ASTNode) : int32 {
   if ((*ty).kind != 120) { return 0; }
   if ((*ty).tok.kind == 32) { return 2; }
   if ((*ty).tok.kind == 36) { return 3; }
+  // v1.1.n: `rune` -- its own category (8, freed by native `string`'s
+  // removal), same reasoning as `char`'s own category 3: a distinct
+  // nominal identity, never silently interchangeable with a same-size
+  // plain integer, even though `as` freely converts between them (the
+  // generic category pairing below, same as char<->int already gets).
+  if ((*ty).tok.kind == 96) { return 8; }
   // v1.1.3: checked before the generic base_type_size fallback below --
   // float kinds now have a nonzero base_type_size too (struct-field/
   // sizeof sizing needs that), so they'd otherwise be miscategorized
   // as ordinary integers (category 1).
   if (is_float_kind((*ty).tok.kind)) { return 6; }
-  // v1.1.9: native `string`, checked before the generic base_type_size
-  // fallback below for the same reason float is -- it now has a
-  // nonzero size too (struct-field/sizeof sizing needs that), so it'd
-  // otherwise be miscategorized as an ordinary integer.
-  if ((*ty).tok.kind == 96) { return 8; }
   if (base_type_size((*ty).tok.kind) > 0) { return 1; }
   return 0;
 }
@@ -1819,6 +1962,22 @@ function is_literal_kind(k: uint32) : bool {
   return k == 141 || k == 142 || k == 143 || k == 144 || k == 145 || k == 153 || k == 155 || k == 156 || k == 164;
 }
 
+// v1.1.n 2026-08-31: `-N` (a UNARY_EXPR wrapping a literal directly)
+// anchors the same way a bare literal does -- `mut x : int64 := -1;`
+// should behave exactly like `mut x : int64 := 1;`, not silently
+// default the inner `1` to `int32` first (UNARY_EXPR itself was never
+// itself a "literal kind", so every call site below used to route it
+// through plain decorate_expr instead, which has no expected-type
+// context to give the inner literal at all) and then fail the outer
+// comparison against a wider declared/expected type. Every call site
+// that used to gate on is_literal_kind(e.kind) directly now goes
+// through this instead; decorate_literal_with_expected's own new
+// k==147 branch (below) does the actual work once routed here.
+function is_literal_expr(e: *ASTNode) : bool {
+  if (is_literal_kind((*e).kind)) { return true; }
+  return (*e).kind == 147 && (*e).op_type == 80 && (*e).left != null && is_literal_kind((*(*e).left).kind);
+}
+
 // `expected`/`expected_file` describe whatever context this literal
 // (or untyped `sizeof`/`lengthof`) sits in -- the OTHER operand in a
 // binary expression, a decl's own declared type, an lvalue being
@@ -1846,6 +2005,36 @@ function decorate_literal_with_expected(s: *Sema, p: *Parser, sc: *Scope, file_i
   mut local_var : *ASTNode := null;
   mut lr2 : LookupResult := LookupResult { found := false, index := 0 };
   mut sizeof_val : uint64 := 0;
+  mut lcat : int32 := 0;
+
+  // v1.1.n 2026-08-31: `-N`, N a literal -- decorate the INNER literal
+  // against the same `expected` (so e.g. `mut x : int64 := -1;` anchors
+  // the `1` to int64 before negating, not to int32 first), then apply
+  // the exact same signed-operand-only restriction decorate_expr's own
+  // ordinary (non-anchored) unary `-` handling already enforces
+  // elsewhere in this file -- an anchored `-1` targeting an UNSIGNED
+  // expected type is still a type error (kind 13), same as negating an
+  // already-uint64-typed value is; anchoring must never be a backdoor
+  // around that rule.
+  if (k == 147 && (*e).op_type == 80 && (*e).left != null && is_literal_kind((*(*e).left).kind)) {
+    decorate_literal_with_expected(s, p, sc, file_idx, (*e).left, expected, expected_file);
+    if ((*s).had_error) { return; }
+    lcat := cast_category((*(*e).left).data_type);
+    if (lcat == 6) {
+      if (is_unsigned_float_kind((*(*(*e).left).data_type).tok.kind)) {
+        set_error(s, e, file_idx, 13);
+        return;
+      }
+    } else {
+      if (lcat != 1 || is_unsigned_for_cast((*(*(*e).left).data_type).tok.kind)) {
+        set_error(s, e, file_idx, 13);
+        return;
+      }
+    }
+    (*e).data_type := (*(*e).left).data_type;
+    (*e).type_file_idx := (*(*e).left).type_file_idx;
+    return;
+  }
 
   if (k == 153) {
     if (expected == null || (*expected).kind != 122) {
@@ -1950,7 +2139,14 @@ function decorate_literal_with_expected(s: *Sema, p: *Parser, sc: *Scope, file_i
     return;
   }
   if (k == 141) {
-    if (expected != null && cast_category(expected) == 1) {
+    // v1.1.n: `rune`'s own category (8) is accepted here too, alongside
+    // plain integers (1) -- `mut r: rune := 65;` constructs a rune
+    // directly from a codepoint number, same as Go allows for its own
+    // `rune = int32`. max_value_for_anchor/value_fits_anchor need no
+    // rune-specific case of their own: both already derive purely from
+    // base_type_size/is_unsigned_for_cast, which already know rune is a
+    // signed 4-byte value.
+    if (expected != null && (cast_category(expected) == 1 || cast_category(expected) == 8)) {
       // v1.1.8: a hand-written anchored literal too wide for its own
       // anchor -- unlike sizeof/lengthof's own hard error (the same
       // check, `value_fits_anchor`), this is diagnostic-only: the
@@ -1994,14 +2190,15 @@ function decorate_literal_with_expected(s: *Sema, p: *Parser, sc: *Scope, file_i
     return;
   }
   if (k == 142) {
-    // v1.1.9: a single-byte char_literal is fixed-type `char`, always
-    // (§1.5, unchanged) -- reaching this anchored path at all (rather
-    // than decorate_expr's own direct k==142 case) doesn't change that.
-    // A multi-byte one is untyped-but-restricted to the char/rune
-    // family (never a plain integer type) -- `char` itself can never
-    // actually hold more than 1 byte, so in practice it only ever
-    // successfully anchors to a `rune`-named struct.
-    if ((*e).tok.length <= 3) {
+    // v1.1.9: a single-BYTE (decoded, not raw-token) char_literal is
+    // fixed-type `char`, always (§1.5, unchanged) -- reaching this
+    // anchored path at all (rather than decorate_expr's own direct
+    // k==142 case) doesn't change that. A multi-byte one is untyped-
+    // but-restricted to the char/rune family (never a plain integer
+    // type) -- `char` itself can never actually hold more than 1 byte,
+    // so in practice it only ever successfully anchors to a `rune`-
+    // named struct.
+    if (!char_literal_is_multibyte(&(*(*s).buffers)[file_idx].bytes, (*e).tok.offset)) {
       (*e).data_type := (*s).canon_char;
       (*e).type_file_idx := 0;
       return;
@@ -2015,20 +2212,17 @@ function decorate_literal_with_expected(s: *Sema, p: *Parser, sc: *Scope, file_i
     return;
   }
   if (k == 143) {
-    // v1.1.9: a string literal anchors to either the native `string`
-    // type or a fixed `char[N]` array whose own length exactly matches
-    // the literal's own byte content -- same anchor-family mechanism
-    // as every other untyped constant. `tok.length - 2` strips the
-    // surrounding quotes; escape-sequence decoding (so this would
-    // reflect the DECODED length, not the raw source span) isn't
-    // implemented yet, a known simplification until Codegen's own
-    // round needs real decoding anyway.
-    if (expected != null && cast_category(expected) == 8) {
-      (*e).data_type := expected;
-      (*e).type_file_idx := expected_file;
-      return;
-    }
-    if (expected != null && (*expected).kind == 122 && (*expected).left != null && (*(*expected).left).kind == 120 && (*(*expected).left).tok.kind == 36 && int64_to_uint64((*expected).int_val) == (*e).tok.length - 2) {
+    // v1.1.n: `string` is not a builtin type (2026-08-31 design
+    // decision, docs/postulate_stage1_bootstrap_plan.md) -- a string
+    // literal ONLY ever anchors to a fixed `char[N]` array whose own
+    // length exactly matches the literal's own DECODED byte content
+    // (count_decoded_string_bytes -- `\n`/`\t`/`\r`/`\0`/`\\`/`\"` each
+    // collapse two raw source bytes into one actual byte, matching
+    // Codegen's own decode_string_byte_at exactly, so the two never
+    // disagree about how many elements a given literal produces), or a
+    // `rune[N]` array matching its own UTF-8 codepoint count (below).
+    // `tok.length - 2` strips the surrounding quotes.
+    if (expected != null && (*expected).kind == 122 && (*expected).left != null && (*(*expected).left).kind == 120 && (*(*expected).left).tok.kind == 36 && int64_to_uint64((*expected).int_val) == count_decoded_string_bytes(&(*(*s).buffers)[file_idx].bytes, (*e).tok.offset + 1, (*e).tok.length - 2)) {
       (*e).data_type := expected;
       (*e).type_file_idx := expected_file;
       return;
@@ -2042,8 +2236,12 @@ function decorate_literal_with_expected(s: *Sema, p: *Parser, sc: *Scope, file_i
       (*e).type_file_idx := expected_file;
       return;
     }
-    (*e).data_type := (*s).canon_string;
-    (*e).type_file_idx := 0;
+    // No matching char[N]/rune[N] context (including `expected` being
+    // null entirely, or some other shape a cast target might name) --
+    // there's no context-free default left to fall back to, so this is
+    // always a hard error now (matches CHAR_LIT's own "no rune to
+    // anchor to" precedent right above).
+    set_error(s, e, file_idx, 29);
     return;
   }
   (*e).data_type := (*s).canon_bool;
@@ -2057,6 +2255,10 @@ function set_expected_mismatch(s: *Sema, node: *ASTNode, file_idx: uint64, expec
   (*s).err_kind := 15;
   (*s).err_expected_type := expected;
   (*s).err_expected_file := expected_file;
+  if ((*s).error_count < 64) {
+    (*(*s).errors)[(*s).error_count] := SemaError { node := node, file_idx := file_idx, kind := 15, expected_type := expected, expected_file := expected_file };
+    (*s).error_count := (*s).error_count + 1;
+  }
 }
 
 // The shared "does this expression have the type this context
@@ -2070,7 +2272,7 @@ function set_expected_mismatch(s: *Sema, node: *ASTNode, file_idx: uint64, expec
 // check against, e.g. an operand this module doesn't yet impose one on)
 // just decorates normally and skips the comparison entirely.
 function check_expected(s: *Sema, p: *Parser, sc: *Scope, file_idx: uint64, e: *ASTNode, expected: *ASTNode, expected_file: uint64) : void {
-  if (is_literal_kind((*e).kind)) {
+  if (is_literal_expr(e)) {
     decorate_literal_with_expected(s, p, sc, file_idx, e, expected, expected_file);
   } else {
     decorate_expr(s, p, sc, file_idx, e);
@@ -2101,6 +2303,39 @@ function add_literal_overflow_warning(s: *Sema, node: *ASTNode, file_idx: uint64
     (*(*s).cast_warnings)[(*s).cast_warning_count] := CastWarning { node := node, file_idx := file_idx, kind := 1 };
     (*s).cast_warning_count := (*s).cast_warning_count + 1;
   }
+}
+
+// v1.1.n: "an integer `**` whose exponent is unsigned (so the result
+// stays integer-typed instead of promoting to float64, see the op==165
+// handling below) may still overflow its own base type" -- purely
+// structural (fires for every such expression, not value-dependent,
+// since the exponent's actual runtime value is generally unknown here),
+// same shape as add_cast_warning's own kind-0 narrowing warning.
+function add_pow_overflow_warning(s: *Sema, node: *ASTNode, file_idx: uint64) : void {
+  if ((*s).cast_warning_count < 64) {
+    (*(*s).cast_warnings)[(*s).cast_warning_count] := CastWarning { node := node, file_idx := file_idx, kind := 2 };
+    (*s).cast_warning_count := (*s).cast_warning_count + 1;
+  }
+}
+
+// v1.1.n: wraps `operand` in a synthetic identity/widening CAST_EXPR to
+// `float64` -- used by `**`'s own op==165 handling (below) to promote an
+// integer base/exponent pair to float when the exponent might be
+// negative at runtime (a signed integer type can't rule that out, and
+// an integer RESULT has no way to represent the resulting fraction).
+// Never routed through decorate_expr's own CAST_EXPR legality check
+// (casts_legal/types_equal) the way a real, source-written `as` cast
+// is -- exactly like `_/`'s own synthetic-node desugaring just below,
+// this hand-sets data_type/type_file_idx directly since the promotion
+// is always known-legal by construction (int -> float64 is never an
+// illegal cast). Codegen's existing gen_cast (src_cat==1, dst_cat==6)
+// then does the actual sitofp/uitofp conversion for free.
+function wrap_in_float64_cast(s: *Sema, p: *Parser, operand: *ASTNode) : *ASTNode {
+  mut node : *ASTNode := alloc_node(p, 148);
+  (*node).left := operand;
+  (*node).data_type := (*s).canon_float64;
+  (*node).type_file_idx := 0;
+  return node;
 }
 
 // Sets e's own data_type/type_file_idx/symbol_ref (as applicable) and
@@ -2202,7 +2437,7 @@ function decorate_expr(s: *Sema, p: *Parser, sc: *Scope, file_idx: uint64, e: *A
     // struct anywhere yet. Rather than silently mistyping 2-4 real
     // bytes as a 1-byte `char` (a genuine correctness bug), this is a
     // hard error until `std::rune` exists for it to anchor to instead.
-    if ((*e).tok.length > 3) {
+    if (char_literal_is_multibyte(&(*(*s).buffers)[file_idx].bytes, (*e).tok.offset)) {
       set_error(s, e, file_idx, 27);
       return;
     }
@@ -2210,15 +2445,21 @@ function decorate_expr(s: *Sema, p: *Parser, sc: *Scope, file_idx: uint64, e: *A
     (*e).type_file_idx := 0;
     return;
   }
-  if (k == 143) { (*e).data_type := (*s).canon_string; (*e).type_file_idx := 0; return; }
+  // v1.1.n: a string literal reached with NO context at all (a bare
+  // expression statement, `"hello";`, is the only realistic way to get
+  // here -- every real anchoring site, and now `as` casts too, routes
+  // through decorate_literal_with_expected instead) -- always an error,
+  // `string` no longer being a builtin type with its own context-free
+  // default to fall back to.
+  if (k == 143) { set_error(s, e, file_idx, 29); return; }
   if (k == 144) { (*e).data_type := (*s).canon_bool; (*e).type_file_idx := 0; return; }
   if (k == 145) { (*e).data_type := (*s).canon_null; (*e).type_file_idx := 0; return; }
   if (k == 164) { (*e).data_type := (*s).canon_float64; (*e).type_file_idx := 0; return; }
 
   if (k == 146) {
     op := (*e).op_type;
-    left_lit := is_literal_kind((*(*e).left).kind);
-    right_lit := is_literal_kind((*(*e).right).kind);
+    left_lit := is_literal_expr((*e).left);
+    right_lit := is_literal_expr((*e).right);
 
     // Untyped-constant anchoring (SS3.7): decorate whichever side ISN'T
     // a bare literal first, then let its resolved type anchor the
@@ -2364,6 +2605,13 @@ function decorate_expr(s: *Sema, p: *Parser, sc: *Scope, file_idx: uint64, e: *A
       one_lit := alloc_node(p, 164);
       (*one_lit).data_type := (*(*e).left).data_type;
       (*one_lit).type_file_idx := (*(*e).left).type_file_idx;
+      // v1.1.n: this literal was never actually written anywhere in
+      // the source (alloc_node leaves its `tok` zero-length), so
+      // Codegen can't read "1.0" out of source text the way a real
+      // FLOAT_LIT's own value normally comes from -- op_type := 999
+      // marks it as the synthetic constant `1.0` instead (Codegen.ptl's
+      // own gen_float_literal checks for exactly this marker).
+      (*one_lit).op_type := 999;
       inv := alloc_node(p, 146);
       (*inv).op_type := 83;
       (*inv).left := one_lit;
@@ -2378,17 +2626,53 @@ function decorate_expr(s: *Sema, p: *Parser, sc: *Scope, file_idx: uint64, e: *A
       return;
     }
 
-    // `**` (exponentiation, v1.1.3): same-type-both-sides, either
-    // integer or float-family (SS3.2) -- the one arithmetic operator
-    // that spans both categories at once, so it's checked on its own
-    // rather than folded into the shared integer/float block below.
+    // `**` (exponentiation, v1.1.3/v1.1.n): float-family still needs an
+    // exact same-type pair, unchanged (Codegen's gen_float_pow now also
+    // handles a negative runtime exponent correctly, see its own header
+    // comment). Integer-family used to require the same exact-type-
+    // match too, but that let a SIGNED exponent through -- one that CAN
+    // be negative at runtime, which an integer RESULT has no way to
+    // represent (Codegen's old fptosi-and-loop-zero-times silently
+    // returned 1 instead of the true reciprocal; postulate_stage1_
+    // bootstrap_plan.md's 2026-08-31 entry covers the bug in full). So
+    // integer `**` now splits by the EXPONENT's own signedness instead:
+    // an UNSIGNED exponent (same width as the base) can never be
+    // negative, so the result stays the base's own integer type, same
+    // as before, just with an overflow warning attached (no way to know
+    // the actual runtime values here); any other integer pairing
+    // (a signed exponent) promotes the whole expression to `float64`
+    // instead, via a synthetic cast around each operand (wrap_in_
+    // float64_cast, above, the same synthetic-node technique `_/` uses
+    // just below) -- from Codegen's side this is then just an ordinary
+    // float64 ** float64.
     if (op == 165) {
-      if ((lcat != 1 && lcat != 6) || lcat != rcat || !types_equal(s, (*(*e).left).data_type, (*(*e).left).type_file_idx, (*(*e).right).data_type, (*(*e).right).type_file_idx)) {
-        set_error(s, e, file_idx, 11);
+      if (lcat == 6 && rcat == 6) {
+        if (!types_equal(s, (*(*e).left).data_type, (*(*e).left).type_file_idx, (*(*e).right).data_type, (*(*e).right).type_file_idx)) {
+          set_error(s, e, file_idx, 11);
+          return;
+        }
+        (*e).data_type := (*(*e).left).data_type;
+        (*e).type_file_idx := (*(*e).left).type_file_idx;
         return;
       }
-      (*e).data_type := (*(*e).left).data_type;
-      (*e).type_file_idx := (*(*e).left).type_file_idx;
+      if (lcat == 1 && rcat == 1) {
+        if (base_type_size((*(*(*e).left).data_type).tok.kind) != base_type_size((*(*(*e).right).data_type).tok.kind)) {
+          set_error(s, e, file_idx, 11);
+          return;
+        }
+        if (is_unsigned_for_cast((*(*(*e).right).data_type).tok.kind)) {
+          add_pow_overflow_warning(s, e, file_idx);
+          (*e).data_type := (*(*e).left).data_type;
+          (*e).type_file_idx := (*(*e).left).type_file_idx;
+          return;
+        }
+        (*e).left := wrap_in_float64_cast(s, p, (*e).left);
+        (*e).right := wrap_in_float64_cast(s, p, (*e).right);
+        (*e).data_type := (*s).canon_float64;
+        (*e).type_file_idx := 0;
+        return;
+      }
+      set_error(s, e, file_idx, 11);
       return;
     }
 
@@ -2479,9 +2763,66 @@ function decorate_expr(s: *Sema, p: *Parser, sc: *Scope, file_idx: uint64, e: *A
   }
 
   if (k == 148) {
-    decorate_expr(s, p, sc, file_idx, (*e).left);
+    // v1.1.n: a literal operand anchors to the cast's OWN target type
+    // (`(*e).data_type`, already known -- the `as X` clause is parsed
+    // independently of the operand) rather than decorating context-
+    // free, exactly like every other anchoring site (decl/assign/
+    // return/call-arg) already does. Without this, `5000000000 as
+    // int64` anchored the literal to its own context-free `int32`
+    // default FIRST (a real, invalid-IR bug: the value doesn't fit
+    // int32 at all), and a string/char literal -- which has no
+    // context-free default left once native `string` is gone -- could
+    // never be cast to `char[N]`/`rune[N]` at all, blocking exactly the
+    // disambiguation `as` exists for (e.g. `f("hello" as rune[N])`
+    // picking which shape a polymorphic-over-string-shape call wants).
+    // `decorate_literal_with_expected` is safe to call with ANY target
+    // shape here -- every one of its own branches checks the target's
+    // own `cast_category` against the literal's own family first, and
+    // falls through to the ordinary context-free default when they
+    // don't match, so an already-illegal cast (`5 as *int32`) behaves
+    // exactly as before.
+    //
+    // Deliberately `is_literal_kind`, NOT `is_literal_expr`, here --
+    // unlike every other anchoring site, a cast is an EXPLICIT,
+    // intentional conversion request, and `-1 as uint64` (the "all bits
+    // set" / SIZE_MAX idiom, same as C's `(unsigned)-1`) is exactly the
+    // established, already-working spelling for it: the literal `1`
+    // gets its ordinary signed `int32` default, negation succeeds (the
+    // "unsigned operand" restriction below only ever applies to an
+    // ALREADY-unsigned-typed value), and the cast's own widen-then-
+    // reinterpret (`sext`) is what actually produces the huge unsigned
+    // result. Routing this operand through decorate_literal_with_
+    // expected's new k==147 branch would anchor the `1` to `uint64`
+    // BEFORE negating, making the exact same expression a hard type
+    // error instead (kind 13, "unsigned operand") -- correct for an
+    // IMPLICIT context (decl-init/binary-expr/broadcast, where that
+    // restriction is a deliberate safety net), wrong for an EXPLICIT
+    // cast, where the user has already signaled intent via `as`.
+    if (is_literal_kind((*(*e).left).kind)) {
+      decorate_literal_with_expected(s, p, sc, file_idx, (*e).left, (*e).data_type, file_idx);
+    } else {
+      decorate_expr(s, p, sc, file_idx, (*e).left);
+    }
     if ((*s).had_error) { return; }
     (*e).type_file_idx := file_idx;
+    // v1.1.n: an identity cast -- the operand's own resolved type
+    // already EXACTLY matches the cast's own target -- is always legal,
+    // regardless of category. Always true for a literal operand after
+    // the anchoring above (`"hello" as rune[N]` disambiguates which
+    // shape an otherwise-untyped literal takes; once anchored, both
+    // sides are already the same type), but the rule is general: this
+    // is "type ascription" (a compile-time-only disambiguation hint,
+    // see the Rust RFC 803 discussion this was designed against), never
+    // a real value conversion, which is exactly why `casts_legal`'s own
+    // blanket rejection of every array/struct category doesn't apply
+    // here -- that rule exists to keep GENUINE cross-type composite
+    // conversions explicit (an actual element-wise transform needs a
+    // real loop, never a single `as`, matching Rust/Zig's own
+    // deliberate design there), not to block asserting a value already
+    // has the type it already has.
+    if (types_equal(s, (*(*e).left).data_type, (*(*e).left).type_file_idx, (*e).data_type, (*e).type_file_idx)) {
+      return;
+    }
     if (!casts_legal(cast_category((*(*e).left).data_type), cast_category((*e).data_type), (*(*e).left).data_type, (*e).data_type)) {
       set_error(s, e, file_idx, 9);
       return;
@@ -2758,7 +3099,7 @@ function check_array_broadcast_or_expected(s: *Sema, p: *Parser, sc: *Scope, fil
   }
 
   elem_ty := (*target_ty).left;
-  if (is_literal_kind((*src).kind)) {
+  if (is_literal_expr(src)) {
     // A bare literal can never itself be an array value -- it can only
     // ever broadcast, so anchor it straight to the element type.
     decorate_literal_with_expected(s, p, sc, file_idx, src, elem_ty, target_file);
@@ -2824,6 +3165,10 @@ function decorate_stmt(s: *Sema, p: *Parser, sc: *Scope, file_idx: uint64, stmt:
   if (k == 160) {
     decorate_expr(s, p, sc, file_idx, (*stmt).left);
     if ((*s).had_error) { return; }
+    if (is_const_lvalue((*stmt).left)) {
+      set_error(s, stmt, file_idx, 31);
+      return;
+    }
     if (cast_category((*(*stmt).left).data_type) != 1) {
       set_error(s, stmt, file_idx, 11);
     }
@@ -2855,6 +3200,10 @@ function decorate_stmt(s: *Sema, p: *Parser, sc: *Scope, file_idx: uint64, stmt:
     while (pair != null && !(*s).had_error) {
       decorate_expr(s, p, sc, file_idx, (*pair).left);
       if ((*s).had_error) { return; }
+      if (is_const_lvalue((*pair).left)) {
+        set_error(s, pair, file_idx, 31);
+        return;
+      }
       if ((*pair).op_type == 0) {
         check_array_broadcast_or_expected(s, p, sc, file_idx, (*pair).right, (*(*pair).left).data_type, (*(*pair).left).type_file_idx);
       } else {
@@ -2880,27 +3229,78 @@ function decorate_function(s: *Sema, p: *Parser, func_decl: *ASTNode, file_idx: 
   }
 }
 
+// v1.1.n: `main` (any file, any namespace -- Codegen's own gen_start
+// finds it the same name-text-only way, unscoped by namespace, so this
+// mirrors that rather than introducing a stricter check gen_start
+// itself doesn't enforce) may take either zero parameters or exactly
+// `(**char, uint16)` (postulate_v1_language_reference.md SS6.3) --
+// param NAMES aren't part of the restriction, only the two structural
+// shapes are. byte-matches "main" directly off source text, the same
+// technique gen_start already uses, rather than a real name-resolution
+// lookup -- `main` is never called from Postulate code, only ever
+// found by the compiler itself.
+function is_named_main(s: *Sema, file_idx: uint64, decl: *ASTNode) : bool {
+  mut buf : *DynBytes := &(*(*s).buffers)[file_idx].bytes;
+  mut o : uint64 := (*decl).tok.offset;
+  if ((*decl).tok.length != 4) { return false; }
+  return (*buf).ptr[o+0]==109 && (*buf).ptr[o+1]==97 && (*buf).ptr[o+2]==105 && (*buf).ptr[o+3]==110;
+}
+
+function main_params_valid(decl: *ASTNode) : bool {
+  mut p1 : *ASTNode := (*decl).first_child;
+  mut p2 : *ASTNode := null;
+  mut t1 : *ASTNode := null;
+  mut t2 : *ASTNode := null;
+
+  if (p1 == null) { return true; }
+  p2 := (*p1).next_sibling;
+  if (p2 == null || (*p2).next_sibling != null) { return false; }
+
+  t1 := (*p1).data_type;
+  if (t1 == null || (*t1).kind != 121) { return false; }
+  t1 := (*t1).left;
+  if (t1 == null || (*t1).kind != 121) { return false; }
+  t1 := (*t1).left;
+  if (t1 == null || (*t1).kind != 120 || (*t1).tok.kind != 36) { return false; }
+
+  t2 := (*p2).data_type;
+  if (t2 == null || (*t2).kind != 120 || (*t2).tok.kind != 28) { return false; }
+
+  return true;
+}
+
 function decorate_program(s: *Sema, p: *Parser, program: *ASTNode, file_idx: uint64) : void {
   mut child : *ASTNode := (*program).first_child;
-  while (child != null && !(*s).had_error) {
+  // v1.1.n (2026-08-31): same "rearm between independent top-level
+  // declarations" fix as declare_program -- one function's type error
+  // shouldn't block type-checking every OTHER function/operator in
+  // this file (or, since main.ptl's own per-file driver loop no longer
+  // stops either, in any other file). The `main`-params check used to
+  // `return` out of the whole function on failure; now it just skips
+  // decorating `main`'s own body (nothing useful to check against an
+  // invalid signature) and moves on to the next sibling instead.
+  while (child != null) {
     // OPERATOR_DECL (162, v1.1.6) is shaped exactly like FUNCTION_DECL
     // (first_child = params, data_type = return type, extra = body) --
     // decorate_function needs no separate operator-aware variant.
     if ((*child).kind == 113 || (*child).kind == 162) {
-      decorate_function(s, p, child, file_idx);
+      if ((*child).kind == 113 && is_named_main(s, file_idx, child) && !main_params_valid(child)) {
+        set_error(s, child, file_idx, 30);
+      } else {
+        decorate_function(s, p, child, file_idx);
+      }
     }
+    (*s).had_error := false;
     child := (*child).next_sibling;
   }
 }
 
+// v1.1.n 2026-08-31: same fix, same reason, as int64_to_uint64/uint64_
+// to_int64 above -- was an O(n) counting loop, now a plain (narrowing)
+// `as` cast, which this compiler already supports (unlike Hoare, the
+// one tool in this whole lineage that genuinely has no alternative).
 function int32_of_int_val(n: int64) : int32 {
-  mut result : int32 := 0;
-  mut steps : int64 := n;
-  while (steps > 0) {
-    result := result + 1;
-    steps := steps - 1;
-  }
-  return result;
+  return n as int32;
 }
 
 // ---------------------------------------------------------------------
@@ -3074,8 +3474,8 @@ function open_and_read_file(fs: *FileSet, slot: uint64, path_buf: *(uint8[512]),
 // Tokenizes + parses buffers[slot] into a fresh PROGRAM root, reusing
 // the ONE shared Parser (its tok_kind/offset/length arrays are pure
 // per-file scratch, safe to reset and reuse; its node pool is the
-// shared arena and is deliberately NOT reset, so node_count keeps
-// accumulating across every file).
+// shared arena and is deliberately NOT reset, so every file's nodes
+// keep accumulating into the same chunk chain).
 function process_file(fs: *FileSet, p: *Parser, slot: uint64) : void {
   (*p).src := &(*(*fs).buffers)[slot].bytes;
   (*p).src_len := (*(*fs).lens)[slot];
@@ -3170,14 +3570,28 @@ function digit_to_ascii(d: uint64) : uint8 {
   return result;
 }
 
+// v1.1.n: a bit-reinterpreting cast, O(1) -- was an O(n) COUNTING loop
+// (`while (steps>0) { result+1; steps-1; }`) until 2026-08-31, when a
+// real user-facing bug traced back to it: ANY int64/uint64 value this
+// large (not just an internal compiler constant) makes it here --
+// every parsed INT_LIT's own value goes through this exact function at
+// PARSE time (Parser.ptl's own two int_val assignments) -- so a
+// perfectly ordinary user literal like `mut x : uint64 := 5000000000;`
+// made the compiler itself hang for 5 BILLION loop iterations, empirically
+// confirmed to still be running after 20+ seconds before this fix.
+// int64<->uint64 are both plain 64-bit LLVM `i64` with no separate
+// signed/unsigned type at that level (gen_cast's own same-width branch
+// already returns the operand completely unchanged for exactly this
+// pair) -- there was never a real reason to reconstruct the value one
+// increment at a time; `as` was available the whole time; nobody
+// happened to try it. NOTE: the old loop also had a silent, latent bug
+// this fix incidentally also closes -- for a NEGATIVE `n`, `steps > 0`
+// was false immediately, so it always returned 0 instead of n's own
+// two's-complement-reinterpreted (large) uint64 value; no call site
+// ever seems to have hit this in practice, but `as` doesn't have the
+// bug at all regardless.
 function int64_to_uint64(n: int64) : uint64 {
-  mut result : uint64 := 0;
-  mut steps : int64 := n;
-  while (steps > 0) {
-    result := result + 1;
-    steps := steps - 1;
-  }
-  return result;
+  return n as uint64;
 }
 
 function append_byte(out: *DynBytes, pos: uint64, b: uint8) : uint64 {

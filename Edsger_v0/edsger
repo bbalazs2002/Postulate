@@ -11,11 +11,11 @@
 # stage1_bootstrap_plan.md's own "Tracked checkpoint: extern/syscall
 # calls and `_start`" covers the technique in full, now implemented).
 #
-# Requires `llc` and `ld` on PATH (Ubuntu's `llvm`/`binutils` packages,
-# same as Edsger/Dockerfile already installs) and build/codegen already
-# built (see scripts/build.sh) -- same requirement shape as every other
-# script in this repository. Run this from inside the Docker image (or
-# an equivalent Linux toolchain), not directly on a Windows host.
+# Requires `llc`, `opt`, and `ld` on PATH (Ubuntu's `llvm`/`binutils`
+# packages, same as Edsger/Dockerfile already installs) and build/codegen
+# already built (see scripts/build.sh) -- same requirement shape as every
+# other script in this repository. Run this from inside the Docker image
+# (or an equivalent Linux toolchain), not directly on a Windows host.
 set -uo pipefail
 
 # readlink -f resolves through a symlink (e.g. /usr/local/bin/edsger ->
@@ -28,9 +28,10 @@ SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 CODEGEN="$SCRIPT_DIR/build/codegen"
 
 usage() {
-    echo "usage: $(basename "$0") <file.ptl> [-o <output>] [--emit-llvm | -c]" >&2
+    echo "usage: $(basename "$0") <file.ptl> [-o <output>] [-O0|-O1|-O2|-O3|-Os|-Oz] [--emit-llvm | -c]" >&2
     echo "  -o <output>     output path (default: <file> with .ptl stripped)" >&2
-    echo "  --emit-llvm     stop after codegen and write the emitted LLVM IR text itself (output defaults to .ll)" >&2
+    echo "  -O<level>       optimization level passed to opt, gcc-style (default: -O1); -O0 skips opt entirely" >&2
+    echo "  --emit-llvm     stop after codegen+opt and write the resulting LLVM IR text itself (output defaults to .ll)" >&2
     echo "  -c              stop after assembling to a native object file, don't link (output defaults to .o)" >&2
 }
 
@@ -38,12 +39,17 @@ input=""
 output=""
 emit_llvm=0
 obj_only=0
+opt_level="O1"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)
             usage
             exit 0
+            ;;
+        -O0|-O1|-O2|-O3|-Os|-Oz)
+            opt_level="${1#-}"
+            shift
             ;;
         --emit-llvm)
             emit_llvm=1
@@ -122,8 +128,18 @@ if [[ "$codegen_code" -ne 0 ]]; then
     exit "$codegen_code"
 fi
 
+ir="$workdir/out.ll"
+if [[ "$opt_level" != "O0" ]]; then
+    if ! opt "-$opt_level" -S -o "$workdir/opt.ll" "$ir" 2> "$workdir/opt.err"; then
+        echo "edsger: internal error -- opt rejected the generated LLVM IR (this is an Edsger bug, please report it):" >&2
+        cat "$workdir/opt.err" >&2
+        exit 5
+    fi
+    ir="$workdir/opt.ll"
+fi
+
 if [[ "$emit_llvm" -eq 1 ]]; then
-    cp "$workdir/out.ll" "$output"
+    cp "$ir" "$output"
     exit 0
 fi
 
@@ -132,7 +148,7 @@ fi
 # default datalayout string happens to be current (postulate_stage1_
 # bootstrap_plan.md's own "Tracked checkpoint" section explains this
 # choice in full).
-if ! llc -filetype=obj -mtriple=x86_64-unknown-linux-gnu -o "$workdir/out.o" "$workdir/out.ll" 2> "$workdir/llc.err"; then
+if ! llc -filetype=obj -mtriple=x86_64-unknown-linux-gnu -o "$workdir/out.o" "$ir" 2> "$workdir/llc.err"; then
     echo "edsger: internal error -- llc rejected the generated LLVM IR (this is an Edsger bug, please report it):" >&2
     cat "$workdir/llc.err" >&2
     exit 5

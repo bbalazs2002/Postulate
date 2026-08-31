@@ -1,0 +1,17 @@
+namespace \Main;
+
+// Writing through a `*const T` (pointer-to-const, v1.1.11) SHOULD be a
+// semantic error -- the whole point of the qualifier is "the pointee
+// may not be written through this pointer". This file exists to probe
+// whether that's actually enforced today, or just parsed and silently
+// accepted.
+
+function writeThroughConst(p: *const int32) : void {
+  *p := 99;
+}
+
+function main() : int32 {
+  mut x : int32 := 1;
+  writeThroughConst(&x);
+  return x;
+}

@@ -32,7 +32,6 @@ function main() : int32 {
     tok_count := 0,
     tok_idx := 0,
     pool := dynnodepool_new(50000),
-    node_count := 0,
     had_error := false,
     err_tok_idx := 0,
     lex_error := false,

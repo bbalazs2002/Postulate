@@ -1,0 +1,10 @@
+namespace \Main;
+
+// A single, unambiguous lexical error: an unterminated string literal.
+// Expected: the compiler reports a lex error and exits non-zero,
+// without ever reaching the parser or Sema.
+
+function main() : int32 {
+  mut s : char[5] := "hello;
+  return 0;
+}

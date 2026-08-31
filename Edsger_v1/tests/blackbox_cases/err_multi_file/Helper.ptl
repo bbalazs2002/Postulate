@@ -1,0 +1,6 @@
+namespace \Helper;
+
+function broken() : int32 {
+  mut y : int32 := true;
+  return y;
+}

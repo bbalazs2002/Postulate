@@ -1,0 +1,19 @@
+namespace \Main;
+
+// A lexical error in the first function, and a wholly independent
+// syntax error in the second. Tests whether a lex error anywhere in
+// the file suppresses the parser's own (otherwise multi-error-capable)
+// reporting of unrelated later syntax errors.
+
+function bad1() : int32 {
+  mut s : char[2] := "ab;
+  return 0;
+}
+
+function bad2() : int32 {
+  return 5 +;
+}
+
+function main() : int32 {
+  return 0;
+}

@@ -254,19 +254,13 @@ function cg_operand(cg: *Codegen, op: Operand) : void {
 // `bool` is `i1`; every other scalar type here is `i<8*bytewidth>`,
 // reusing base_type_size (Module 3's own byte-width table) directly --
 // codegen never needs its own copy of that table.
-// v0 has no cast operator (postulate_v0_language_reference.md SS2.8),
-// so widening a `uint8` byte into a `uint64` needs the same counting-
-// loop technique this file's own uint64_to_int64 already uses for
-// uint64 -> int64 -- comparing `count` against `b` requires them to be
-// the SAME type, hence the uint8 counter alongside the uint64 result.
+// 2026-08-31: was a bounded (<=255 iterations) but unnecessary counting
+// loop, from the same Hoare-era lineage as int64_to_uint64/uint64_to_
+// int64 above (Sema.ptl/Parser.ptl) -- Hoare, the only tool in this
+// whole lineage that genuinely has no cast operator, never compiles
+// this file. Plain widening `as` already works fine here.
 function byte_to_uint64(b: uint8) : uint64 {
-  mut result : uint64 := 0;
-  mut count : uint8 := 0;
-  while (count < b) {
-    result := result + 1;
-    count := count + 1;
-  }
-  return result;
+  return b as uint64;
 }
 
 // CHAR_LIT's own tok spans the source text quotes-inclusive (`'a'` or

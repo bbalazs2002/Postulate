@@ -33,7 +33,6 @@ function main() : int32 {
     tok_count := 0,
     tok_idx := 0,
     pool := dynnodepool_new(50000),
-    node_count := 0,
     panic := false,
     had_error := false,
     errors := &parse_errors_arr[0],
@@ -45,6 +44,7 @@ function main() : int32 {
   mut cast_warnings_arr : CastWarning[64];
   mut operators_arr : OperatorOverload[64];
   mut shadow_rules_arr : ShadowRule[32];
+  mut errors_arr : SemaError[64];
   mut sema : Sema := Sema {
     buffers := &buffers_arr,
     programs := &programs_arr,
@@ -56,6 +56,8 @@ function main() : int32 {
     err_kind := 0,
     err_expected_type := null,
     err_expected_file := 0,
+    errors := &errors_arr,
+    error_count := 0,
     canon_int32 := null,
     canon_int64 := null,
     canon_char := null,
@@ -64,7 +66,6 @@ function main() : int32 {
     canon_null := null,
     canon_float64 := null,
     canon_uintptr := null,
-    canon_string := null,
     cast_warnings := &cast_warnings_arr,
     cast_warning_count := 0,
     operators := &operators_arr,
@@ -106,6 +107,8 @@ function main() : int32 {
   mut wrote_ok : bool := true;
   mut err_src : *DynBytes := &buffers_arr[0].bytes;
   mut start_done : bool := false;
+  mut ei : uint64 := 0;
+  mut cur : SemaError := SemaError { node := null, file_idx := 0, kind := 0, expected_type := null, expected_file := 0 };
 
   mut msg_lex : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 108, 101, 120, 32, 101, 114, 114, 111, 114, 32, 98, 101, 102, 111, 114, 101, 32, 112, 97, 114, 115, 105, 110, 103, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
   mut msg_parse : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 112, 97, 114, 115, 101, 32, 101, 114, 114, 111, 114, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
@@ -176,9 +179,25 @@ function main() : int32 {
   mut msg_multibyte_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 109, 117, 108, 116, 105, 45, 98, 121, 116, 101, 32, 99, 104, 97, 114, 32, 108, 105, 116, 101, 114, 97, 108, 32, 110, 101, 101, 100, 115, 32, 115, 116, 100, 58, 58, 114, 117, 110, 101, 44, 32, 110, 111, 116, 32, 97, 118, 97, 105, 108, 97, 98, 108, 101, 32, 121, 101, 116, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
   // v1.1.12: a bare identifier matching more than one visible `use`.
   mut msg_ambiguous_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 97, 109, 98, 105, 103, 117, 111, 117, 115, 32, 105, 100, 101, 110, 116, 105, 102, 105, 101, 114, 32, 45, 45, 32, 109, 97, 116, 99, 104, 101, 115, 32, 109, 111, 114, 101, 32, 116, 104, 97, 110, 32, 111, 110, 101, 32, 117, 115, 101, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  // v1.1.n: a string literal with no char[N]/rune[N] context to anchor
+  // to (native `string` removed -- see docs/postulate_stage1_bootstrap_
+  // plan.md's own struct-field-layout-adjacent design notes) -- reached
+  // by a bare literal statement, an `as` cast to something that isn't
+  // char[N]/rune[N]-shaped, or any other truly context-free spot.
+  mut msg_stringcontext_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 115, 116, 114, 105, 110, 103, 32, 108, 105, 116, 101, 114, 97, 108, 32, 110, 101, 101, 100, 115, 32, 97, 110, 32, 97, 114, 114, 97, 121, 32, 116, 121, 112, 101, 32, 40, 39, 99, 104, 97, 114, 91, 78, 93, 39, 32, 111, 114, 32, 39, 114, 117, 110, 101, 91, 78, 93, 39, 41, 32, 104, 101, 114, 101, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  // v1.1.n: `main`'s own parameter list must be `()` or exactly
+  // `(**char, uint16)` (SS6.3) -- anything else is this error.
+  mut msg_mainparams_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 109, 97, 105, 110, 32, 109, 117, 115, 116, 32, 116, 97, 107, 101, 32, 122, 101, 114, 111, 32, 112, 97, 114, 97, 109, 101, 116, 101, 114, 115, 44, 32, 111, 114, 32, 101, 120, 97, 99, 116, 108, 121, 32, 40, 97, 114, 103, 118, 58, 32, 42, 42, 99, 104, 97, 114, 44, 32, 97, 114, 103, 99, 58, 32, 117, 105, 110, 116, 49, 54, 41, 44, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0};
+  // v1.1.n (2026-08-31): assigning through a `const`-declared local or
+  // a `*const T` pointee (is_const_lvalue, Sema.ptl).
+  mut msg_constassign_a : uint8[100] := {115, 101, 109, 97, 32, 101, 114, 114, 111, 114, 58, 32, 99, 97, 110, 110, 111, 116, 32, 97, 115, 115, 105, 103, 110, 32, 116, 111, 32, 97, 32, 99, 111, 110, 115, 116, 45, 113, 117, 97, 108, 105, 102, 105, 101, 100, 32, 116, 97, 114, 103, 101, 116, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
   // v1.1.8: a hand-written anchored literal that overflows its own anchor.
   mut msg_litoverflow_a : uint8[100] := {115, 101, 109, 97, 32, 119, 97, 114, 110, 105, 110, 103, 58, 32, 108, 105, 116, 101, 114, 97, 108, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
   mut msg_litoverflow_b : uint8[100] := {39, 32, 111, 118, 101, 114, 102, 108, 111, 119, 115, 32, 105, 116, 115, 32, 97, 110, 99, 104, 111, 114, 101, 100, 32, 116, 121, 112, 101, 32, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  // v1.1.n: an integer `**` with an unsigned exponent (stays integer-
+  // typed, see Sema's own op==165 handling) may still overflow its base
+  // type -- structural, not value-dependent, same shape as msg_castwarn.
+  mut msg_powwarn_a : uint8[100] := {115, 101, 109, 97, 32, 119, 97, 114, 110, 105, 110, 103, 58, 32, 39, 42, 42, 39, 32, 119, 105, 116, 104, 32, 97, 110, 32, 105, 110, 116, 101, 103, 101, 114, 32, 98, 97, 115, 101, 32, 109, 97, 121, 32, 111, 118, 101, 114, 102, 108, 111, 119, 32, 105, 116, 115, 32, 111, 119, 110, 32, 116, 121, 112, 101, 32, 97, 116, 32, 108, 105, 110, 101, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
   // ---- 0. read the entry file from stdin into slot 0, then tokenize +
   // parse it exactly like any other slot (process_file doesn't care
@@ -455,45 +474,21 @@ function main() : int32 {
     i := i + 1;
   }
 
-  // ---- 4. declare pass (every file) + struct layout ----
+  // ---- 4. declare pass (every file) + struct layout -- 2026-08-31:
+  // no longer gated on `!sema.had_error` (IDE-diagnostics goal: report
+  // every error found across every file/declaration, not just the
+  // first). Sema.had_error is reset per top-level declaration by
+  // declare_program/decorate_program themselves (their own "rearm for
+  // the next sibling" logic), so it never stays stuck true here; only
+  // sema.error_count (accumulated by set_error/set_expected_mismatch)
+  // tracks whether anything actually went wrong. ----
   i := 0;
-  while (i < fs.count && !sema.had_error) {
+  while (i < fs.count) {
     declare_program(&sema, programs_arr[i], i);
     i := i + 1;
   }
-  if (!sema.had_error) {
-    compute_all_struct_sizes(&sema);
-  }
+  compute_all_struct_sizes(&sema);
 
-  if (sema.had_error) {
-    err_src := &buffers_arr[sema.err_file_idx].bytes;
-    lc := compute_line_col(err_src, lens_arr[sema.err_file_idx], (*sema.err_node).tok.offset);
-    if (sema.err_kind == 1) {
-      err_pos := 0;
-      err_pos := append_str_e(&err_buf, err_pos, &msg_dupdecl_a, 35);
-      err_pos := append_snippet_e(&err_buf, err_pos, err_src, (*sema.err_node).tok.offset, (*sema.err_node).tok.length);
-      err_pos := append_str_e(&err_buf, err_pos, &msg_dupdecl_b, 10);
-    } else {
-      if (sema.err_kind == 2) {
-        err_pos := 0;
-        err_pos := append_str_e(&err_buf, err_pos, &msg_cycle_a, 20);
-        err_pos := append_snippet_e(&err_buf, err_pos, err_src, (*sema.err_node).tok.offset, (*sema.err_node).tok.length);
-        err_pos := append_str_e(&err_buf, err_pos, &msg_cycle_b, 56);
-      } else {
-        err_pos := 0;
-        err_pos := append_str_e(&err_buf, err_pos, &msg_unknown_a, 26);
-        err_pos := append_snippet_e(&err_buf, err_pos, err_src, (*sema.err_node).tok.offset, (*sema.err_node).tok.length);
-        err_pos := append_str_e(&err_buf, err_pos, &msg_unknown_b, 10);
-      }
-    }
-    err_pos := append_uint_e(&err_buf, err_pos, lc.line);
-    err_pos := append_str_e(&err_buf, err_pos, &msg_col, 6);
-    err_pos := append_uint_e(&err_buf, err_pos, lc.col);
-    err_pos := append_byte_e(&err_buf, err_pos, 10);
-    wrote_ok := write_all_small(2, &err_buf, err_pos);
-    sys_exit(1);
-    return 0;
-  }
 
   // ---- 4b. AST decoration (Module 3, part 3): local scope, identifier/
   // field/call resolution, and expression type inference -- see this
@@ -501,47 +496,59 @@ function main() : int32 {
   // it does and does not check yet ----
   init_canonical_types(&sema, &parser);
   i := 0;
-  while (i < fs.count && !sema.had_error) {
+  while (i < fs.count) {
     decorate_program(&sema, &parser, programs_arr[i], i);
     i := i + 1;
   }
 
-  if (sema.had_error) {
-    err_src := &buffers_arr[sema.err_file_idx].bytes;
-    err_pos_tok := expr_pos_tok(sema.err_node);
-    lc := compute_line_col(err_src, lens_arr[sema.err_file_idx], err_pos_tok.offset);
+  ei := 0;
+  while (ei < sema.error_count) {
+    cur := (*sema.errors)[ei];
+    err_src := &buffers_arr[cur.file_idx].bytes;
+    err_pos_tok := expr_pos_tok(cur.node);
+    lc := compute_line_col(err_src, lens_arr[cur.file_idx], err_pos_tok.offset);
     err_pos := 0;
-    if (sema.err_kind == 4) {
+    if (cur.kind == 1) {
+      err_pos := append_str_e(&err_buf, err_pos, &msg_dupdecl_a, 35);
+      err_pos := append_snippet_e(&err_buf, err_pos, err_src, err_pos_tok.offset, err_pos_tok.length);
+      err_pos := append_str_e(&err_buf, err_pos, &msg_dupdecl_b, 10);
+    } else {
+    if (cur.kind == 2) {
+      err_pos := append_str_e(&err_buf, err_pos, &msg_cycle_a, 20);
+      err_pos := append_snippet_e(&err_buf, err_pos, err_src, err_pos_tok.offset, err_pos_tok.length);
+      err_pos := append_str_e(&err_buf, err_pos, &msg_cycle_b, 56);
+    } else {
+    if (cur.kind == 4) {
       err_pos := append_str_e(&err_buf, err_pos, &msg_unknownident_a, 32);
       err_pos := append_snippet_e(&err_buf, err_pos, err_src, err_pos_tok.offset, err_pos_tok.length);
       err_pos := append_str_e(&err_buf, err_pos, &msg_unknownident_b, 10);
     } else {
-      if (sema.err_kind == 5) {
+      if (cur.kind == 5) {
         err_pos := append_str_e(&err_buf, err_pos, &msg_notstruct_a, 19);
         err_pos := append_snippet_e(&err_buf, err_pos, err_src, err_pos_tok.offset, err_pos_tok.length);
         err_pos := append_str_e(&err_buf, err_pos, &msg_notstruct_b, 41);
       } else {
-        if (sema.err_kind == 3) {
+        if (cur.kind == 3) {
           err_pos := append_str_e(&err_buf, err_pos, &msg_unknown_a, 26);
           err_pos := append_snippet_e(&err_buf, err_pos, err_src, err_pos_tok.offset, err_pos_tok.length);
           err_pos := append_str_e(&err_buf, err_pos, &msg_unknown_b, 10);
         } else {
-          if (sema.err_kind == 6) {
+          if (cur.kind == 6) {
             err_pos := append_str_e(&err_buf, err_pos, &msg_unknownfield_a, 33);
             err_pos := append_snippet_e(&err_buf, err_pos, err_src, err_pos_tok.offset, err_pos_tok.length);
             err_pos := append_str_e(&err_buf, err_pos, &msg_unknownfield_b, 10);
           } else {
-            if (sema.err_kind == 7) {
+            if (cur.kind == 7) {
               err_pos := append_str_e(&err_buf, err_pos, &msg_notindex_a, 26);
               err_pos := append_snippet_e(&err_buf, err_pos, err_src, err_pos_tok.offset, err_pos_tok.length);
               err_pos := append_str_e(&err_buf, err_pos, &msg_notindex_b, 37);
             } else {
-              if (sema.err_kind == 8) {
+              if (cur.kind == 8) {
                 err_pos := append_str_e(&err_buf, err_pos, &msg_notptr_a, 32);
                 err_pos := append_snippet_e(&err_buf, err_pos, err_src, err_pos_tok.offset, err_pos_tok.length);
                 err_pos := append_str_e(&err_buf, err_pos, &msg_notptr_b, 27);
               } else {
-                if (sema.err_kind == 9) {
+                if (cur.kind == 9) {
                   // err_node is always the CAST_EXPR itself here
                   // (set_error's own call site), so its `.left`'s
                   // data_type/type_file_idx (the source type, wherever
@@ -549,84 +556,96 @@ function main() : int32 {
                   // (the target type, always in THIS file -- err_src)
                   // are both still reachable straight off it.
                   err_pos := append_str_e(&err_buf, err_pos, &msg_illegalcast_a, 31);
-                  err_pos := append_type_e(&err_buf, err_pos, &buffers_arr[(*(*sema.err_node).left).type_file_idx].bytes, (*(*sema.err_node).left).data_type);
+                  err_pos := append_type_e(&err_buf, err_pos, &buffers_arr[(*(*cur.node).left).type_file_idx].bytes, (*(*cur.node).left).data_type);
                   err_pos := append_str_e(&err_buf, err_pos, &msg_to_b, 6);
-                  err_pos := append_type_e(&err_buf, err_pos, err_src, (*sema.err_node).data_type);
+                  err_pos := append_type_e(&err_buf, err_pos, err_src, (*cur.node).data_type);
                   err_pos := append_str_e(&err_buf, err_pos, &msg_illegalcast_c, 10);
                 } else {
-                  if (sema.err_kind == 10) {
+                  if (cur.kind == 10) {
                     // err_node is always the BINARY_EXPR itself -- same
                     // trick as kind 9, its own `.left`/`.right` are the
                     // two operands, each already carrying its own
                     // resolved data_type/type_file_idx.
                     err_pos := append_str_e(&err_buf, err_pos, &msg_mismatch_a, 35);
-                    err_pos := append_type_e(&err_buf, err_pos, &buffers_arr[(*(*sema.err_node).left).type_file_idx].bytes, (*(*sema.err_node).left).data_type);
+                    err_pos := append_type_e(&err_buf, err_pos, &buffers_arr[(*(*cur.node).left).type_file_idx].bytes, (*(*cur.node).left).data_type);
                     err_pos := append_str_e(&err_buf, err_pos, &msg_and_b, 7);
-                    err_pos := append_type_e(&err_buf, err_pos, &buffers_arr[(*(*sema.err_node).right).type_file_idx].bytes, (*(*sema.err_node).right).data_type);
+                    err_pos := append_type_e(&err_buf, err_pos, &buffers_arr[(*(*cur.node).right).type_file_idx].bytes, (*(*cur.node).right).data_type);
                     err_pos := append_str_e(&err_buf, err_pos, &msg_mismatch_c, 10);
                   } else {
-                    if (sema.err_kind == 11) {
+                    if (cur.kind == 11) {
                       err_pos := append_str_e(&err_buf, err_pos, &msg_intop_a, 76);
                     } else {
-                      if (sema.err_kind == 12) {
+                      if (cur.kind == 12) {
                         err_pos := append_str_e(&err_buf, err_pos, &msg_boolop_a, 53);
                       } else {
-                        if (sema.err_kind == 13) {
+                        if (cur.kind == 13) {
                           err_pos := append_str_e(&err_buf, err_pos, &msg_unaryneg_a, 64);
                         } else {
-                          if (sema.err_kind == 14) {
+                          if (cur.kind == 14) {
                             err_pos := append_str_e(&err_buf, err_pos, &msg_ptrarith_a, 47);
                           } else {
-                            if (sema.err_kind == 15) {
+                            if (cur.kind == 15) {
                               // err_node's own data_type/type_file_idx
                               // is the "found" side; err_expected_
                               // type/file (set only for this kind) is
                               // the "expected" side.
                               err_pos := append_str_e(&err_buf, err_pos, &msg_expected_a, 27);
-                              err_pos := append_type_e(&err_buf, err_pos, &buffers_arr[sema.err_expected_file].bytes, sema.err_expected_type);
+                              err_pos := append_type_e(&err_buf, err_pos, &buffers_arr[cur.expected_file].bytes, cur.expected_type);
                               err_pos := append_str_e(&err_buf, err_pos, &msg_expected_b, 10);
-                              err_pos := append_type_e(&err_buf, err_pos, &buffers_arr[(*sema.err_node).type_file_idx].bytes, (*sema.err_node).data_type);
+                              err_pos := append_type_e(&err_buf, err_pos, &buffers_arr[(*cur.node).type_file_idx].bytes, (*cur.node).data_type);
                               err_pos := append_str_e(&err_buf, err_pos, &msg_expected_c, 10);
                             } else {
-                              if (sema.err_kind == 16) {
+                              if (cur.kind == 16) {
                                 err_pos := append_str_e(&err_buf, err_pos, &msg_missingret_a, 41);
                               } else {
-                                if (sema.err_kind == 17) {
+                                if (cur.kind == 17) {
                                   err_pos := append_str_e(&err_buf, err_pos, &msg_notcallable_a, 42);
                                 } else {
-                                  if (sema.err_kind == 18) {
+                                  if (cur.kind == 18) {
                                     err_pos := append_str_e(&err_buf, err_pos, &msg_argcount_a, 46);
                                   } else {
-                                    if (sema.err_kind == 19) {
+                                    if (cur.kind == 19) {
                                       err_pos := append_str_e(&err_buf, err_pos, &msg_dupfield_a, 19);
                                       err_pos := append_snippet_e(&err_buf, err_pos, err_src, err_pos_tok.offset, err_pos_tok.length);
                                       err_pos := append_str_e(&err_buf, err_pos, &msg_dupfield_b, 30);
                                     } else {
-                                      if (sema.err_kind == 20) {
+                                      if (cur.kind == 20) {
                                         err_pos := append_str_e(&err_buf, err_pos, &msg_missingfield_a, 65);
                                       } else {
-                                        if (sema.err_kind == 21) {
+                                        if (cur.kind == 21) {
                                           err_pos := append_str_e(&err_buf, err_pos, &msg_arrcount_a, 59);
                                         } else {
-                                          if (sema.err_kind == 22) {
+                                          if (cur.kind == 22) {
                                             err_pos := append_str_e(&err_buf, err_pos, &msg_arrctx_a, 71);
                                           } else {
-                                            if (sema.err_kind == 23) {
+                                            if (cur.kind == 23) {
                                               err_pos := append_str_e(&err_buf, err_pos, &msg_lengthof_a, 52);
                                             } else {
-                                              if (sema.err_kind == 24) {
+                                              if (cur.kind == 24) {
                                                 err_pos := append_str_e(&err_buf, err_pos, &msg_breakcontinue_a, 55);
                                               } else {
-                                                if (sema.err_kind == 25) {
+                                                if (cur.kind == 25) {
                                                   err_pos := append_str_e(&err_buf, err_pos, &msg_refarg_a, 69);
                                                 } else {
-                                                  if (sema.err_kind == 26) {
+                                                  if (cur.kind == 26) {
                                                     err_pos := append_str_e(&err_buf, err_pos, &msg_sizeofanchor_a, 74);
                                                   } else {
-                                                    if (sema.err_kind == 27) {
+                                                    if (cur.kind == 27) {
                                                       err_pos := append_str_e(&err_buf, err_pos, &msg_multibyte_a, 79);
                                                     } else {
-                                                      err_pos := append_str_e(&err_buf, err_pos, &msg_ambiguous_a, 70);
+                                                      if (cur.kind == 28) {
+                                                        err_pos := append_str_e(&err_buf, err_pos, &msg_ambiguous_a, 70);
+                                                      } else {
+                                                        if (cur.kind == 29) {
+                                                          err_pos := append_str_e(&err_buf, err_pos, &msg_stringcontext_a, 85);
+                                                        } else {
+                                                          if (cur.kind == 30) {
+                                                            err_pos := append_str_e(&err_buf, err_pos, &msg_mainparams_a, 93);
+                                                          } else {
+                                                            err_pos := append_str_e(&err_buf, err_pos, &msg_constassign_a, 62);
+                                                          }
+                                                        }
+                                                      }
                                                     }
                                                   }
                                                 }
@@ -652,11 +671,16 @@ function main() : int32 {
         }
       }
     }
+    }
+    }
     err_pos := append_uint_e(&err_buf, err_pos, lc.line);
     err_pos := append_str_e(&err_buf, err_pos, &msg_col, 6);
     err_pos := append_uint_e(&err_buf, err_pos, lc.col);
     err_pos := append_byte_e(&err_buf, err_pos, 10);
     wrote_ok := write_all_small(2, &err_buf, err_pos);
+    ei := ei + 1;
+  }
+  if (sema.error_count > 0) {
     sys_exit(1);
     return 0;
   }
@@ -683,11 +707,17 @@ function main() : int32 {
       err_pos := append_type_e(&err_buf, err_pos, &buffers_arr[cast_warnings_arr[w].file_idx].bytes, (*cast_warnings_arr[w].node).data_type);
       err_pos := append_str_e(&err_buf, err_pos, &msg_illegalcast_c, 10);
     } else {
-      err_pos := append_str_e(&err_buf, err_pos, &msg_castwarn_a, 25);
-      err_pos := append_type_e(&err_buf, err_pos, &buffers_arr[(*(*cast_warnings_arr[w].node).left).type_file_idx].bytes, (*(*cast_warnings_arr[w].node).left).data_type);
-      err_pos := append_str_e(&err_buf, err_pos, &msg_to_b, 6);
-      err_pos := append_type_e(&err_buf, err_pos, &buffers_arr[cast_warnings_arr[w].file_idx].bytes, (*cast_warnings_arr[w].node).data_type);
-      err_pos := append_str_e(&err_buf, err_pos, &msg_castwarn_c, 44);
+      if (cast_warnings_arr[w].kind == 2) {
+        // v1.1.n: integer `**` with an unsigned exponent -- purely
+        // structural, no type/snippet interpolation needed.
+        err_pos := append_str_e(&err_buf, err_pos, &msg_powwarn_a, 74);
+      } else {
+        err_pos := append_str_e(&err_buf, err_pos, &msg_castwarn_a, 25);
+        err_pos := append_type_e(&err_buf, err_pos, &buffers_arr[(*(*cast_warnings_arr[w].node).left).type_file_idx].bytes, (*(*cast_warnings_arr[w].node).left).data_type);
+        err_pos := append_str_e(&err_buf, err_pos, &msg_to_b, 6);
+        err_pos := append_type_e(&err_buf, err_pos, &buffers_arr[cast_warnings_arr[w].file_idx].bytes, (*cast_warnings_arr[w].node).data_type);
+        err_pos := append_str_e(&err_buf, err_pos, &msg_castwarn_c, 44);
+      }
     }
     lc := compute_line_col(&buffers_arr[cast_warnings_arr[w].file_idx].bytes, lens_arr[cast_warnings_arr[w].file_idx], expr_pos_tok(cast_warnings_arr[w].node).offset);
     err_pos := append_uint_e(&err_buf, err_pos, lc.line);

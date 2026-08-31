@@ -105,33 +105,78 @@ struct ASTNode {
 // 164 FLOAT_LIT       (v1.1.3) tok = float token (plain or based-form); no computed value stored, same as every other literal kind
 
 // Replaces the old fixed ASTNode[50000] stack local (~4.85 MiB at that
-// size; codegen.ptl's own self-compile needs far more) -- grows in
-// `chunk`-sized increments via sys_mremap (Edsger\Dynamic's own
-// DynBytes pattern, sized in ASTNode-elements rather than raw bytes,
-// so it stays here next to ASTNode itself rather than in the generic
-// Dynamic module).
-struct DynNodePool {
+// size; codegen.ptl's own self-compile needs far more).
+//
+// v1.1.n 2026-08-31: NOT sys_mremap-grown (unlike every other Dyn*
+// structure) -- a REAL crash, found via gdb against a real segfault
+// (postulate_stage1_bootstrap_plan.md's own writeup has the full
+// trace), root-caused to exactly the difference every other Dyn*
+// structure's own access pattern avoids: alloc_node hands out a
+// *ASTNode for the CALLER to hold indefinitely (every tree link --
+// first_child/next_sibling/left/right/extra/symbol_ref/data_type -- IS
+// one of these, held for the rest of compilation), whereas DynBytes/
+// DynSymbols/DynBindings/DynTokens are only ever read back through a
+// FRESH `(*buf).ptr[i]` index at the point of use, never through a
+// pointer a caller squirreled away earlier (confirmed by grep: no
+// `*Symbol`/`*LocalBinding` local anywhere in this codebase). A
+// `sys_mremap(..., 1)` (MREMAP_MAYMOVE) is free to relocate the WHOLE
+// mapping to a new address -- harmless for the fresh-index pattern,
+// but for alloc_node's OWN pattern (`n := alloc_node(...)` now, `(*n).
+// field := ...` after several MORE alloc_node calls that might grow
+// the pool) it silently turns `n` into a dangling pointer into
+// whatever the kernel did with the OLD mapping. Small/simple inputs
+// never cross a chunk boundary mid-construction and never observed
+// this; Edsger's own real, large modular source reliably does.
+//
+// Fix: a chunked/segmented pool instead -- each chunk is its own
+// mmap'd region, created once and NEVER resized or moved again;
+// growth links a brand new chunk onto the tail rather than growing the
+// existing one. Every *ASTNode ever handed out points into a chunk
+// that will exist, unmoved, for the rest of the process's life -- the
+// non-relocating trade `DynBytes`'s own reserve-and-commit alternative
+// would have made unnecessary, chosen instead per the user's own call.
+struct NodeChunk {
   ptr : *ASTNode;
-  cap : uint64;
-  chunk : uint64;
+  next : *NodeChunk;
+}
+
+struct DynNodePool {
+  head : *NodeChunk;
+  tail : *NodeChunk;
+  chunk_cap : uint64;
+  tail_count : uint64;
+}
+
+function dynnodepool_new_chunk(chunk_cap: uint64) : *NodeChunk {
+  mut hdr_raw : *void := sys_mmap(0, sizeof(NodeChunk), 3, 34, 0, 0);
+  mut hdr : *NodeChunk := hdr_raw as *NodeChunk;
+  mut data_raw : *void := sys_mmap(0, chunk_cap * sizeof(ASTNode), 3, 34, 0, 0);
+  (*hdr).ptr := data_raw as *ASTNode;
+  (*hdr).next := null;
+  return hdr;
 }
 
 function dynnodepool_new(chunk_count: uint64) : DynNodePool {
-  mut raw : *void := sys_mmap(0, chunk_count * sizeof(ASTNode), 3, 34, 0, 0);
-  return DynNodePool { ptr := raw as *ASTNode, cap := chunk_count, chunk := chunk_count };
+  mut first : *NodeChunk := dynnodepool_new_chunk(chunk_count);
+  return DynNodePool { head := first, tail := first, chunk_cap := chunk_count, tail_count := 0 };
 }
 
-function dynnodepool_ensure(pool: *DynNodePool, needed: uint64) : void {
-  mut new_cap : uint64 := 0;
-  mut raw : *void := null;
-  if (needed <= (*pool).cap) { return; }
-  new_cap := (*pool).cap;
-  while (new_cap < needed) {
-    new_cap := new_cap + (*pool).chunk;
+// The one and only allocation primitive -- every returned *ASTNode is
+// permanently valid (points into a chunk that's never moved or freed
+// before process exit), unlike the old ensure-then-index pattern this
+// replaces.
+function dynnodepool_alloc(pool: *DynNodePool) : *ASTNode {
+  mut n : *ASTNode := null;
+  mut new_chunk : *NodeChunk := null;
+  if ((*pool).tail_count >= (*pool).chunk_cap) {
+    new_chunk := dynnodepool_new_chunk((*pool).chunk_cap);
+    (*(*pool).tail).next := new_chunk;
+    (*pool).tail := new_chunk;
+    (*pool).tail_count := 0;
   }
-  raw := sys_mremap((*pool).ptr as uintptr, (*pool).cap * sizeof(ASTNode), new_cap * sizeof(ASTNode), 1);
-  (*pool).ptr := raw as *ASTNode;
-  (*pool).cap := new_cap;
+  n := &(*(*pool).tail).ptr[(*pool).tail_count];
+  (*pool).tail_count := (*pool).tail_count + 1;
+  return n;
 }
 
 // Replaces the old fixed int32/uint64[20000] parallel arrays -- three
@@ -216,7 +261,6 @@ struct Parser {
   tok_idx : uint64;
 
   pool : DynNodePool;
-  node_count : uint64;
 
   // `panic`: transient "unwind to the nearest recovery point" signal,
   // exactly what the old single-shot `had_error` used to be -- cleared
@@ -236,14 +280,18 @@ struct Parser {
   lex_error_tok : Token;
 }
 
+// v1.1.n: a bit-reinterpreting cast, O(1) -- see Sema.ptl's own int64_
+// to_uint64 (the other direction) for the full story: this was an O(n)
+// counting loop until 2026-08-31, and since THIS direction is exactly
+// what runs on every parsed INT_LIT's own value at parse time (the two
+// call sites just below), a real, ordinary user literal like
+// `mut x : uint64 := 5000000000;` made compilation itself hang for
+// billions of loop iterations -- empirically confirmed (20+ seconds,
+// still running, before this fix). int64/uint64 are both plain 64-bit
+// `i64` at the LLVM level, so this is a true no-op cast (gen_cast's own
+// same-width int branch), not an approximation of one.
 function uint64_to_int64(n: uint64) : int64 {
-  mut result : int64 := 0;
-  mut steps : uint64 := n;
-  while (steps > 0) {
-    result := result + 1;
-    steps := steps - 1;
-  }
-  return result;
+  return n as int64;
 }
 
 function byte_digit_value(b: uint8) : uint64 {
@@ -434,10 +482,7 @@ function synchronize_toplevel(p: *Parser) : void {
 }
 
 function alloc_node(p: *Parser, kind: uint32) : *ASTNode {
-  mut n : *ASTNode := null;
-  dynnodepool_ensure(&(*p).pool, (*p).node_count + 1);
-  n := &(*p).pool.ptr[(*p).node_count];
-  (*p).node_count := (*p).node_count + 1;
+  mut n : *ASTNode := dynnodepool_alloc(&(*p).pool);
   (*n).kind := kind;
   (*n).tok := Token { kind := 0, offset := 0, length := 0 };
   (*n).first_child := null;
@@ -552,6 +597,34 @@ function parse_type(p: *Parser) : *ASTNode {
   if (cur_kind(p) == 49) {
     advance(p);
     return parse_function_type(p, true);
+  }
+
+  // v1.1.n: `**T` (needed for `main(argv: **char, argc: uint16)`,
+  // SS6.3) -- the LEXER already tokenizes two adjacent `*` characters
+  // as ONE token (165, the `**` exponentiation operator, v1.1.3), so a
+  // TYPE position seeing that same token has to un-merge it back into
+  // two pointer levels itself; nothing about `**`-as-an-operator
+  // changes here, this is purely a type-grammar reading of the same
+  // token id. Only the common, actually-needed shape (`**` directly
+  // followed by an ordinary type `parse_type` itself already knows how
+  // to read -- a base type, an array, a further `*`/`**`, ...) is
+  // handled -- `**const T`/the array-of-double-pointer speculative
+  // lookahead the single-`*` branch below does for `*T[N]` are NOT
+  // replicated here, deliberately: `argv`'s own type is the only real
+  // motivating case, not a general double-pointer grammar overhaul.
+  if (cur_kind(p) == 165) {
+    advance(p);
+    inner := parse_type(p);
+    if ((*p).panic) {
+      return null;
+    }
+    ptr_node := alloc_node(p, 121);
+    (*ptr_node).left := inner;
+    (*ptr_node).is_mutable := true;
+    n := alloc_node(p, 121);
+    (*n).left := ptr_node;
+    (*n).is_mutable := true;
+    return n;
   }
 
   if (cur_kind(p) == 54) {
@@ -989,11 +1062,37 @@ function parse_postfix(p: *Parser) : *ASTNode {
 }
 
 // unary ::= ("!" | "-" | "*" | "&") unary | postfix
+//
+// v1.1.n: `**p` (double dereference) has the exact same lexer-side
+// collision `parse_type`'s own `**T` fix already documents -- two
+// adjacent `*` characters are always ONE token (165) by the time
+// anything downstream sees them, so a PREFIX position (never a valid
+// start for the INFIX `**` exponentiation operator -- that one always
+// needs a left operand already parsed, at the separate `power` level
+// below, so there's no real ambiguity here) has to un-merge it back
+// into two nested UNARY_EXPR dereferences itself, same as the type
+// grammar does for two nested TYPE_POINTERs. Recursing through `parse_
+// unary` again for whatever follows handles arbitrarily deep chains
+// for free either way (`****p` is two `165` tokens, `***p` is one
+// `165` then one plain `81`), exactly like the type-side fix.
 function parse_unary(p: *Parser) : *ASTNode {
   mut k : int32 := cur_kind(p);
   mut n : *ASTNode := null;
   mut inner : *ASTNode := null;
+  mut n2 : *ASTNode := null;
 
+  if (k == 165) {
+    advance(p);
+    inner := parse_unary(p);
+    if ((*p).panic) { return null; }
+    n := alloc_node(p, 147);
+    (*n).op_type := 81;
+    (*n).left := inner;
+    n2 := alloc_node(p, 147);
+    (*n2).op_type := 81;
+    (*n2).left := n;
+    return n2;
+  }
   if (k == 79 || k == 80 || k == 81 || k == 82) {
     advance(p);
     inner := parse_unary(p);

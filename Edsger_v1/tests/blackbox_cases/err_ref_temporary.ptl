@@ -1,0 +1,16 @@
+namespace \Main;
+
+function bump(ref x: int32) : void {
+  x :+ 1;
+}
+
+function five() : int32 {
+  return 5;
+}
+
+function main() : int32 {
+  // `five()` is a temporary, not a real storage location -- passing it
+  // as a `ref` argument should be rejected.
+  bump(five());
+  return 0;
+}

@@ -1,0 +1,24 @@
+namespace \Main;
+
+// Three independent, unrelated syntax errors, each in its own function.
+// Expected: the parser's panic-mode recovery (synchronize_stmt /
+// synchronize_toplevel) should resynchronize after each one and keep
+// going, reporting all three -- not just the first.
+
+function bad1() : int32 {
+  mut x : int32 := ;
+  return x;
+}
+
+function bad2() : int32 {
+  return 5 +;
+}
+
+function bad3() : int32 {
+  if (x > { return 1; }
+  return 0;
+}
+
+function main() : int32 {
+  return 0;
+}

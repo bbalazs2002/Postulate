@@ -1,0 +1,13 @@
+namespace \Main;
+
+function twice() : int32 {
+  return 1;
+}
+
+function twice() : int32 {
+  return 2;
+}
+
+function main() : int32 {
+  return 0;
+}

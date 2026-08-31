@@ -68,6 +68,18 @@ struct Operand {
   // different types at the text-syntax level, no implicit conversion
   // between them). Checked before `is_reg` in cg_operand.
   is_null : bool;
+
+  // v1.1.n: a FLOAT_LIT's own already-computed IEEE-754 binary64 bit
+  // pattern (float_literal_to_bits) -- neither `imm` (decimal integer
+  // text, wrong syntax entirely for a float constant) nor a register
+  // (a float literal needs no `alloca`/materialization any more than an
+  // int one does) fits; LLVM's own hex float constant syntax (`0x` +
+  // 16 hex digits of the value's OWN bits, always in double-precision
+  // encoding even for an eventual `float`-typed use -- the assembler
+  // narrows it) is what cg_operand emits for this case. Checked before
+  // `is_reg`/`imm`, same as `is_null`.
+  is_float_imm : bool;
+  float_bits : uint64;
 }
 
 // Every fixed IR text fragment used anywhere below, dispatched by
@@ -216,6 +228,31 @@ function cg_slice(cg: *Codegen, src: *DynBytes, off: uint64, ln: uint64) : void 
   (*cg).pos := append_slice((*cg).out, (*cg).pos, src, off, ln);
 }
 
+function cg_hex_digit(cg: *Codegen, nibble: uint64) : void {
+  mut d : uint8 := nibble as uint8;
+  if (d < 10) {
+    cg_byte(cg, 48 + d);
+  } else {
+    cg_byte(cg, 55 + d);
+  }
+}
+
+// LLVM hex float constant: `0x` + 16 hex digits of the value's own
+// IEEE-754 binary64 bit pattern -- used regardless of whether the
+// eventual typed use is `float` or `double` (LLVM's own documented
+// behavior: a hex float constant is always given in double-precision
+// encoding, then converted/rounded to the target type by the
+// assembler).
+function cg_hex64(cg: *Codegen, v: uint64) : void {
+  mut shift : uint64 := 60;
+  mut looping : bool := true;
+  cg_byte(cg, 48); cg_byte(cg, 120);
+  while (looping) {
+    cg_hex_digit(cg, (v >> shift) & 15);
+    if (shift == 0) { looping := false; } else { shift := shift - 4; }
+  }
+}
+
 function new_reg(cg: *Codegen) : uint64 {
   mut r : uint64 := (*cg).reg;
   (*cg).reg := (*cg).reg + 1;
@@ -257,6 +294,10 @@ function cg_operand(cg: *Codegen, op: Operand) : void {
     cg_piece(cg, 50);
     return;
   }
+  if (op.is_float_imm) {
+    cg_hex64(cg, op.float_bits);
+    return;
+  }
   if (op.is_reg) {
     cg_reg_ref(cg, op.reg);
     return;
@@ -267,19 +308,18 @@ function cg_operand(cg: *Codegen, op: Operand) : void {
 // `bool` is `i1`; every other scalar type here is `i<8*bytewidth>`,
 // reusing base_type_size (Module 3's own byte-width table) directly --
 // codegen never needs its own copy of that table.
-// v0 has no cast operator (postulate_v0_language_reference.md SS2.8),
-// so widening a `uint8` byte into a `uint64` needs the same counting-
-// loop technique this file's own uint64_to_int64 already uses for
-// uint64 -> int64 -- comparing `count` against `b` requires them to be
-// the SAME type, hence the uint8 counter alongside the uint64 result.
+// 2026-08-31: was a bounded (<=255 iterations, never actually a
+// performance problem the way int64_to_uint64's own unbounded version
+// was) but equally unnecessary counting loop, from the same Hoare-era
+// lineage (postulate_v0_language_reference.md SS2.8 predates `as`
+// entirely -- Hoare, the only tool that ever compiled code needing
+// this specific workaround, still has no cast operator; this file
+// isn't compiled by Hoare, so it never needed the workaround at all).
+// Plain widening `as` (uint8 -> uint64, an ordinary `zext`) already
+// works in this dialect -- see Lexer.ptl's own `reader_peek(r) as
+// uint64` for existing, working proof.
 function byte_to_uint64(b: uint8) : uint64 {
-  mut result : uint64 := 0;
-  mut count : uint8 := 0;
-  while (count < b) {
-    result := result + 1;
-    count := count + 1;
-  }
-  return result;
+  return b as uint64;
 }
 
 // CHAR_LIT's own tok spans the source text quotes-inclusive (`'a'` or
@@ -305,6 +345,190 @@ function decode_char_literal(src: *DynBytes, tok_offset: uint64) : int64 {
   return uint64_to_int64(byte_to_uint64(b));
 }
 
+// A multi-byte CHAR_LIT anchored to `rune` (Sema's own decorate_
+// literal_with_expected k==142 case already confirmed this is legal
+// and multi-byte, via char_literal_is_multibyte) -- decodes the actual
+// UTF-8 sequence into its own Unicode codepoint VALUE (never reached
+// for a single-byte literal, which always goes through decode_char_
+// literal above instead, escapes included). Standard UTF-8: the
+// leading byte's own low bits (masked by how many continuation bytes
+// follow, from utf8_extra_bytes_sema) seed the value, each continuation
+// byte's own low 6 bits then shift in from the right.
+function decode_rune_literal(src: *DynBytes, tok_offset: uint64) : int64 {
+  mut b0 : uint8 := (*src).ptr[tok_offset + 1];
+  mut extra : uint64 := utf8_extra_bytes_sema(b0);
+  mut mask : uint8 := 127;
+  mut value : uint64 := 0;
+  mut i : uint64 := 0;
+  mut b : uint8 := 0;
+
+  if (extra == 1) { mask := 31; }
+  if (extra == 2) { mask := 15; }
+  if (extra == 3) { mask := 7; }
+
+  value := byte_to_uint64(b0 & mask);
+  while (i < extra) {
+    b := (*src).ptr[tok_offset + 2 + i];
+    value := (value << 6) | byte_to_uint64(b & 63);
+    i := i + 1;
+  }
+  return uint64_to_int64(value);
+}
+
+// One decoded byte of a string literal's own content, read starting at
+// `pos` (an offset into the source buffer, already past the opening
+// quote) -- `consumed` is how many RAW source bytes that was (1 for an
+// ordinary byte, 2 for a backslash escape), so the caller can advance
+// correctly. Same escape table as decode_char_literal above, just `\"`
+// instead of `\'` (a string's own closing delimiter, never a bare `'`
+// inside one) -- kept as a separate function rather than a shared one
+// because that's the one byte where the two differ.
+struct DecodedStringByte {
+  value : uint8;
+  consumed : uint64;
+}
+
+function decode_string_byte_at(src: *DynBytes, pos: uint64) : DecodedStringByte {
+  mut b : uint8 := (*src).ptr[pos];
+  mut e : uint8 := 0;
+  mut v : uint8 := 0;
+
+  if (b == 92) {
+    e := (*src).ptr[pos + 1];
+    if (e == 110) { v := 10; }
+    if (e == 116) { v := 9; }
+    if (e == 114) { v := 13; }
+    if (e == 48) { v := 0; }
+    if (e == 92) { v := 92; }
+    if (e == 34) { v := 34; }
+    return DecodedStringByte { value := v, consumed := 2 };
+  }
+  return DecodedStringByte { value := b, consumed := 1 };
+}
+
+// One decoded Unicode codepoint from a string literal's own content,
+// read starting at `pos` -- `consumed` is how many raw UTF-8 bytes that
+// was (1-4). Unlike decode_string_byte_at (char[N]'s own per-BYTE
+// decoder), this never treats a backslash specially: Sema's own
+// count_utf8_codepoints (the rune[N] anchor's length check) doesn't
+// either, so staying escape-unaware here keeps the two in agreement,
+// exactly like decode_string_byte_at/count_decoded_string_bytes already
+// have to agree for char[N]. (Escape support inside a rune[N]-anchored
+// literal would need both fixed together, same as that pair was --
+// not attempted here, a real but separate follow-up.)
+struct DecodedCodepoint {
+  value : int64;
+  consumed : uint64;
+}
+
+function decode_codepoint_at(src: *DynBytes, pos: uint64) : DecodedCodepoint {
+  mut b0 : uint8 := (*src).ptr[pos];
+  mut extra : uint64 := utf8_extra_bytes_sema(b0);
+  mut mask : uint8 := 127;
+  mut value : uint64 := 0;
+  mut i : uint64 := 0;
+  mut b : uint8 := 0;
+
+  if (extra == 1) { mask := 31; }
+  if (extra == 2) { mask := 15; }
+  if (extra == 3) { mask := 7; }
+
+  value := byte_to_uint64(b0 & mask);
+  while (i < extra) {
+    b := (*src).ptr[pos + 1 + i];
+    value := (value << 6) | byte_to_uint64(b & 63);
+    i := i + 1;
+  }
+  return DecodedCodepoint { value := uint64_to_int64(value), consumed := extra + 1 };
+}
+
+// A string literal anchored to a fixed `rune[N]` array -- built exactly
+// like gen_string_char_array (a fresh alloca, one GEP+store per element
+// in source order, then a whole-value load back out), just decoding
+// per CODEPOINT (decode_codepoint_at, above) instead of per byte, and
+// storing each one as its own element (`rune`'s own LLVM type, `i32`,
+// via the ordinary cg_type dispatch -- rune is a real builtin now, no
+// special-casing needed here beyond picking this decoder over char[N]'s).
+function gen_string_rune_array(cg: *Codegen, s: *Sema, file_idx: uint64, e: *ASTNode) : Operand {
+  mut src : *DynBytes := &(*(*s).buffers)[file_idx].bytes;
+  mut content_off : uint64 := (*e).tok.offset + 1;
+  mut content_len : uint64 := (*e).tok.length - 2;
+  mut pos : uint64 := 0;
+  mut idx : uint64 := 0;
+  mut cp : DecodedCodepoint := DecodedCodepoint { value := 0, consumed := 0 };
+  mut lit_slot : uint64 := new_reg(cg);
+  mut elem_addr : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+  mut val_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+  mut r : uint64 := 0;
+
+  cg_piece(cg, 1); cg_reg_ref(cg, lit_slot); cg_piece(cg, 2); cg_piece(cg, 6);
+  cg_type(cg, s, file_idx, (*e).data_type);
+  cg_piece(cg, 0);
+
+  while (pos < content_len) {
+    cp := decode_codepoint_at(src, content_off + pos);
+    val_op := Operand { is_reg := false, reg := 0, imm := cp.value, is_null := false, is_float_imm := false, float_bits := 0 };
+    elem_addr := gen_member_addr(cg, s, file_idx, (*e).data_type, Operand { is_reg := true, reg := lit_slot, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 }, idx);
+    cg_piece(cg, 1); cg_piece(cg, 9);
+    cg_type(cg, s, (*e).type_file_idx, (*(*e).data_type).left);
+    cg_byte(cg, 32);
+    cg_operand(cg, val_op);
+    cg_piece(cg, 8); cg_operand(cg, elem_addr); cg_piece(cg, 0);
+    pos := pos + cp.consumed;
+    idx := idx + 1;
+  }
+
+  r := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 7);
+  cg_type(cg, s, file_idx, (*e).data_type);
+  cg_piece(cg, 8); cg_reg_ref(cg, lit_slot); cg_piece(cg, 0);
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+}
+
+// A string literal anchored to a fixed `char[N]` array (Sema's own
+// decorate_literal_with_expected k==143 case; `count_decoded_string_
+// bytes` there already guarantees N exactly matches how many bytes this
+// loop will produce) -- built exactly like an ordinary ARRAY_LIT (k==
+// 153, above): a fresh alloca, one GEP+store per element in order, then
+// a whole-value load back out. The only difference is where each
+// element's VALUE comes from -- decoded literal bytes here, evaluated
+// child expressions there.
+function gen_string_char_array(cg: *Codegen, s: *Sema, file_idx: uint64, e: *ASTNode) : Operand {
+  mut src : *DynBytes := &(*(*s).buffers)[file_idx].bytes;
+  mut content_off : uint64 := (*e).tok.offset + 1;
+  mut content_len : uint64 := (*e).tok.length - 2;
+  mut pos : uint64 := 0;
+  mut idx : uint64 := 0;
+  mut db : DecodedStringByte := DecodedStringByte { value := 0, consumed := 0 };
+  mut lit_slot : uint64 := new_reg(cg);
+  mut elem_addr : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+  mut byte_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+  mut r : uint64 := 0;
+
+  cg_piece(cg, 1); cg_reg_ref(cg, lit_slot); cg_piece(cg, 2); cg_piece(cg, 6);
+  cg_type(cg, s, file_idx, (*e).data_type);
+  cg_piece(cg, 0);
+
+  while (pos < content_len) {
+    db := decode_string_byte_at(src, content_off + pos);
+    byte_op := Operand { is_reg := false, reg := 0, imm := uint64_to_int64(byte_to_uint64(db.value)), is_null := false, is_float_imm := false, float_bits := 0 };
+    elem_addr := gen_member_addr(cg, s, file_idx, (*e).data_type, Operand { is_reg := true, reg := lit_slot, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 }, idx);
+    cg_piece(cg, 1); cg_piece(cg, 9);
+    cg_byte(cg, 105); cg_uint(cg, 8);
+    cg_byte(cg, 32);
+    cg_operand(cg, byte_op);
+    cg_piece(cg, 8); cg_operand(cg, elem_addr); cg_piece(cg, 0);
+    pos := pos + db.consumed;
+    idx := idx + 1;
+  }
+
+  r := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 7);
+  cg_type(cg, s, file_idx, (*e).data_type);
+  cg_piece(cg, 8); cg_reg_ref(cg, lit_slot); cg_piece(cg, 0);
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+}
+
 function llvm_int_width(tok_kind: int32) : uint64 {
   if (tok_kind == 32) { return 1; }
   return base_type_size(tok_kind) * 8;
@@ -327,6 +551,15 @@ function cg_type(cg: *Codegen, s: *Sema, file_idx: uint64, ty: *ASTNode) : void 
     cg_piece(cg, 51);
     return;
   }
+  // v1.1.10: a FUNC_TYPE-typed value (a function/extern reference,
+  // never called directly through its own name) is, at runtime, just
+  // an address -- gen_global_func_addr/gen_call's own indirect-call
+  // path already treat it that way, this is the matching type-emission
+  // half (storage/parameter/return declarations of such a value).
+  if ((*ty).kind == 161) {
+    cg_piece(cg, 51);
+    return;
+  }
   if ((*ty).kind == 122) {
     cg_byte(cg, 91);
     cg_uint(cg, int64_to_uint64((*ty).int_val));
@@ -341,6 +574,19 @@ function cg_type(cg: *Codegen, s: *Sema, file_idx: uint64, ty: *ASTNode) : void 
   }
   if ((*ty).tok.kind == 33) {
     cg_piece(cg, 26);
+    return;
+  }
+  // v1.1.n: float32/float64/ufloat32/ufloat64 (`float`/`ufloat` are
+  // aliases for the `64` form) -- checked before the generic integer
+  // fallback below, since every float kind also has a nonzero
+  // base_type_size (struct-field/sizeof sizing needs that) and would
+  // otherwise be miscompiled as a plain integer of the same byte width.
+  if (is_float_kind((*ty).tok.kind)) {
+    if (base_type_size((*ty).tok.kind) == 4) {
+      cg_byte(cg, 102); cg_byte(cg, 108); cg_byte(cg, 111); cg_byte(cg, 97); cg_byte(cg, 116);
+    } else {
+      cg_byte(cg, 100); cg_byte(cg, 111); cg_byte(cg, 117); cg_byte(cg, 98); cg_byte(cg, 108); cg_byte(cg, 101);
+    }
     return;
   }
   if (base_type_size((*ty).tok.kind) > 0) {
@@ -378,6 +624,9 @@ function is_supported_value_type(ty: *ASTNode) : bool {
   if ((*ty).kind == 122) {
     return is_supported_value_type((*ty).left);
   }
+  // v1.1.10: FUNC_TYPE -- a function/extern reference, itself just an
+  // address at runtime (cg_type's own matching k==161 case).
+  if ((*ty).kind == 161) { return true; }
   if ((*ty).kind != 120) { return false; }
   return !is_void_type(ty);
 }
@@ -410,7 +659,7 @@ function decl_is_supported(decl: *ASTNode) : bool {
       ok := false;
     }
   }
-  if (ok && (*decl).kind == 113) {
+  if (ok && ((*decl).kind == 113 || (*decl).kind == 162)) {
     body := (*decl).extra;
     if (body != null) {
       stmt := (*body).first_child;
@@ -488,8 +737,8 @@ function gen_and(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTNo
   mut rhs_l : uint64 := new_label(cg);
   mut false_l : uint64 := new_label(cg);
   mut end_l : uint64 := new_label(cg);
-  mut left_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
-  mut right_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut left_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+  mut right_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   mut r : uint64 := 0;
 
   cg_piece(cg, 1); cg_reg_ref(cg, slot); cg_piece(cg, 2); cg_piece(cg, 6);
@@ -516,7 +765,7 @@ function gen_and(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTNo
   r := new_reg(cg);
   cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 7);
   cg_byte(cg, 105); cg_byte(cg, 49); cg_piece(cg, 8); cg_reg_ref(cg, slot); cg_piece(cg, 0);
-  return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
 }
 
 function gen_or(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTNode) : Operand {
@@ -524,8 +773,8 @@ function gen_or(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTNod
   mut true_l : uint64 := new_label(cg);
   mut rhs_l : uint64 := new_label(cg);
   mut end_l : uint64 := new_label(cg);
-  mut left_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
-  mut right_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut left_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+  mut right_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   mut r : uint64 := 0;
 
   cg_piece(cg, 1); cg_reg_ref(cg, slot); cg_piece(cg, 2); cg_piece(cg, 6);
@@ -552,7 +801,7 @@ function gen_or(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTNod
   r := new_reg(cg);
   cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 7);
   cg_byte(cg, 105); cg_byte(cg, 49); cg_piece(cg, 8); cg_reg_ref(cg, slot); cg_piece(cg, 0);
-  return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
 }
 
 // Argument evaluation order is LEFT TO RIGHT (postulate_v1_language_
@@ -578,14 +827,38 @@ function gen_call(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
   mut i : uint64 := 0;
   mut r : uint64 := 0;
   mut is_void : bool := false;
+  mut indirect : bool := false;
+  mut callee_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+  mut ret_ty : *ASTNode := null;
+  mut ret_file : uint64 := (*(*e).left).type_file_idx;
 
-  if (callee_decl == null || ((*callee_decl).kind != 113 && (*callee_decl).kind != 112)) {
-    (*cg).had_error := true;
-    return Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  if (callee_decl != null && ((*callee_decl).kind == 113 || (*callee_decl).kind == 112)) {
+    param := (*callee_decl).first_child;
+    ret_ty := (*callee_decl).data_type;
+  } else {
+    // v1.1.10: not a named function/extern -- maybe a function-TYPE-
+    // typed VALUE instead (a variable/parameter/expression holding a
+    // function reference), callable indirectly through its own
+    // synthesized FUNC_TYPE signature (Sema's own decorate_expr k==149
+    // case already accepts this shape, matching the callee's own
+    // argument types against `sig_params` read the same way here).
+    // `(*e).left` is evaluated here, ONCE, to get the actual function-
+    // pointer VALUE to call through -- a direct call never evaluates
+    // its own callee expression at all (there's nothing to compute,
+    // `@name` is a compile-time-known symbol), so this only ever
+    // triggers for the genuinely-indirect case.
+    if ((*(*e).left).data_type != null && (*(*(*e).left).data_type).kind == 161) {
+      indirect := true;
+      callee_op := gen_expr(cg, s, sc, file_idx, (*e).left);
+      param := (*(*(*e).left).data_type).first_child;
+      ret_ty := (*(*(*e).left).data_type).data_type;
+    } else {
+      (*cg).had_error := true;
+      return Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+    }
   }
 
   arg := (*e).first_child;
-  param := (*callee_decl).first_child;
   while (arg != null) {
     args[n] := arg;
     if (param != null && (*param).is_mutable) {
@@ -607,7 +880,7 @@ function gen_call(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
     if (param != null) { param := (*param).next_sibling; }
   }
 
-  is_void := is_void_type((*callee_decl).data_type);
+  is_void := is_void_type(ret_ty);
 
   cg_piece(cg, 1);
   if (!is_void) {
@@ -616,10 +889,14 @@ function gen_call(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
     cg_piece(cg, 2);
   }
   cg_piece(cg, 16);
-  cg_type(cg, s, (*(*e).left).type_file_idx, (*callee_decl).data_type);
+  cg_type(cg, s, ret_file, ret_ty);
   cg_byte(cg, 32);
-  cg_byte(cg, 64);
-  cg_slice(cg, &(*(*s).buffers)[(*(*e).left).type_file_idx].bytes, (*callee_decl).tok.offset, (*callee_decl).tok.length);
+  if (indirect) {
+    cg_operand(cg, callee_op);
+  } else {
+    cg_byte(cg, 64);
+    cg_slice(cg, &(*(*s).buffers)[ret_file].bytes, (*callee_decl).tok.offset, (*callee_decl).tok.length);
+  }
   cg_piece(cg, 24);
   i := 0;
   while (i < n) {
@@ -637,9 +914,9 @@ function gen_call(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
   cg_piece(cg, 0);
 
   if (is_void) {
-    return Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+    return Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   }
-  return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
 }
 
 // Sets are already validated by Module 3 (type/category, operand
@@ -684,7 +961,7 @@ function gen_ptr_add(cg: *Codegen, s: *Sema, file_idx: uint64, e: *ASTNode, left
   cg_byte(cg, 32);
   cg_operand(cg, int_op);
   cg_piece(cg, 0);
-  return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
 }
 
 // `p - n` negates the index first (GEP has no separate "subtract"
@@ -729,7 +1006,7 @@ function gen_ptr_sub(cg: *Codegen, s: *Sema, file_idx: uint64, e: *ASTNode, left
     cg_piece(cg, 1); cg_reg_ref(cg, neg); cg_piece(cg, 2); cg_piece(cg, 31);
     cg_byte(cg, 32); cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32);
     cg_reg_ref(cg, r); cg_piece(cg, 3); cg_uint(cg, sz); cg_piece(cg, 0);
-    return Operand { is_reg := true, reg := neg, imm := 0, is_null := false };
+    return Operand { is_reg := true, reg := neg, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   }
 
   neg := new_reg(cg);
@@ -750,7 +1027,7 @@ function gen_ptr_sub(cg: *Codegen, s: *Sema, file_idx: uint64, e: *ASTNode, left
   cg_type(cg, s, int_file, int_ty); cg_byte(cg, 32);
   cg_reg_ref(cg, neg);
   cg_piece(cg, 0);
-  return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
 }
 
 // `sizeof`/`lengthof` (postulate_v1_language_reference.md SS2.7a) are
@@ -805,6 +1082,16 @@ function gen_cast(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
   if ((src_cat == 4 && dst_cat == 4) || (src_cat == 2 && dst_cat == 2)) {
     return src_op;
   }
+  // v1.1.n: a struct/array-category ("0") cast only ever reaches here
+  // when Sema's own identity-cast check (types_equal(src,dst), CAST_EXPR
+  // decoration) already confirmed it's a pure type ascription -- the
+  // exact same type on both sides -- never a real cross-type composite
+  // conversion (those stay illegal, matching Rust/Zig's own deliberate
+  // restriction of `as` to scalars). Nothing to convert, the value's
+  // already exactly the right shape.
+  if (src_cat == 0 && dst_cat == 0) {
+    return src_op;
+  }
 
   if (src_cat == 4 && dst_cat == 1) {
     r := new_reg(cg);
@@ -812,7 +1099,7 @@ function gen_cast(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
     cg_piece(cg, 51); cg_byte(cg, 32);
     cg_operand(cg, src_op);
     cg_piece(cg, 54); cg_piece(cg, 0);
-    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   }
   if (src_cat == 1 && dst_cat == 4) {
     r := new_reg(cg);
@@ -820,7 +1107,7 @@ function gen_cast(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
     cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32);
     cg_operand(cg, src_op);
     cg_piece(cg, 56); cg_piece(cg, 0);
-    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   }
 
   if (src_cat == 2) {
@@ -831,7 +1118,7 @@ function gen_cast(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
     cg_piece(cg, 60);
     cg_type(cg, s, file_idx, dst_ty);
     cg_piece(cg, 0);
-    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   }
   if (dst_cat == 2) {
     r := new_reg(cg);
@@ -841,7 +1128,67 @@ function gen_cast(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
     cg_byte(cg, 32);
     cg_operand(cg, src_op);
     cg_piece(cg, 3); cg_byte(cg, 48); cg_piece(cg, 0);
-    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+  }
+
+  // v1.1.3: float-family casts -- checked before the generic integer-
+  // width fallback below, which reads llvm_int_width (meaningless for a
+  // float type) and would otherwise emit a `trunc`/`zext`/`sext` on a
+  // float value, invalid IR.
+  if (src_cat == 6 && dst_cat == 6) {
+    sw := base_type_size((*src_ty).tok.kind);
+    dw := base_type_size((*dst_ty).tok.kind);
+    if (sw == dw) {
+      // float32<->ufloat32 or float64<->ufloat64: identical LLVM type
+      // either way (`float`/`double` carry no signedness of their own).
+      return src_op;
+    }
+    r := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+    if (dw > sw) {
+      cg_byte(cg, 102); cg_byte(cg, 112); cg_byte(cg, 101); cg_byte(cg, 120); cg_byte(cg, 116); cg_byte(cg, 32);
+    } else {
+      cg_byte(cg, 102); cg_byte(cg, 112); cg_byte(cg, 116); cg_byte(cg, 114); cg_byte(cg, 117); cg_byte(cg, 110); cg_byte(cg, 99); cg_byte(cg, 32);
+    }
+    cg_type(cg, s, (*(*e).left).type_file_idx, src_ty);
+    cg_byte(cg, 32);
+    cg_operand(cg, src_op);
+    cg_piece(cg, 60);
+    cg_type(cg, s, file_idx, dst_ty);
+    cg_piece(cg, 0);
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+  }
+  if (src_cat == 6 && dst_cat == 1) {
+    r := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+    if (is_unsigned_for_cast((*dst_ty).tok.kind)) {
+      cg_byte(cg, 102); cg_byte(cg, 112); cg_byte(cg, 116); cg_byte(cg, 111); cg_byte(cg, 117); cg_byte(cg, 105); cg_byte(cg, 32);
+    } else {
+      cg_byte(cg, 102); cg_byte(cg, 112); cg_byte(cg, 116); cg_byte(cg, 111); cg_byte(cg, 115); cg_byte(cg, 105); cg_byte(cg, 32);
+    }
+    cg_type(cg, s, (*(*e).left).type_file_idx, src_ty);
+    cg_byte(cg, 32);
+    cg_operand(cg, src_op);
+    cg_piece(cg, 60);
+    cg_type(cg, s, file_idx, dst_ty);
+    cg_piece(cg, 0);
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+  }
+  if (src_cat == 1 && dst_cat == 6) {
+    r := new_reg(cg);
+    cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+    if (is_unsigned_for_cast((*src_ty).tok.kind)) {
+      cg_byte(cg, 117); cg_byte(cg, 105); cg_byte(cg, 116); cg_byte(cg, 111); cg_byte(cg, 102); cg_byte(cg, 112); cg_byte(cg, 32);
+    } else {
+      cg_byte(cg, 115); cg_byte(cg, 105); cg_byte(cg, 116); cg_byte(cg, 111); cg_byte(cg, 102); cg_byte(cg, 112); cg_byte(cg, 32);
+    }
+    cg_type(cg, s, (*(*e).left).type_file_idx, src_ty);
+    cg_byte(cg, 32);
+    cg_operand(cg, src_op);
+    cg_piece(cg, 60);
+    cg_type(cg, s, file_idx, dst_ty);
+    cg_piece(cg, 0);
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   }
 
   sw := llvm_int_width((*src_ty).tok.kind);
@@ -866,15 +1213,1392 @@ function gen_cast(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
   cg_piece(cg, 60);
   cg_type(cg, s, file_idx, dst_ty);
   cg_piece(cg, 0);
-  return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+}
+
+// v1.1.10: a bare reference to a function/extern name (not immediately
+// called) is a FUNC_TYPE-typed value -- Sema's own decorate_expr
+// k==140/163 case already synthesizes that type (make_func_type_from_
+// decl), but the symbol itself has no local "slot" to `load` from the
+// way a variable/parameter does: LLVM function symbols are already
+// addresses, never `alloca`'d. A single zero-offset `getelementptr`
+// materializes that address into an ordinary register instead, exactly
+// like any other computed pointer value -- every later use of it (an
+// indirect call through it, storing it into a FUNC_TYPE-typed local,
+// passing it as an argument) then needs no special case of its own,
+// since it flows out of gen_expr as an ordinary Operand like anything
+// else.
+function gen_global_func_addr(cg: *Codegen, s: *Sema, file_idx: uint64, decl: *ASTNode) : Operand {
+  mut r : uint64 := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 52);
+  cg_byte(cg, 105); cg_uint(cg, 8);
+  cg_piece(cg, 3);
+  cg_piece(cg, 51); cg_byte(cg, 32);
+  cg_byte(cg, 64);
+  cg_slice(cg, &(*(*s).buffers)[file_idx].bytes, (*decl).tok.offset, (*decl).tok.length);
+  cg_piece(cg, 3);
+  cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32); cg_byte(cg, 48);
+  cg_piece(cg, 0);
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+}
+
+// ---------------------------------------------------------------------
+// FLOAT_LIT -> IEEE-754 binary64 bits, in pure integer arithmetic.
+//
+// Why this exists at all: FLOAT_LIT (unlike every other literal kind)
+// stores no pre-computed value of its own -- the ASTNode kind table's
+// own comment says so -- so Codegen has to convert the raw source text
+// itself. It has to do this WITHOUT ever using a `float`/`double` value
+// anywhere in its OWN implementation: this file is compiled by the
+// vendored `codegen_selfhost` bootstrap binary (see ../../scripts/
+// build.sh), a frozen snapshot of the OLD, pre-float architecture that
+// has no idea what a float type even is. Every step below is ordinary
+// uint64/128-bit-pair (two uint64s) integer arithmetic.
+//
+// Scope: plain decimal form (`digit+ . digit+ (e[+-]?digit+)?`) AND
+// based form (`digit+ n value_digit+ (.value_digit+)? (exponent)?`,
+// bases 2/8/10/16 -- float_lit_is_based_form/parse_based_float_literal,
+// below). Base 10's own based form (`10n123.45e6`) reuses the plain-
+// decimal machinery outright (float_literal_to_bits) once its digits
+// and net exponent are read in the based-form's own value_digit shape
+// -- decimal scaling doesn't care which literal SYNTAX produced its
+// `digits`/`dec_exp` pair. Bases 2/8/16 skip decimal scaling entirely:
+// being powers of two, `digits * base^net_exp` is an EXACT binary
+// shift (`based_float_to_bits`), never an approximation the way
+// scaling by a non-power-of-two base would need.
+//
+// Precision: correct across the full representable exponent range
+// (underflows to +0.0 / overflows to +inf rather than wrapping or
+// crashing), but the final mantissa extraction TRUNCATES rather than
+// round-to-nearest -- at most 1 ULP of error, judged an acceptable
+// trade for how much more intricate a fully round-to-nearest-even
+// implementation would be to get right without any way to cross-check
+// it against a working float implementation on the SAME machine.
+// ---------------------------------------------------------------------
+
+// Built via a shift, never spelled as a literal >~1.3 billion: this
+// exact Edsger v0/v1 compiler generation has a genuine, confirmed
+// front-end performance bug where a hand-written decimal integer
+// literal past roughly that magnitude makes compilation itself
+// severely CPU-bound (near-hang) -- the same workaround already used
+// for max_value_for_anchor's own large constants elsewhere in this
+// codebase. Called (not inlined as a `const`, since this language has
+// none), which costs nothing at the RUNTIME of the resulting compiled
+// program -- the slow part was only ever THIS file's own compile time.
+function mask32() : uint64 {
+  mut one : uint64 := 1;
+  return (one << 32) - 1;
+}
+
+function two_pow_32() : uint64 {
+  mut one : uint64 := 1;
+  return one << 32;
+}
+
+function mask52() : uint64 {
+  mut one : uint64 := 1;
+  return (one << 52) - 1;
+}
+
+// binary64's own all-ones exponent field (2047 = 2^11 - 1) -- used only
+// to build the "overflowed to infinity" bit pattern, as a uint64 (the
+// plain literal `2047 << 52` doesn't anchor to uint64 on its own here:
+// both operands of that shift are bare literals, and Sema's own
+// anchoring rule only kicks in when at least one side is ALREADY
+// concretely typed).
+function inf_exp_bits() : uint64 {
+  mut e : uint64 := 2047;
+  return e;
+}
+
+// A 128-bit unsigned value as two uint64 halves -- this language has no
+// native 128-bit integer type, and the intermediate values scaling a
+// decimal literal by a large power of ten need more than 64 bits of
+// headroom.
+struct Wide128 {
+  hi : uint64;
+  lo : uint64;
+}
+
+function wide_shl(w: Wide128, k: uint64) : Wide128 {
+  if (k == 0) { return w; }
+  if (k >= 128) { return Wide128 { hi := 0, lo := 0 }; }
+  if (k >= 64) { return Wide128 { hi := w.lo << (k - 64), lo := 0 }; }
+  return Wide128 { hi := (w.hi << k) | (w.lo >> (64 - k)), lo := w.lo << k };
+}
+
+function wide_shr(w: Wide128, k: uint64) : Wide128 {
+  if (k == 0) { return w; }
+  if (k >= 128) { return Wide128 { hi := 0, lo := 0 }; }
+  if (k >= 64) { return Wide128 { hi := 0, lo := w.hi >> (k - 64) }; }
+  return Wide128 { hi := w.hi >> k, lo := (w.lo >> k) | (w.hi << (64 - k)) };
+}
+
+// w * 10, as an exact 128-bit result -- schoolbook long multiplication
+// across four 32-bit limbs (base 2^32) rather than a naive `hi << 32`-
+// style split, which would silently overflow a uint64 register (a
+// 36-bit partial product shifted left by 32 needs up to 68 bits, more
+// than fits). The caller is expected to have already shifted `w` right
+// (via wide_shr, tracking the same shift as a binary-exponent
+// adjustment) whenever its own top nibble is nonzero, so the true
+// 128-bit product here never actually needs a 5th limb.
+function wide_mul10(w: Wide128) : Wide128 {
+  mut l0 : uint64 := w.lo & mask32();
+  mut l1 : uint64 := w.lo >> 32;
+  mut l2 : uint64 := w.hi & mask32();
+  mut l3 : uint64 := w.hi >> 32;
+  mut c : uint64 := 0;
+  mut r : uint64 := 0;
+  mut n0 : uint64 := 0;
+  mut n1 : uint64 := 0;
+  mut n2 : uint64 := 0;
+  mut n3 : uint64 := 0;
+
+  r := l0 * 10 + c; n0 := r & mask32(); c := r >> 32;
+  r := l1 * 10 + c; n1 := r & mask32(); c := r >> 32;
+  r := l2 * 10 + c; n2 := r & mask32(); c := r >> 32;
+  r := l3 * 10 + c; n3 := r & mask32();
+
+  return Wide128 { hi := (n3 << 32) | n2, lo := (n1 << 32) | n0 };
+}
+
+struct WideDiv10Result {
+  q : Wide128;
+  rem : uint64;
+}
+
+// w / 10, exact quotient and remainder -- base-2^32 long division
+// across the same four limbs, most-significant first, carrying each
+// step's remainder (always < 10) into the next.
+function wide_div10(w: Wide128) : WideDiv10Result {
+  mut l3 : uint64 := w.hi >> 32;
+  mut l2 : uint64 := w.hi & mask32();
+  mut l1 : uint64 := w.lo >> 32;
+  mut l0 : uint64 := w.lo & mask32();
+  mut rem : uint64 := 0;
+  mut cur : uint64 := 0;
+  mut q3 : uint64 := 0;
+  mut q2 : uint64 := 0;
+  mut q1 : uint64 := 0;
+  mut q0 : uint64 := 0;
+
+  cur := rem * two_pow_32() + l3; q3 := cur / 10; rem := cur % 10;
+  cur := rem * two_pow_32() + l2; q2 := cur / 10; rem := cur % 10;
+  cur := rem * two_pow_32() + l1; q1 := cur / 10; rem := cur % 10;
+  cur := rem * two_pow_32() + l0; q0 := cur / 10; rem := cur % 10;
+
+  return WideDiv10Result { q := Wide128 { hi := (q3 << 32) | q2, lo := (q1 << 32) | q0 }, rem := rem };
+}
+
+function highest_set_bit(x: uint64) : uint64 {
+  mut n : uint64 := 0;
+  mut v : uint64 := x;
+  while (v > 1) {
+    v := v >> 1;
+    n := n + 1;
+  }
+  return n;
+}
+
+function highest_set_bit_wide(w: Wide128) : uint64 {
+  if (w.hi != 0) { return 64 + highest_set_bit(w.hi); }
+  return highest_set_bit(w.lo);
+}
+
+struct FloatParts {
+  digits : uint64;
+  dec_exp : int64;
+}
+
+// `digit+ 'n' ...` (the lexer's own based-form marker, right after the
+// leading digit run) vs `digit+ '.' ...` (plain form, which a FLOAT_LIT
+// always has, per the ASTNode kind table's own comment) -- cheap to
+// tell apart without parsing either form fully.
+function float_lit_is_based_form(src: *DynBytes, offset: uint64, length: uint64) : bool {
+  mut i : uint64 := 0;
+  while (i < length && is_digit((*src).ptr[offset + i])) {
+    i := i + 1;
+  }
+  return i < length && (*src).ptr[offset + i] == 110;
+}
+
+// How many bits one value_digit is worth in a power-of-two base -- 0
+// for base 10 (never used there; that path reuses float_literal_to_
+// bits' own decimal scaling instead, see this section's own header
+// comment).
+function bits_per_digit_for_base(base: uint64) : uint64 {
+  if (base == 2) { return 1; }
+  if (base == 8) { return 3; }
+  if (base == 16) { return 4; }
+  return 0;
+}
+
+// How many value_digits fit in a uint64 accumulator without overflow,
+// per base -- base^max_digits - 1 (every digit at its own max value)
+// must stay <= uint64's own max (2^64 - 1): 2^64-1 exactly at 64
+// binary digits, 2^63-1 at 21 octal digits (22 would need 66 bits),
+// 2^64-1 exactly at 16 hex digits. Base 10 mirrors parse_float_
+// literal's own existing 19-digit cap, for the same reason given
+// there (ample for a binary64 mantissa's own ~15-17 significant
+// decimal digits).
+function max_value_digits_for_base(base: uint64) : uint64 {
+  if (base == 2) { return 64; }
+  if (base == 8) { return 21; }
+  if (base == 16) { return 16; }
+  return 19;
+}
+
+struct BasedFloatParts {
+  digits : uint64;
+  base : uint64;
+  // Net exponent in value_digit POSITION units (mirrors FloatParts'
+  // own dec_exp exactly) -- base 10 hands this straight to float_
+  // literal_to_bits unchanged; bases 2/8/16 scale it by bits_per_
+  // digit_for_base first (based_float_to_bits), since there it's a
+  // binary shift amount instead of a decimal one.
+  net_exp : int64;
+}
+
+// `digit+ 'n' value_digit+ ('.' value_digit+)? (exponent)?` (see
+// float_lit_is_based_form) -- same digit-accumulation shape as parse_
+// float_literal (a running `digits` value, a dropped/fractional digit
+// count folded into one net exponent), just reading `base`-radix
+// value_digits (byte_digit_value, already restricted to the declared
+// base at LEX time -- is_value_digit_for_base) instead of always-
+// decimal ones, and choosing the exponent marker (`p`/`P` for base 16,
+// `e`/`E` otherwise) the same way the lexer's own scan_number already
+// does. Never called on a malformed literal -- the lexer already
+// guarantees a well-formed token (has_value_digit/has_exp_digit)
+// reaches here, same trust boundary every other literal-value reader
+// in this file already relies on.
+function parse_based_float_literal(src: *DynBytes, offset: uint64, length: uint64) : BasedFloatParts {
+  mut i : uint64 := 0;
+  mut base : uint64 := 0;
+  mut digits : uint64 := 0;
+  mut ndigits : uint64 := 0;
+  mut max_digits : uint64 := 0;
+  mut frac_digits : int64 := 0;
+  mut dropped_digits : int64 := 0;
+  mut exp_marker_hi : uint8 := 101;  // 'e'
+  mut exp_marker_lo : uint8 := 69;   // 'E'
+  mut exp_negative : bool := false;
+  mut exp_val : int64 := 0;
+
+  while (i < length && is_digit((*src).ptr[offset + i])) {
+    base := base * 10 + byte_digit_value((*src).ptr[offset + i]);
+    i := i + 1;
+  }
+  i := i + 1; // skip the 'n' float_lit_is_based_form already confirmed
+
+  max_digits := max_value_digits_for_base(base);
+
+  while (i < length && is_value_digit_for_base((*src).ptr[offset + i], base)) {
+    if (ndigits < max_digits) {
+      digits := digits * base + byte_digit_value((*src).ptr[offset + i]);
+      ndigits := ndigits + 1;
+    } else {
+      dropped_digits := dropped_digits + 1;
+    }
+    i := i + 1;
+  }
+
+  if (i < length && (*src).ptr[offset + i] == 46) {
+    i := i + 1;
+    while (i < length && is_value_digit_for_base((*src).ptr[offset + i], base)) {
+      if (ndigits < max_digits) {
+        digits := digits * base + byte_digit_value((*src).ptr[offset + i]);
+        ndigits := ndigits + 1;
+        frac_digits := frac_digits + 1;
+      }
+      i := i + 1;
+    }
+  }
+
+  if (base == 16) {
+    exp_marker_hi := 112;  // 'p'
+    exp_marker_lo := 80;   // 'P'
+  }
+  if (i < length && ((*src).ptr[offset + i] == exp_marker_hi || (*src).ptr[offset + i] == exp_marker_lo)) {
+    i := i + 1;
+    if (i < length && (*src).ptr[offset + i] == 43) {
+      i := i + 1;
+    } else {
+      if (i < length && (*src).ptr[offset + i] == 45) {
+        exp_negative := true;
+        i := i + 1;
+      }
+    }
+    while (i < length && is_digit((*src).ptr[offset + i])) {
+      exp_val := exp_val * 10 + uint64_to_int64(byte_digit_value((*src).ptr[offset + i]));
+      i := i + 1;
+    }
+  }
+  if (exp_negative) { exp_val := 0 - exp_val; }
+
+  return BasedFloatParts { digits := digits, base := base, net_exp := exp_val - frac_digits + dropped_digits };
+}
+
+// Plain decimal form only (see float_lit_is_based_form) -- collects up
+// to 19 significant digits (ample for a 53-bit binary mantissa's own
+// ~15-17 significant decimal digits; anything beyond that in a hand-
+// written literal carries no additional real precision anyway) into a
+// single uint64, and folds the decimal point position, any `e`/`E`
+// exponent, AND whatever integer-part digits were dropped past the
+// 19-digit cap into one net decimal exponent -- `digits * 10^dec_exp`
+// is then the literal's own exact value.
+function parse_float_literal(src: *DynBytes, offset: uint64, length: uint64) : FloatParts {
+  mut i : uint64 := 0;
+  mut digits : uint64 := 0;
+  mut ndigits : uint64 := 0;
+  mut frac_digits : int64 := 0;
+  mut dropped_int_digits : int64 := 0;
+  mut exp_negative : bool := false;
+  mut exp_val : int64 := 0;
+
+  while (i < length && is_digit((*src).ptr[offset + i])) {
+    if (ndigits < 19) {
+      digits := digits * 10 + byte_digit_value((*src).ptr[offset + i]);
+      ndigits := ndigits + 1;
+    } else {
+      dropped_int_digits := dropped_int_digits + 1;
+    }
+    i := i + 1;
+  }
+  if (i < length && (*src).ptr[offset + i] == 46) {
+    i := i + 1;
+    while (i < length && is_digit((*src).ptr[offset + i])) {
+      if (ndigits < 19) {
+        digits := digits * 10 + byte_digit_value((*src).ptr[offset + i]);
+        ndigits := ndigits + 1;
+        frac_digits := frac_digits + 1;
+      }
+      i := i + 1;
+    }
+  }
+  if (i < length && ((*src).ptr[offset + i] == 101 || (*src).ptr[offset + i] == 69)) {
+    i := i + 1;
+    if (i < length && (*src).ptr[offset + i] == 43) {
+      i := i + 1;
+    } else {
+      if (i < length && (*src).ptr[offset + i] == 45) {
+        exp_negative := true;
+        i := i + 1;
+      }
+    }
+    while (i < length && is_digit((*src).ptr[offset + i])) {
+      exp_val := exp_val * 10 + uint64_to_int64(byte_digit_value((*src).ptr[offset + i]));
+      i := i + 1;
+    }
+  }
+  if (exp_negative) { exp_val := 0 - exp_val; }
+
+  return FloatParts { digits := digits, dec_exp := exp_val - frac_digits + dropped_int_digits };
+}
+
+// `digits * 10^dec_exp` -> IEEE-754 binary64 bits. `digits` starts as a
+// 128-bit value (hi=0) and is repeatedly multiplied or divided by 10,
+// `abs(dec_exp)` times -- cheap even at its largest realistic magnitude
+// (a few hundred iterations for an extreme exponent like `1e300`).
+// Interleaved renormalization (shifting the whole 128-bit pair by 4
+// bits before a multiply that would otherwise overflow it, or widening
+// by 1 bit before a divide that would otherwise waste precision) keeps
+// a running binary-exponent correction (`bexp`) consistent throughout,
+// exactly the technique a simple (non-Grisu/Ryu) `strtod` uses.
+// Shared core: `digits * 10^dec_exp * 2^start_bin_exp` -> IEEE-754
+// binary64 bits. `start_bin_exp` is 0 for a plain decimal literal
+// (float_literal_to_bits, below) -- based_float_to_bits (also below)
+// instead passes `dec_exp := 0` and a nonzero `start_bin_exp`, since a
+// power-of-two base's own scaling is an EXACT bit shift, needing none
+// of this loop's decimal renormalization at all.
+function digits_to_bits_core(digits: uint64, dec_exp: int64, start_bin_exp: int64) : uint64 {
+  mut w : Wide128 := Wide128 { hi := 0, lo := digits };
+  mut bexp : int64 := start_bin_exp;
+  mut d : WideDiv10Result := WideDiv10Result { q := Wide128 { hi := 0, lo := 0 }, rem := 0 };
+  mut msb : uint64 := 0;
+  mut unbiased_exp : int64 := 0;
+  mut biased_exp : int64 := 0;
+  mut mantissa_bits : uint64 := 0;
+  mut shifted : Wide128 := Wide128 { hi := 0, lo := 0 };
+
+  if (digits == 0) { return 0; }
+
+  while (dec_exp > 0) {
+    while ((w.hi >> 60) != 0) {
+      w := wide_shr(w, 4);
+      bexp := bexp + 4;
+    }
+    w := wide_mul10(w);
+    dec_exp := dec_exp - 1;
+  }
+
+  while (dec_exp < 0) {
+    while ((w.hi >> 63) == 0) {
+      w := wide_shl(w, 1);
+      bexp := bexp - 1;
+    }
+    d := wide_div10(w);
+    w := d.q;
+    dec_exp := dec_exp + 1;
+  }
+
+  msb := highest_set_bit_wide(w);
+  unbiased_exp := uint64_to_int64(msb) + bexp;
+
+  if (msb >= 52) {
+    shifted := wide_shr(w, msb - 52);
+  } else {
+    shifted := wide_shl(w, 52 - msb);
+  }
+  mantissa_bits := shifted.lo & mask52();
+
+  biased_exp := unbiased_exp + 1023;
+  if (biased_exp <= 0) { return 0; }
+  if (biased_exp >= 2047) { return inf_exp_bits() << 52; }
+
+  return (int64_to_uint64(biased_exp) << 52) | mantissa_bits;
+}
+
+function float_literal_to_bits(digits: uint64, dec_exp: int64) : uint64 {
+  return digits_to_bits_core(digits, dec_exp, 0);
+}
+
+// A based-form float whose declared base is a power of two (2/8/16):
+// `digits * base^net_exp` is then an EXACT binary shift (`net_exp *
+// bits_per_digit`, base 10's own decimal scaling never involved) --
+// `digits_to_bits_core` still does the actual mantissa-alignment/
+// rounding/exponent-biasing work, just starting from this bit shift
+// directly instead of running its own decimal renormalization loop
+// (which never executes here, since `dec_exp` is always 0 in this
+// path).
+function based_float_to_bits(digits: uint64, net_bin_exp: int64) : uint64 {
+  return digits_to_bits_core(digits, 0, net_bin_exp);
+}
+
+function gen_float_literal(cg: *Codegen, s: *Sema, file_idx: uint64, e: *ASTNode) : Operand {
+  mut src : *DynBytes := &(*(*s).buffers)[file_idx].bytes;
+  mut parts : FloatParts := FloatParts { digits := 0, dec_exp := 0 };
+  mut based : BasedFloatParts := BasedFloatParts { digits := 0, base := 0, net_exp := 0 };
+  mut bits : uint64 := 0;
+
+  // v1.1.n: `_/`'s own desugaring (Sema.ptl, op==166) builds a
+  // synthetic FLOAT_LIT for the constant `1.0` (its own `1.0/n`
+  // rewrite needs one) -- `op_type := 999` there marks it as such.
+  // Every OTHER FLOAT_LIT reaching here is a real, source-derived
+  // literal whose value lives in its own `tok` text (read below); this
+  // synthetic one has an empty (zero-length, alloc_node-zeroed) tok
+  // instead, since it was never actually written anywhere in the
+  // source -- reading zero bytes of "value text" from it would
+  // silently parse as 0.0, not 1.0 (a real bug this exact case hit:
+  // `2.0 _/ 4.0` computed `4.0 ** (0.0/2.0)` == 1.0, not `4.0 ** 0.5`
+  // == 2.0, until this check was added).
+  if ((*e).op_type == 999) {
+    return Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := true, float_bits := float_literal_to_bits(1, 0) };
+  }
+
+  if (float_lit_is_based_form(src, (*e).tok.offset, (*e).tok.length)) {
+    based := parse_based_float_literal(src, (*e).tok.offset, (*e).tok.length);
+    // Only bases 2/8/10/16 have a defined conversion (base_type_size's
+    // own header comment on `based_form` scope) -- an unsupported base
+    // would silently mean "no scaling at all" if it fell through to
+    // based_float_to_bits below (bits_per_digit_for_base's own 0
+    // default), so this errors loudly instead. Unreachable for an
+    // INTEGER based-form literal of any other base (those stay legal,
+    // unaffected by this float-only restriction), only a based-form
+    // FLOAT (a fraction or exponent present) can even reach gen_float_
+    // literal at all.
+    if (based.base != 2 && based.base != 8 && based.base != 10 && based.base != 16) {
+      (*cg).had_error := true;
+      return Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+    }
+    if (based.base == 10) {
+      bits := float_literal_to_bits(based.digits, based.net_exp);
+    } else {
+      bits := based_float_to_bits(based.digits, based.net_exp * uint64_to_int64(bits_per_digit_for_base(based.base)));
+    }
+    return Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := true, float_bits := bits };
+  }
+
+  parts := parse_float_literal(src, (*e).tok.offset, (*e).tok.length);
+  return Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := true, float_bits := float_literal_to_bits(parts.digits, parts.dec_exp) };
+}
+
+// `fadd`/`fsub`/`fmul`/`fdiv` -- float arithmetic has no signed/
+// unsigned distinction (unlike cg_binop_mnemonic's own integer
+// opcodes), and `%` never reaches here (Sema keeps it integer-only).
+function cg_float_binop_mnemonic(cg: *Codegen, op_type: int32) : void {
+  if (op_type == 85) { cg_byte(cg, 102); cg_byte(cg, 97); cg_byte(cg, 100); cg_byte(cg, 100); return; }
+  if (op_type == 80) { cg_byte(cg, 102); cg_byte(cg, 115); cg_byte(cg, 117); cg_byte(cg, 98); return; }
+  if (op_type == 81) { cg_byte(cg, 102); cg_byte(cg, 109); cg_byte(cg, 117); cg_byte(cg, 108); return; }
+  cg_byte(cg, 102); cg_byte(cg, 100); cg_byte(cg, 105); cg_byte(cg, 118);
+}
+
+// `fcmp`'s own ORDERED predicates (NaN never compares true/equal to
+// anything, including itself, under any of these -- the natural
+// default for an ordinary language comparison, and the same choice
+// `oeq`/`one`/etc. rather than `ueq`/`une` makes everywhere else this
+// kind of unordered-vs-ordered choice comes up).
+function cg_float_cmp_pred(cg: *Codegen, op_type: int32) : void {
+  if (op_type == 71) { cg_byte(cg, 111); cg_byte(cg, 101); cg_byte(cg, 113); return; }
+  if (op_type == 72) { cg_byte(cg, 111); cg_byte(cg, 110); cg_byte(cg, 101); return; }
+  if (op_type == 86) { cg_byte(cg, 111); cg_byte(cg, 108); cg_byte(cg, 116); return; }
+  if (op_type == 87) { cg_byte(cg, 111); cg_byte(cg, 103); cg_byte(cg, 116); return; }
+  if (op_type == 73) { cg_byte(cg, 111); cg_byte(cg, 108); cg_byte(cg, 101); return; }
+  cg_byte(cg, 111); cg_byte(cg, 103); cg_byte(cg, 101);
+}
+
+function gen_float_binop(cg: *Codegen, s: *Sema, e: *ASTNode, left_op: Operand, right_op: Operand) : Operand {
+  mut r : uint64 := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+  if (is_comparison_op((*e).op_type)) {
+    cg_byte(cg, 102); cg_byte(cg, 99); cg_byte(cg, 109); cg_byte(cg, 112); cg_byte(cg, 32);
+    cg_float_cmp_pred(cg, (*e).op_type);
+    cg_byte(cg, 32);
+    cg_type(cg, s, (*(*e).left).type_file_idx, (*(*e).left).data_type);
+  } else {
+    cg_float_binop_mnemonic(cg, (*e).op_type);
+    cg_byte(cg, 32);
+    cg_type(cg, s, (*e).type_file_idx, (*e).data_type);
+  }
+  cg_byte(cg, 32);
+  cg_operand(cg, left_op);
+  cg_piece(cg, 3);
+  cg_operand(cg, right_op);
+  cg_piece(cg, 0);
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+}
+
+// `a ** b` for a float-family pair. NOT `llvm.pow.*`: that intrinsic
+// lowers to a plain call to libm's own `pow`, and this whole toolchain
+// is freestanding by design (`ld -static -no-pie`, no libc/libm linked
+// in at all -- confirmed the hard way, by `ld` actually failing with
+// "undefined reference to `pow'" the first time this used the
+// intrinsic). `llvm.powi.*` (float base, INTEGER exponent -- seemingly
+// the exact right fit here) was also tried and confirmed the same hard
+// way: it only avoids a runtime call when the exponent is a compile-
+// time CONSTANT (llc then expands it inline via exponentiation-by-
+// squaring); for a genuinely variable exponent it lowers to a call to
+// `__powidf2`, a compiler-rt symbol this toolchain doesn't link either
+// -- no better than `llvm.pow` for the general case this function
+// actually has to handle. So: an ordinary runtime multiply loop (the
+// same technique gen_int_pow uses, `fmul` in place of `mul`), over the
+// exponent's ABSOLUTE value -- `llvm.fabs.f64`/`llvm.fabs.f32` would
+// need their own conditional `declare` (the exact machinery an earlier
+// version of this function had for `llvm.pow.*` and that broke every
+// fixture golden by appearing unconditionally, see git history), so
+// this uses `fneg` + `select` instead, both ordinary instructions
+// nothing ever needs to declare. v1.1.n: a NEGATIVE exponent used to
+// silently truncate to a zero-iteration loop and return 1.0 instead of
+// the true reciprocal (postulate_stage1_bootstrap_plan.md's 2026-08-31
+// entry has the full writeup) -- now handled correctly by computing
+// the ordinary positive-exponent result and its reciprocal (`1.0 /
+// result`) unconditionally, then `select`ing whichever the exponent's
+// own sign actually calls for (branch-free, so no new labels needed
+// beyond the loop's own). A FRACTIONAL exponent (`x ** 0.5`) is still
+// out of scope -- `fptosi` truncates it same as before -- since a real
+// answer needs a transcendental `pow` (log2+exp2 or similar), which
+// absent a libm would be its own substantial undertaking.
+// Exact, loop-based `**` for an INTEGER-valued exponent -- see gen_
+// float_pow's own header comment (below) for why this stays the fast/
+// exact path rather than always routing through the new general (log2/
+// exp2-based) machinery: an integer exponent's result is exactly
+// representable via repeated `fmul` (up to ordinary rounding), no
+// series-approximation error at all, so there's no reason to prefer
+// the approximate path when the exact one is available and already
+// correct (including for a negative exponent, via the reciprocal fix
+// below).
+function gen_float_pow_int_exp(cg: *Codegen, s: *Sema, e: *ASTNode, base_op: Operand, exp_op: Operand) : Operand {
+  mut ty_file : uint64 := (*e).type_file_idx;
+  mut ty : *ASTNode := (*e).data_type;
+  mut is_neg_reg : uint64 := new_reg(cg);
+  mut neg_exp_reg : uint64 := new_reg(cg);
+  mut abs_exp_reg : uint64 := new_reg(cg);
+  mut result_slot : uint64 := new_reg(cg);
+  mut i_slot : uint64 := new_reg(cg);
+  mut n_reg : uint64 := 0;
+  mut cond_l : uint64 := new_label(cg);
+  mut body_l : uint64 := new_label(cg);
+  mut end_l : uint64 := new_label(cg);
+  mut cur_i : uint64 := 0;
+  mut cur_result : uint64 := 0;
+  mut cmp_reg : uint64 := 0;
+  mut mul_reg : uint64 := 0;
+  mut inc_reg : uint64 := 0;
+  mut final_reg : uint64 := 0;
+  mut loaded_reg : uint64 := 0;
+  mut recip_reg : uint64 := 0;
+
+  // is_neg := fcmp olt <ty> exp_op, 0.0
+  cg_piece(cg, 1); cg_reg_ref(cg, is_neg_reg); cg_piece(cg, 2);
+  cg_byte(cg, 102); cg_byte(cg, 99); cg_byte(cg, 109); cg_byte(cg, 112); cg_byte(cg, 32);
+  cg_float_cmp_pred(cg, 86);
+  cg_byte(cg, 32);
+  cg_type(cg, s, ty_file, ty);
+  cg_byte(cg, 32);
+  cg_operand(cg, exp_op);
+  cg_piece(cg, 3);
+  cg_operand(cg, Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := true, float_bits := 0 });
+  cg_piece(cg, 0);
+
+  // neg_exp := fneg <ty> exp_op
+  cg_piece(cg, 1); cg_reg_ref(cg, neg_exp_reg); cg_piece(cg, 2);
+  cg_byte(cg, 102); cg_byte(cg, 110); cg_byte(cg, 101); cg_byte(cg, 103); cg_byte(cg, 32);
+  cg_type(cg, s, ty_file, ty);
+  cg_byte(cg, 32);
+  cg_operand(cg, exp_op);
+  cg_piece(cg, 0);
+
+  // abs_exp := select i1 is_neg, <ty> neg_exp, <ty> exp_op
+  cg_piece(cg, 1); cg_reg_ref(cg, abs_exp_reg); cg_piece(cg, 2);
+  cg_byte(cg, 115); cg_byte(cg, 101); cg_byte(cg, 108); cg_byte(cg, 101); cg_byte(cg, 99); cg_byte(cg, 116); cg_byte(cg, 32);
+  cg_byte(cg, 105); cg_byte(cg, 49); cg_byte(cg, 32);
+  cg_operand(cg, Operand { is_reg := true, reg := is_neg_reg, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 });
+  cg_piece(cg, 3);
+  cg_type(cg, s, ty_file, ty);
+  cg_byte(cg, 32);
+  cg_operand(cg, Operand { is_reg := true, reg := neg_exp_reg, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 });
+  cg_piece(cg, 3);
+  cg_type(cg, s, ty_file, ty);
+  cg_byte(cg, 32);
+  cg_operand(cg, exp_op);
+  cg_piece(cg, 0);
+
+  n_reg := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, n_reg); cg_piece(cg, 2);
+  cg_byte(cg, 102); cg_byte(cg, 112); cg_byte(cg, 116); cg_byte(cg, 111); cg_byte(cg, 115); cg_byte(cg, 105); cg_byte(cg, 32);
+  cg_type(cg, s, ty_file, ty);
+  cg_byte(cg, 32);
+  cg_operand(cg, Operand { is_reg := true, reg := abs_exp_reg, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 });
+  cg_piece(cg, 60);
+  cg_byte(cg, 105); cg_uint(cg, 64);
+  cg_piece(cg, 0);
+
+  cg_piece(cg, 1); cg_reg_ref(cg, result_slot); cg_piece(cg, 2); cg_piece(cg, 6);
+  cg_type(cg, s, ty_file, ty);
+  cg_piece(cg, 0);
+  cg_piece(cg, 1); cg_reg_ref(cg, i_slot); cg_piece(cg, 2); cg_piece(cg, 6);
+  cg_byte(cg, 105); cg_uint(cg, 64);
+  cg_piece(cg, 0);
+
+  cg_piece(cg, 1); cg_piece(cg, 9);
+  cg_type(cg, s, ty_file, ty);
+  cg_byte(cg, 32);
+  cg_operand(cg, Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := true, float_bits := float_literal_to_bits(1, 0) });
+  cg_piece(cg, 8); cg_reg_ref(cg, result_slot); cg_piece(cg, 0);
+
+  cg_piece(cg, 1); cg_piece(cg, 9);
+  cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32); cg_byte(cg, 48);
+  cg_piece(cg, 8); cg_reg_ref(cg, i_slot); cg_piece(cg, 0);
+
+  cg_piece(cg, 1); cg_piece(cg, 12); cg_piece(cg, 15); cg_label_target(cg, cond_l); cg_piece(cg, 0);
+  cg_label_def(cg, cond_l);
+
+  cur_i := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, cur_i); cg_piece(cg, 2); cg_piece(cg, 7);
+  cg_byte(cg, 105); cg_uint(cg, 64);
+  cg_piece(cg, 8); cg_reg_ref(cg, i_slot); cg_piece(cg, 0);
+
+  cmp_reg := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, cmp_reg); cg_piece(cg, 2); cg_piece(cg, 17);
+  cg_cmp_pred(cg, 86, false);
+  cg_byte(cg, 32);
+  cg_byte(cg, 105); cg_uint(cg, 64);
+  cg_byte(cg, 32);
+  cg_operand(cg, Operand { is_reg := true, reg := cur_i, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 });
+  cg_piece(cg, 3);
+  cg_operand(cg, Operand { is_reg := true, reg := n_reg, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 });
+  cg_piece(cg, 0);
+
+  cg_piece(cg, 1); cg_piece(cg, 13);
+  cg_operand(cg, Operand { is_reg := true, reg := cmp_reg, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 });
+  cg_piece(cg, 14); cg_label_target(cg, body_l);
+  cg_piece(cg, 14); cg_label_target(cg, end_l);
+  cg_piece(cg, 0);
+
+  cg_label_def(cg, body_l);
+
+  cur_result := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, cur_result); cg_piece(cg, 2); cg_piece(cg, 7);
+  cg_type(cg, s, ty_file, ty);
+  cg_piece(cg, 8); cg_reg_ref(cg, result_slot); cg_piece(cg, 0);
+
+  mul_reg := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, mul_reg); cg_piece(cg, 2);
+  cg_float_binop_mnemonic(cg, 81);
+  cg_byte(cg, 32);
+  cg_type(cg, s, ty_file, ty);
+  cg_byte(cg, 32);
+  cg_operand(cg, Operand { is_reg := true, reg := cur_result, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 });
+  cg_piece(cg, 3);
+  cg_operand(cg, base_op);
+  cg_piece(cg, 0);
+
+  cg_piece(cg, 1); cg_piece(cg, 9);
+  cg_type(cg, s, ty_file, ty);
+  cg_byte(cg, 32);
+  cg_operand(cg, Operand { is_reg := true, reg := mul_reg, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 });
+  cg_piece(cg, 8); cg_reg_ref(cg, result_slot); cg_piece(cg, 0);
+
+  cur_i := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, cur_i); cg_piece(cg, 2); cg_piece(cg, 7);
+  cg_byte(cg, 105); cg_uint(cg, 64);
+  cg_piece(cg, 8); cg_reg_ref(cg, i_slot); cg_piece(cg, 0);
+
+  inc_reg := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, inc_reg); cg_piece(cg, 2); cg_piece(cg, 27);
+  cg_byte(cg, 32);
+  cg_byte(cg, 105); cg_uint(cg, 64);
+  cg_byte(cg, 32);
+  cg_operand(cg, Operand { is_reg := true, reg := cur_i, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 });
+  cg_piece(cg, 3);
+  cg_byte(cg, 49);
+  cg_piece(cg, 0);
+
+  cg_piece(cg, 1); cg_piece(cg, 9);
+  cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32);
+  cg_operand(cg, Operand { is_reg := true, reg := inc_reg, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 });
+  cg_piece(cg, 8); cg_reg_ref(cg, i_slot); cg_piece(cg, 0);
+
+  cg_piece(cg, 1); cg_piece(cg, 12); cg_piece(cg, 15); cg_label_target(cg, cond_l); cg_piece(cg, 0);
+
+  cg_label_def(cg, end_l);
+
+  loaded_reg := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, loaded_reg); cg_piece(cg, 2); cg_piece(cg, 7);
+  cg_type(cg, s, ty_file, ty);
+  cg_piece(cg, 8); cg_reg_ref(cg, result_slot); cg_piece(cg, 0);
+
+  // recip := fdiv <ty> 1.0, loaded -- always computed (branch-free is
+  // simpler than a new label/block just to skip it in the common
+  // non-negative case, and an extra `fdiv` is cheap).
+  recip_reg := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, recip_reg); cg_piece(cg, 2);
+  cg_float_binop_mnemonic(cg, 83);
+  cg_byte(cg, 32);
+  cg_type(cg, s, ty_file, ty);
+  cg_byte(cg, 32);
+  cg_operand(cg, Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := true, float_bits := float_literal_to_bits(1, 0) });
+  cg_piece(cg, 3);
+  cg_operand(cg, Operand { is_reg := true, reg := loaded_reg, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 });
+  cg_piece(cg, 0);
+
+  // final := select i1 is_neg, <ty> recip, <ty> loaded
+  final_reg := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, final_reg); cg_piece(cg, 2);
+  cg_byte(cg, 115); cg_byte(cg, 101); cg_byte(cg, 108); cg_byte(cg, 101); cg_byte(cg, 99); cg_byte(cg, 116); cg_byte(cg, 32);
+  cg_byte(cg, 105); cg_byte(cg, 49); cg_byte(cg, 32);
+  cg_operand(cg, Operand { is_reg := true, reg := is_neg_reg, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 });
+  cg_piece(cg, 3);
+  cg_type(cg, s, ty_file, ty);
+  cg_byte(cg, 32);
+  cg_operand(cg, Operand { is_reg := true, reg := recip_reg, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 });
+  cg_piece(cg, 3);
+  cg_type(cg, s, ty_file, ty);
+  cg_byte(cg, 32);
+  cg_operand(cg, Operand { is_reg := true, reg := loaded_reg, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 });
+  cg_piece(cg, 0);
+
+  return Operand { is_reg := true, reg := final_reg, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+}
+
+// =======================================================================
+// General (fractional-exponent) `**`/`_/` support -- v1.1.n.
+//
+// gen_float_pow_int_exp (above) is exact but only correct for an
+// INTEGER-valued exponent: `x ** 2.0` is exactly `x*x`, but `x ** 0.5`
+// (an ordinary square root -- and `_/`'s own desugaring, `n _/ x ==
+// x ** (1.0/n)`, produces a genuinely fractional exponent for every
+// n other than +-1) has no such finite unrolling. `llvm.pow`/`llvm.
+// powi` were both already ruled out for the INTEGER case (this file's
+// own git history/postulate_stage1_bootstrap_plan.md 2026-08-31 entry
+// -- `__powidf2`/libm calls this freestanding, `-static -no-pie`
+// toolchain can't link), and a genuinely fractional exponent has no
+// integer-unrolling equivalent at all -- so this is a real, from-
+// scratch `pow(x, y) = 2^(y * log2(x))` for a non-integer y, built the
+// same way any minimal libm does it: extract x's own IEEE-754 binary64
+// exponent/mantissa directly via bit tricks (no division needed to
+// range-reduce), a fixed-degree series for log2 of the [1,2) mantissa,
+// a fixed-degree series for 2^f of a [0,1) fraction, and the integer
+// part of the final exponent folded back in as an exact bit-shift.
+// Numerically prototyped and checked against Python's own `**` first
+// (this file's own established practice for anything not verifiable
+// by direct inspection): ~10 log-series terms + ~13 exp-series terms
+// already lands within 1-2 ULP of the true double-precision result
+// across every case tried (sqrt/cube-root/`x**y` for assorted
+// positive/negative/fractional y) -- see this session's own working
+// notes for the exact Python cross-check. Deliberately NOT used for an
+// integer-valued exponent (gen_float_pow, below, only ever calls this
+// once it's confirmed the exponent ISN'T one) -- gen_float_pow_int_exp
+// stays exact there, no reason to prefer an approximation when an
+// exact answer is already cheap.
+//
+// Everything below operates purely in `double` (float64), regardless
+// of `**`'s own declared type (which could be `float32`) -- gen_float_
+// pow converts in and back out at its own two call boundaries
+// (gen_to_f64/gen_from_f64), the same "compute at the widest available
+// precision, narrow only at the very end" choice an ordinary hand-
+// written libm makes too. That keeps every helper below free of a
+// `ty`/`ty_file` parameter pair -- there's only ever one type in play
+// here, so it's simplest to just spell `double` directly (cg_double_kw)
+// rather than thread a type through three call levels for a type that
+// never actually varies.
+// =======================================================================
+
+function cg_double_kw(cg: *Codegen) : void {
+  cg_byte(cg, 100); cg_byte(cg, 111); cg_byte(cg, 117); cg_byte(cg, 98); cg_byte(cg, 108); cg_byte(cg, 101);
+}
+
+function f64_imm(digits: uint64, dec_exp: int64) : Operand {
+  return Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := true, float_bits := float_literal_to_bits(digits, dec_exp) };
+}
+
+function i64_imm(v: int64) : Operand {
+  return Operand { is_reg := false, reg := 0, imm := v, is_null := false, is_float_imm := false, float_bits := 0 };
+}
+
+function reg_op(r: uint64) : Operand {
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+}
+
+function gen_i64_binop(cg: *Codegen, op_type: int32, is_unsigned: bool, a: Operand, b: Operand) : Operand {
+  mut r : uint64 := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+  cg_binop_mnemonic(cg, op_type, is_unsigned);
+  cg_byte(cg, 32); cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32);
+  cg_operand(cg, a); cg_piece(cg, 3); cg_operand(cg, b); cg_piece(cg, 0);
+  return reg_op(r);
+}
+
+function gen_i64_icmp(cg: *Codegen, op_type: int32, is_unsigned: bool, a: Operand, b: Operand) : uint64 {
+  mut r : uint64 := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 17);
+  cg_cmp_pred(cg, op_type, is_unsigned);
+  cg_byte(cg, 32); cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32);
+  cg_operand(cg, a); cg_piece(cg, 3); cg_operand(cg, b); cg_piece(cg, 0);
+  return r;
+}
+
+function gen_fbinop_f64(cg: *Codegen, op_type: int32, a: Operand, b: Operand) : Operand {
+  mut r : uint64 := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+  cg_float_binop_mnemonic(cg, op_type);
+  cg_byte(cg, 32); cg_double_kw(cg); cg_byte(cg, 32);
+  cg_operand(cg, a); cg_piece(cg, 3); cg_operand(cg, b); cg_piece(cg, 0);
+  return reg_op(r);
+}
+
+function gen_fcmp_f64(cg: *Codegen, op_type: int32, a: Operand, b: Operand) : uint64 {
+  mut r : uint64 := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+  cg_byte(cg, 102); cg_byte(cg, 99); cg_byte(cg, 109); cg_byte(cg, 112); cg_byte(cg, 32);
+  cg_float_cmp_pred(cg, op_type);
+  cg_byte(cg, 32); cg_double_kw(cg); cg_byte(cg, 32);
+  cg_operand(cg, a); cg_piece(cg, 3); cg_operand(cg, b); cg_piece(cg, 0);
+  return r;
+}
+
+function gen_select_i64(cg: *Codegen, cond_reg: uint64, true_op: Operand, false_op: Operand) : Operand {
+  mut r : uint64 := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+  cg_byte(cg, 115); cg_byte(cg, 101); cg_byte(cg, 108); cg_byte(cg, 101); cg_byte(cg, 99); cg_byte(cg, 116); cg_byte(cg, 32);
+  cg_byte(cg, 105); cg_byte(cg, 49); cg_byte(cg, 32);
+  cg_operand(cg, reg_op(cond_reg));
+  cg_piece(cg, 3);
+  cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32);
+  cg_operand(cg, true_op);
+  cg_piece(cg, 3);
+  cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32);
+  cg_operand(cg, false_op);
+  cg_piece(cg, 0);
+  return reg_op(r);
+}
+
+function gen_select_f64(cg: *Codegen, cond_reg: uint64, true_op: Operand, false_op: Operand) : Operand {
+  mut r : uint64 := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+  cg_byte(cg, 115); cg_byte(cg, 101); cg_byte(cg, 108); cg_byte(cg, 101); cg_byte(cg, 99); cg_byte(cg, 116); cg_byte(cg, 32);
+  cg_byte(cg, 105); cg_byte(cg, 49); cg_byte(cg, 32);
+  cg_operand(cg, reg_op(cond_reg));
+  cg_piece(cg, 3);
+  cg_double_kw(cg); cg_byte(cg, 32);
+  cg_operand(cg, true_op);
+  cg_piece(cg, 3);
+  cg_double_kw(cg); cg_byte(cg, 32);
+  cg_operand(cg, false_op);
+  cg_piece(cg, 0);
+  return reg_op(r);
+}
+
+function gen_bitcast_f64_to_i64(cg: *Codegen, op: Operand) : Operand {
+  mut r : uint64 := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+  cg_byte(cg, 98); cg_byte(cg, 105); cg_byte(cg, 116); cg_byte(cg, 99); cg_byte(cg, 97); cg_byte(cg, 115); cg_byte(cg, 116); cg_byte(cg, 32);
+  cg_double_kw(cg); cg_byte(cg, 32);
+  cg_operand(cg, op);
+  cg_piece(cg, 60);
+  cg_byte(cg, 105); cg_uint(cg, 64);
+  cg_piece(cg, 0);
+  return reg_op(r);
+}
+
+function gen_bitcast_i64_to_f64(cg: *Codegen, op: Operand) : Operand {
+  mut r : uint64 := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+  cg_byte(cg, 98); cg_byte(cg, 105); cg_byte(cg, 116); cg_byte(cg, 99); cg_byte(cg, 97); cg_byte(cg, 115); cg_byte(cg, 116); cg_byte(cg, 32);
+  cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32);
+  cg_operand(cg, op);
+  cg_piece(cg, 60);
+  cg_double_kw(cg);
+  cg_piece(cg, 0);
+  return reg_op(r);
+}
+
+function gen_sitofp_i64_to_f64(cg: *Codegen, op: Operand) : Operand {
+  mut r : uint64 := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+  cg_byte(cg, 115); cg_byte(cg, 105); cg_byte(cg, 116); cg_byte(cg, 111); cg_byte(cg, 102); cg_byte(cg, 112); cg_byte(cg, 32);
+  cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32);
+  cg_operand(cg, op);
+  cg_piece(cg, 60);
+  cg_double_kw(cg);
+  cg_piece(cg, 0);
+  return reg_op(r);
+}
+
+function gen_fptosi_f64_to_i64(cg: *Codegen, op: Operand) : Operand {
+  mut r : uint64 := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+  cg_byte(cg, 102); cg_byte(cg, 112); cg_byte(cg, 116); cg_byte(cg, 111); cg_byte(cg, 115); cg_byte(cg, 105); cg_byte(cg, 32);
+  cg_double_kw(cg); cg_byte(cg, 32);
+  cg_operand(cg, op);
+  cg_piece(cg, 60);
+  cg_byte(cg, 105); cg_uint(cg, 64);
+  cg_piece(cg, 0);
+  return reg_op(r);
+}
+
+// float32 <-> float64 at the type actually declared for `**`/`_/`'s own
+// result (gen_float_pow's own two call sites, below) -- a same-width
+// no-op when that type is already float64 (the common case), an
+// ordinary `fpext`/`fptrunc` otherwise, mirroring gen_cast's own
+// src_cat==6&&dst_cat==6 branch exactly (duplicated rather than
+// reused, since that branch is keyed off two AST-node-derived types,
+// not the single fixed `double` this whole section otherwise assumes).
+function gen_to_f64(cg: *Codegen, s: *Sema, ty_file: uint64, ty: *ASTNode, op: Operand) : Operand {
+  mut r : uint64 := 0;
+  if (base_type_size((*ty).tok.kind) == 8) { return op; }
+  r := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+  cg_byte(cg, 102); cg_byte(cg, 112); cg_byte(cg, 101); cg_byte(cg, 120); cg_byte(cg, 116); cg_byte(cg, 32);
+  cg_type(cg, s, ty_file, ty);
+  cg_byte(cg, 32);
+  cg_operand(cg, op);
+  cg_piece(cg, 60);
+  cg_double_kw(cg);
+  cg_piece(cg, 0);
+  return reg_op(r);
+}
+
+function gen_from_f64(cg: *Codegen, s: *Sema, ty_file: uint64, ty: *ASTNode, op: Operand) : Operand {
+  mut r : uint64 := 0;
+  if (base_type_size((*ty).tok.kind) == 8) { return op; }
+  r := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+  cg_byte(cg, 102); cg_byte(cg, 112); cg_byte(cg, 116); cg_byte(cg, 114); cg_byte(cg, 117); cg_byte(cg, 110); cg_byte(cg, 99); cg_byte(cg, 32);
+  cg_double_kw(cg);
+  cg_byte(cg, 32);
+  cg_operand(cg, op);
+  cg_piece(cg, 60);
+  cg_type(cg, s, ty_file, ty);
+  cg_piece(cg, 0);
+  return reg_op(r);
+}
+
+// v1.1.n: like gen_i64_binop, but the right operand is a raw, already-
+// KNOWN-AT-CODEGEN-TIME uint64 constant (mask52()'s AND-mask, the
+// 1023<<52 exponent-bias-shift below) printed DIRECTLY via cg_uint --
+// deliberately NOT built as an ordinary i64_imm Operand first. This
+// file's own int64_to_uint64/uint64_to_int64 (Sema.ptl/Parser.ptl) are
+// genuine, confirmed O(n) COUNTING loops (`while (steps>0) { result+1;
+// steps-1; }`), fine for a small value but catastrophic for one of
+// THESE constants' own magnitude (mask52() alone is ~4.5e15) --
+// cg_operand's own plain-integer-Operand branch always routes through
+// exactly that counting conversion before printing, so any Operand
+// carrying a value this large would never actually finish compiling.
+// cg_uint's own decimal-formatting path has no such problem (ordinary
+// digit-by-digit formatting, not a per-VALUE loop) -- this helper just
+// reaches it directly, bypassing Operand/cg_operand entirely for the
+// one operand that needs it.
+function gen_i64_binop_const(cg: *Codegen, op_type: int32, is_unsigned: bool, a: Operand, b_const: uint64) : Operand {
+  mut r : uint64 := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+  cg_binop_mnemonic(cg, op_type, is_unsigned);
+  cg_byte(cg, 32); cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32);
+  cg_operand(cg, a); cg_piece(cg, 3); cg_uint(cg, b_const); cg_piece(cg, 0);
+  return reg_op(r);
+}
+
+// A float64 immediate built from its own EXACT bit pattern directly --
+// unlike f64_imm (which goes through the decimal-literal conversion
+// machinery, `digits * 10^dec_exp`), this is for a value that's only
+// ever meaningful AS bits (+inf, a quiet NaN) -- converting through a
+// decimal round-trip would be both pointless and, for `float_bits`
+// itself, entirely unnecessary: it's already the exact uint64 field
+// cg_hex64 wants, no conversion of any kind needed.
+function f64_bits_imm(bits: uint64) : Operand {
+  return Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := true, float_bits := bits };
+}
+
+// `1023 << 52` (binary64's own zero-exponent bias, shifted into the
+// exponent field's own bit position) -- built via a shift from a small
+// literal, matching mask32()/two_pow_32()/mask52()/inf_exp_bits()'s own
+// established pattern elsewhere in this file (a literal this large
+// written directly would hit the OTHER, unrelated front-end performance
+// bug those exist to avoid -- see their own header comments).
+function bias1023_shl52() : uint64 {
+  mut b : uint64 := 1023;
+  return b << 52;
+}
+
+function pos_inf_bits() : uint64 {
+  return inf_exp_bits() << 52;
+}
+
+// A canonical quiet NaN: binary64's all-ones exponent field (same as
+// +inf) plus any nonzero mantissa bit (bit 51 here) -- the mantissa
+// bit is what distinguishes a NaN from an infinity; which specific bit
+// is set doesn't matter (every NaN payload compares unordered/false
+// against everything, including itself, the same as every other NaN).
+function qnan_bits() : uint64 {
+  mut one : uint64 := 1;
+  return pos_inf_bits() | (one << 51);
+}
+
+// ln(2) and 1/ln(2)'s own exact IEEE-754 binary64 bit patterns, built
+// nibble-by-nibble from small (<16) literals -- NOT written as a
+// decimal literal (`0.6931471805599453`) the ordinary way: this file's
+// own established front-end performance bug (mask32()/two_pow_32()/
+// mask52()/inf_exp_bits()'s own header comments) makes any hand-
+// written literal past ~1.3 billion a near-hang to even COMPILE (this
+// was hit directly during development -- a `docker build` that
+// normally finishes in ~20s never returned). A 16-17 significant-digit
+// constant is nowhere near a workaround otherwise, so this builds the
+// exact bit pattern directly instead, the same way inf_exp_bits()
+// itself avoids writing `2047` embedded in a literal shift.
+function ln2_bits() : uint64 {
+  mut v : uint64 := 3;
+  v := (v << 4) | 15; v := (v << 4) | 14; v := (v << 4) | 6; v := (v << 4) | 2;
+  v := (v << 4) | 14; v := (v << 4) | 4; v := (v << 4) | 2; v := (v << 4) | 15;
+  v := (v << 4) | 14; v := (v << 4) | 15; v := (v << 4) | 10; v := (v << 4) | 3;
+  v := (v << 4) | 9; v := (v << 4) | 14; v := (v << 4) | 15;
+  return v;
+}
+
+function inv_ln2_bits() : uint64 {
+  mut v : uint64 := 3;
+  v := (v << 4) | 15; v := (v << 4) | 15; v := (v << 4) | 7; v := (v << 4) | 1;
+  v := (v << 4) | 5; v := (v << 4) | 4; v := (v << 4) | 7; v := (v << 4) | 6;
+  v := (v << 4) | 5; v := (v << 4) | 2; v := (v << 4) | 11; v := (v << 4) | 8;
+  v := (v << 4) | 2; v := (v << 4) | 15; v := (v << 4) | 14;
+  return v;
+}
+
+// log2(|x|) for any nonzero, finite double `x` -- the ABSOLUTE value,
+// deliberately: the sign bit (bit 63) never participates in the
+// exponent/mantissa extraction below, so this naturally ignores it
+// rather than needing a separate fabs step. gen_float_pow_frac (below)
+// is the only caller, and only ever needs |x|'s own log2 (it decides
+// the sign of x separately, since a negative base is only valid there
+// alongside an INTEGER exponent, already handled by gen_float_pow_
+// int_exp before this function is ever reached). Not meaningful for
+// x == 0 (the caller selects that case away separately) or a subnormal
+// x (an extreme, ~1e-308-magnitude edge case not specially handled --
+// documented limitation, not attempted here).
+//
+// Method: x's own IEEE-754 bits already encode log2(x) almost exactly
+// -- the biased exponent field IS floor(log2(x)) + 1023 by
+// construction. Rebuilding a double with THAT SAME mantissa but a
+// forced zero exponent (bias 1023, i.e. 2^0) yields `m` in [1,2),
+// x's own true mantissa value with no arithmetic at all -- only
+// log2(m) needs real computation, via the standard atanh-based series
+// (ln(m) = 2*atanh((m-1)/(m+1)), converges quickly since m in [1,2)
+// keeps that ratio's magnitude under 1/3). 10 terms already lands
+// within 1-2 ULP of the true value end to end (this session's own
+// Python cross-check, gen_float_pow_frac's own header comment).
+function gen_log2_f64(cg: *Codegen, x_op: Operand) : Operand {
+  mut bits : Operand := gen_bitcast_f64_to_i64(cg, x_op);
+  mut raw_exp : Operand := gen_i64_binop(cg, 76, true, bits, i64_imm(52));
+  mut raw_exp_masked : Operand := gen_i64_binop_const(cg, 82, false, raw_exp, 2047);
+  mut unbiased_exp : Operand := gen_i64_binop(cg, 80, false, raw_exp_masked, i64_imm(1023));
+  mut unbiased_exp_f : Operand := gen_sitofp_i64_to_f64(cg, unbiased_exp);
+  mut mantissa_bits : Operand := gen_i64_binop_const(cg, 82, false, bits, mask52());
+  mut m_bits : Operand := gen_i64_binop_const(cg, 89, false, mantissa_bits, bias1023_shl52());
+  mut m : Operand := gen_bitcast_i64_to_f64(cg, m_bits);
+  mut u : Operand := gen_fbinop_f64(cg, 83, gen_fbinop_f64(cg, 80, m, f64_imm(1, 0)), gen_fbinop_f64(cg, 85, m, f64_imm(1, 0)));
+  mut v : Operand := gen_fbinop_f64(cg, 81, u, u);
+  // Horner form of ln(m) = 2u*(1 + v/3 + v^2/5 + ... + v^9/19), v=u^2
+  // -- 10 terms (odd divisors 19 downto 1) already lands within 1-2
+  // ULP of the true value end to end (gen_float_pow_frac's own header
+  // comment covers the Python cross-check this was validated against).
+  mut divisor : uint64 := 19;
+  mut acc : Operand := gen_fbinop_f64(cg, 83, f64_imm(1, 0), f64_imm(divisor, 0));
+  mut looping : bool := true;
+  mut ln_m : Operand := f64_imm(0, 0);
+  mut log2_m : Operand := f64_imm(0, 0);
+
+  while (looping) {
+    if (divisor <= 1) {
+      looping := false;
+    } else {
+      divisor := divisor - 2;
+      acc := gen_fbinop_f64(cg, 85, gen_fbinop_f64(cg, 83, f64_imm(1, 0), f64_imm(divisor, 0)), gen_fbinop_f64(cg, 81, v, acc));
+    }
+  }
+
+  ln_m := gen_fbinop_f64(cg, 81, f64_imm(2, 0), gen_fbinop_f64(cg, 81, u, acc));
+  log2_m := gen_fbinop_f64(cg, 81, ln_m, f64_bits_imm(inv_ln2_bits()));
+  return gen_fbinop_f64(cg, 85, unbiased_exp_f, log2_m);
+}
+
+// 2^z for any finite double `z` -- decomposes into an exact integer
+// power (a direct exponent-field bit shift, clamped to +-inf/0.0 the
+// same way digits_to_bits_core's own overflow/underflow handling
+// already does) times a [0,1)-fraction power (a 13-term e^t Taylor
+// series, t = f*ln2 -- e^(f*ln2) == 2^f). `floor`, not `trunc`, is
+// required for the split (z's fractional part must land in [0,1), not
+// (-1,1) -- fptosi truncates toward zero, so a negative z needs an
+// explicit floor correction, the `is_over` check below).
+function gen_exp2_f64(cg: *Codegen, z_op: Operand) : Operand {
+  mut n_trunc : Operand := gen_fptosi_f64_to_i64(cg, z_op);
+  mut n_trunc_f : Operand := gen_sitofp_i64_to_f64(cg, n_trunc);
+  mut is_over : uint64 := gen_fcmp_f64(cg, 87, n_trunc_f, z_op);
+  mut n_floor : Operand := gen_select_i64(cg, is_over, gen_i64_binop(cg, 80, false, n_trunc, i64_imm(1)), n_trunc);
+  mut n_floor_f : Operand := gen_sitofp_i64_to_f64(cg, n_floor);
+  mut f : Operand := gen_fbinop_f64(cg, 80, z_op, n_floor_f);
+  mut t : Operand := gen_fbinop_f64(cg, 81, f, f64_bits_imm(ln2_bits()));
+  // Horner form of e^t = 1 + t/1*(1 + t/2*(1 + t/3*(... + t/13))) --
+  // 13 terms, t in [0, ln2) at most, lands far beyond the precision
+  // this whole approximation needs elsewhere (gen_log2_f64's own
+  // header comment covers the Python cross-check).
+  mut acc : Operand := f64_imm(1, 0);
+  mut k : uint64 := 13;
+  mut looping : bool := true;
+  mut biased : Operand := gen_i64_binop(cg, 85, false, n_floor, i64_imm(1023));
+  mut is_overflow : uint64 := 0;
+  mut is_underflow : uint64 := 0;
+  mut safe_biased : Operand := i64_imm(0);
+  mut pow2n_normal_bits : Operand := i64_imm(0);
+  mut pow2n : Operand := f64_imm(0, 0);
+
+  while (looping) {
+    acc := gen_fbinop_f64(cg, 85, f64_imm(1, 0), gen_fbinop_f64(cg, 83, gen_fbinop_f64(cg, 81, t, acc), f64_imm(k, 0)));
+    if (k <= 1) {
+      looping := false;
+    } else {
+      k := k - 1;
+    }
+  }
+
+  is_overflow := gen_i64_icmp(cg, 74, false, biased, i64_imm(2047));
+  is_underflow := gen_i64_icmp(cg, 73, false, biased, i64_imm(0));
+  safe_biased := gen_select_i64(cg, is_overflow, i64_imm(2046), gen_select_i64(cg, is_underflow, i64_imm(1), biased));
+  pow2n_normal_bits := gen_i64_binop(cg, 75, false, safe_biased, i64_imm(52));
+  pow2n := gen_select_f64(cg, is_overflow, f64_bits_imm(pos_inf_bits()), gen_select_f64(cg, is_underflow, f64_imm(0, 0), gen_bitcast_i64_to_f64(cg, pow2n_normal_bits)));
+
+  return gen_fbinop_f64(cg, 81, pow2n, acc);
+}
+
+// pow(x, y) for a genuinely FRACTIONAL y (gen_float_pow, below, only
+// ever calls this once it's confirmed y isn't integer-valued) --
+// x == 0 and x < 0 handled explicitly (`gen_log2_f64`'s own bit
+// extraction produces a meaningless value for either, silently, so
+// this selects the mathematically correct answer in instead of ever
+// returning that raw garbage): x == 0 follows the ordinary IEEE-754
+// convention (0.0 for a positive exponent, +inf for a negative one);
+// x < 0 with a fractional exponent has no real answer at all (unlike
+// an INTEGER exponent, already handled exactly by gen_float_pow_
+// int_exp before this function is ever reached) -- quiet NaN, matching
+// `pow`'s own standard behavior everywhere else.
+function gen_float_pow_frac(cg: *Codegen, x_op: Operand, y_op: Operand) : Operand {
+  mut abs_log2x : Operand := gen_log2_f64(cg, x_op);
+  mut z : Operand := gen_fbinop_f64(cg, 81, y_op, abs_log2x);
+  mut raw_result : Operand := gen_exp2_f64(cg, z);
+  mut is_zero_x : uint64 := gen_fcmp_f64(cg, 71, x_op, f64_imm(0, 0));
+  mut is_neg_x : uint64 := gen_fcmp_f64(cg, 86, x_op, f64_imm(0, 0));
+  mut is_neg_y : uint64 := gen_fcmp_f64(cg, 86, y_op, f64_imm(0, 0));
+  mut zero_case : Operand := gen_select_f64(cg, is_neg_y, f64_bits_imm(pos_inf_bits()), f64_imm(0, 0));
+  mut nan_val : Operand := f64_bits_imm(qnan_bits());
+
+  return gen_select_f64(cg, is_zero_x, zero_case, gen_select_f64(cg, is_neg_x, nan_val, raw_result));
+}
+
+// `**` dispatcher: gen_float_pow_int_exp (exact) for an integer-valued
+// exponent, gen_float_pow_frac (log2/exp2-based) otherwise -- computed
+// UNCONDITIONALLY on both sides then `select`ed on the exponent's own
+// integer-ness, the same branch-free style gen_float_pow_int_exp's own
+// negative-exponent fix already uses, rather than real control-flow
+// branching (which would need a join point / two divergent register
+// sets to merge). Both operands are converted to `double` first (gen_
+// to_f64) regardless of `**`'s own declared type (which could be
+// float32 for a float32**float32 expression) -- every helper above
+// only ever speaks `double` -- and the final result converted back
+// (gen_from_f64) before returning.
+function gen_float_pow(cg: *Codegen, s: *Sema, e: *ASTNode, base_op: Operand, exp_op: Operand) : Operand {
+  mut ty_file : uint64 := (*e).type_file_idx;
+  mut ty : *ASTNode := (*e).data_type;
+  mut exp64 : Operand := gen_to_f64(cg, s, ty_file, ty, exp_op);
+  mut base64 : Operand := gen_to_f64(cg, s, ty_file, ty, base_op);
+  mut trunc_i : Operand := gen_fptosi_f64_to_i64(cg, exp64);
+  mut back_f : Operand := gen_sitofp_i64_to_f64(cg, trunc_i);
+  mut is_int_reg : uint64 := gen_fcmp_f64(cg, 71, exp64, back_f);
+  mut fast_result : Operand := gen_float_pow_int_exp(cg, s, e, base_op, exp_op);
+  mut frac_result64 : Operand := gen_float_pow_frac(cg, base64, exp64);
+  mut frac_result : Operand := gen_from_f64(cg, s, ty_file, ty, frac_result64);
+  mut r : uint64 := new_reg(cg);
+
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+  cg_byte(cg, 115); cg_byte(cg, 101); cg_byte(cg, 108); cg_byte(cg, 101); cg_byte(cg, 99); cg_byte(cg, 116); cg_byte(cg, 32);
+  cg_byte(cg, 105); cg_byte(cg, 49); cg_byte(cg, 32);
+  cg_operand(cg, reg_op(is_int_reg));
+  cg_piece(cg, 3);
+  cg_type(cg, s, ty_file, ty);
+  cg_byte(cg, 32);
+  cg_operand(cg, fast_result);
+  cg_piece(cg, 3);
+  cg_type(cg, s, ty_file, ty);
+  cg_byte(cg, 32);
+  cg_operand(cg, frac_result);
+  cg_piece(cg, 0);
+  return reg_op(r);
+}
+
+// `a ** b` for an integer pair: no native instruction either, and
+// unlike the float case there's no intrinsic to lean on -- an ordinary
+// runtime multiply loop (`result := 1; while (i < b) { result *:= a;
+// i++; }`), emitted directly as raw labels/branches rather than through
+// a synthetic WHILE_STMT AST node, the same way gen_and/gen_or already
+// embed multi-basic-block control flow inside expression evaluation.
+function gen_int_pow(cg: *Codegen, s: *Sema, e: *ASTNode, base_op: Operand, exp_op: Operand) : Operand {
+  mut ty_file : uint64 := (*e).type_file_idx;
+  mut ty : *ASTNode := (*e).data_type;
+  mut is_unsigned : bool := is_unsigned_for_cast((*ty).tok.kind);
+  mut result_slot : uint64 := new_reg(cg);
+  mut i_slot : uint64 := new_reg(cg);
+  mut cond_l : uint64 := new_label(cg);
+  mut body_l : uint64 := new_label(cg);
+  mut end_l : uint64 := new_label(cg);
+  mut cur_i : uint64 := 0;
+  mut cur_result : uint64 := 0;
+  mut cmp_reg : uint64 := 0;
+  mut mul_reg : uint64 := 0;
+  mut inc_reg : uint64 := 0;
+  mut final_reg : uint64 := 0;
+
+  cg_piece(cg, 1); cg_reg_ref(cg, result_slot); cg_piece(cg, 2); cg_piece(cg, 6);
+  cg_type(cg, s, ty_file, ty);
+  cg_piece(cg, 0);
+  cg_piece(cg, 1); cg_reg_ref(cg, i_slot); cg_piece(cg, 2); cg_piece(cg, 6);
+  cg_type(cg, s, ty_file, ty);
+  cg_piece(cg, 0);
+
+  cg_piece(cg, 1); cg_piece(cg, 9);
+  cg_type(cg, s, ty_file, ty);
+  cg_byte(cg, 32); cg_byte(cg, 49);
+  cg_piece(cg, 8); cg_reg_ref(cg, result_slot); cg_piece(cg, 0);
+
+  cg_piece(cg, 1); cg_piece(cg, 9);
+  cg_type(cg, s, ty_file, ty);
+  cg_byte(cg, 32); cg_byte(cg, 48);
+  cg_piece(cg, 8); cg_reg_ref(cg, i_slot); cg_piece(cg, 0);
+
+  cg_piece(cg, 1); cg_piece(cg, 12); cg_piece(cg, 15); cg_label_target(cg, cond_l); cg_piece(cg, 0);
+  cg_label_def(cg, cond_l);
+
+  cur_i := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, cur_i); cg_piece(cg, 2); cg_piece(cg, 7);
+  cg_type(cg, s, ty_file, ty);
+  cg_piece(cg, 8); cg_reg_ref(cg, i_slot); cg_piece(cg, 0);
+
+  cmp_reg := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, cmp_reg); cg_piece(cg, 2); cg_piece(cg, 17);
+  cg_cmp_pred(cg, 86, is_unsigned);
+  cg_byte(cg, 32);
+  cg_type(cg, s, ty_file, ty);
+  cg_byte(cg, 32);
+  cg_operand(cg, Operand { is_reg := true, reg := cur_i, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 });
+  cg_piece(cg, 3);
+  cg_operand(cg, exp_op);
+  cg_piece(cg, 0);
+
+  cg_piece(cg, 1); cg_piece(cg, 13);
+  cg_operand(cg, Operand { is_reg := true, reg := cmp_reg, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 });
+  cg_piece(cg, 14); cg_label_target(cg, body_l);
+  cg_piece(cg, 14); cg_label_target(cg, end_l);
+  cg_piece(cg, 0);
+
+  cg_label_def(cg, body_l);
+
+  cur_result := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, cur_result); cg_piece(cg, 2); cg_piece(cg, 7);
+  cg_type(cg, s, ty_file, ty);
+  cg_piece(cg, 8); cg_reg_ref(cg, result_slot); cg_piece(cg, 0);
+
+  mul_reg := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, mul_reg); cg_piece(cg, 2);
+  cg_binop_mnemonic(cg, 81, is_unsigned);
+  cg_byte(cg, 32);
+  cg_type(cg, s, ty_file, ty);
+  cg_byte(cg, 32);
+  cg_operand(cg, Operand { is_reg := true, reg := cur_result, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 });
+  cg_piece(cg, 3);
+  cg_operand(cg, base_op);
+  cg_piece(cg, 0);
+
+  cg_piece(cg, 1); cg_piece(cg, 9);
+  cg_type(cg, s, ty_file, ty);
+  cg_byte(cg, 32);
+  cg_operand(cg, Operand { is_reg := true, reg := mul_reg, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 });
+  cg_piece(cg, 8); cg_reg_ref(cg, result_slot); cg_piece(cg, 0);
+
+  cur_i := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, cur_i); cg_piece(cg, 2); cg_piece(cg, 7);
+  cg_type(cg, s, ty_file, ty);
+  cg_piece(cg, 8); cg_reg_ref(cg, i_slot); cg_piece(cg, 0);
+
+  inc_reg := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, inc_reg); cg_piece(cg, 2);
+  cg_binop_mnemonic(cg, 85, is_unsigned);
+  cg_byte(cg, 32);
+  cg_type(cg, s, ty_file, ty);
+  cg_byte(cg, 32);
+  cg_operand(cg, Operand { is_reg := true, reg := cur_i, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 });
+  cg_piece(cg, 3);
+  cg_byte(cg, 49);
+  cg_piece(cg, 0);
+
+  cg_piece(cg, 1); cg_piece(cg, 9);
+  cg_type(cg, s, ty_file, ty);
+  cg_byte(cg, 32);
+  cg_operand(cg, Operand { is_reg := true, reg := inc_reg, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 });
+  cg_piece(cg, 8); cg_reg_ref(cg, i_slot); cg_piece(cg, 0);
+
+  cg_piece(cg, 1); cg_piece(cg, 12); cg_piece(cg, 15); cg_label_target(cg, cond_l); cg_piece(cg, 0);
+
+  cg_label_def(cg, end_l);
+
+  final_reg := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, final_reg); cg_piece(cg, 2); cg_piece(cg, 7);
+  cg_type(cg, s, ty_file, ty);
+  cg_piece(cg, 8); cg_reg_ref(cg, result_slot); cg_piece(cg, 0);
+
+  return Operand { is_reg := true, reg := final_reg, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
 }
 
 function gen_expr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTNode) : Operand {
   mut k : uint32 := (*e).kind;
   mut slot : uint64 := 0;
   mut r : uint64 := 0;
-  mut left_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
-  mut right_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut left_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+  mut right_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   mut is_unsigned : bool := false;
   mut lcat : int32 := 0;
   mut rcat : int32 := 0;
@@ -885,9 +2609,9 @@ function gen_expr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
   mut lit_decl_field : *ASTNode := null;
   mut lit_field_idx : uint64 := 0;
   mut lit_found : bool := false;
-  mut lit_val_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
-  mut lit_addr : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
-  mut lit_base_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut lit_val_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+  mut lit_addr : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+  mut lit_base_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   mut lit_slot : uint64 := 0;
   mut lit_elem_ty : *ASTNode := null;
   mut lit_elem_file : uint64 := 0;
@@ -904,24 +2628,55 @@ function gen_expr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
   // `use` of a struct-typed value under a bare 140), `data_type`'s own
   // token was written in the DECLARING file, not this expression's own.
   if (k == 140 || k == 163) {
+    if ((*e).symbol_ref != null && ((*(*e).symbol_ref).kind == 112 || (*(*e).symbol_ref).kind == 113)) {
+      return gen_global_func_addr(cg, s, (*e).type_file_idx, (*e).symbol_ref);
+    }
     slot := scope_reg_for_decl(sc, (*e).symbol_ref);
     r := new_reg(cg);
     cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 7);
     cg_type(cg, s, (*e).type_file_idx, (*e).data_type);
     cg_piece(cg, 8); cg_reg_ref(cg, slot); cg_piece(cg, 0);
-    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   }
 
   if (k == 141 || k == 144) {
-    return Operand { is_reg := false, reg := 0, imm := (*e).int_val, is_null := false };
+    return Operand { is_reg := false, reg := 0, imm := (*e).int_val, is_null := false, is_float_imm := false, float_bits := 0 };
   }
 
   if (k == 142) {
-    return Operand { is_reg := false, reg := 0, imm := decode_char_literal(&(*(*s).buffers)[file_idx].bytes, (*e).tok.offset), is_null := false };
+    // A multi-byte literal only ever anchors to `rune` (Sema's own
+    // decorate_literal_with_expected k==142 case) -- decode its real
+    // codepoint value rather than decode_char_literal's own single-byte
+    // (escapes included) logic, which only ever looks at the first one
+    // or two source bytes.
+    if (cast_category((*e).data_type) == 8) {
+      return Operand { is_reg := false, reg := 0, imm := decode_rune_literal(&(*(*s).buffers)[file_idx].bytes, (*e).tok.offset), is_null := false, is_float_imm := false, float_bits := 0 };
+    }
+    return Operand { is_reg := false, reg := 0, imm := decode_char_literal(&(*(*s).buffers)[file_idx].bytes, (*e).tok.offset), is_null := false, is_float_imm := false, float_bits := 0 };
   }
 
   if (k == 145) {
-    return Operand { is_reg := false, reg := 0, imm := 0, is_null := true };
+    return Operand { is_reg := false, reg := 0, imm := 0, is_null := true, is_float_imm := false, float_bits := 0 };
+  }
+
+  if (k == 164) {
+    return gen_float_literal(cg, s, file_idx, e);
+  }
+
+  if (k == 143) {
+    // Sema's own decorate_literal_with_expected k==143 case guarantees
+    // `data_type` is always an ARRAY by the time this runs (a bare
+    // string literal with no char[N]/rune[N] context is a hard Sema
+    // error, never reaches Codegen at all) -- only its own ELEMENT type
+    // still needs telling apart.
+    if ((*(*(*e).data_type).left).kind == 120 && (*(*(*e).data_type).left).tok.kind == 36) {
+      return gen_string_char_array(cg, s, file_idx, e);
+    }
+    if (cast_category((*(*e).data_type).left) == 8) {
+      return gen_string_rune_array(cg, s, file_idx, e);
+    }
+    (*cg).had_error := true;
+    return Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   }
 
   if (k == 146) {
@@ -931,6 +2686,17 @@ function gen_expr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
     }
     left_op := gen_expr(cg, s, sc, file_idx, (*e).left);
     right_op := gen_expr(cg, s, sc, file_idx, (*e).right);
+
+    // v1.1.6: an `operator` overload (Sema's own find_operator_overload,
+    // checked only when the built-in BINARY_EXPR category rules don't
+    // already apply to both operands -- e.g. two struct types) sets
+    // `symbol_ref` to the resolved OPERATOR_DECL; every built-in path
+    // below assumes a scalar/pointer category that a struct operand
+    // never has, so this must be checked first, before any of them run.
+    if ((*e).symbol_ref != null) {
+      return gen_operator_call(cg, s, (*e).symbol_ref, left_op, right_op);
+    }
+
     lcat := cast_category((*(*e).left).data_type);
     rcat := cast_category((*(*e).right).data_type);
 
@@ -939,6 +2705,28 @@ function gen_expr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
     }
     if ((*e).op_type == 80 && lcat == 4) {
       return gen_ptr_sub(cg, s, file_idx, e, left_op, right_op, rcat);
+    }
+
+    // `**` (v1.1.3): Sema's own decorate_expr already requires both
+    // operands to be the same type, either integer OR float-family --
+    // checked here on its own since neither LLVM instruction it maps to
+    // (an `llvm.pow.*` intrinsic call for floats, a runtime multiply
+    // loop for integers -- neither has a native single-instruction
+    // form) fits the generic icmp/arithmetic-opcode dispatch below.
+    if ((*e).op_type == 165) {
+      if (lcat == 6) {
+        return gen_float_pow(cg, s, e, left_op, right_op);
+      }
+      return gen_int_pow(cg, s, e, left_op, right_op);
+    }
+
+    // v1.1.3: a same-float-type operand pair (Sema's own decorate_expr
+    // "`+ - * /` also accept a same-float-type pair" note, plus ordinary
+    // float comparisons) -- `fadd`/`fsub`/`fmul`/`fdiv`/`fcmp` are
+    // entirely separate LLVM instructions from their integer
+    // counterparts below, never sharing an opcode/predicate spelling.
+    if (lcat == 6) {
+      return gen_float_binop(cg, s, e, left_op, right_op);
     }
 
     if (lcat == 4 && rcat == 4) {
@@ -969,7 +2757,7 @@ function gen_expr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
     cg_piece(cg, 3);
     cg_operand(cg, right_op);
     cg_piece(cg, 0);
-    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   }
 
   if (k == 147) {
@@ -988,7 +2776,7 @@ function gen_expr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
       cg_piece(cg, 8);
       cg_operand(cg, left_op);
       cg_piece(cg, 0);
-      return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+      return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
     }
     r := new_reg(cg);
     cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
@@ -998,16 +2786,26 @@ function gen_expr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
       cg_piece(cg, 3);
       cg_byte(cg, 49);
     } else {
-      cg_piece(cg, 28);
-      cg_byte(cg, 32);
-      cg_type(cg, s, (*e).type_file_idx, (*e).data_type);
-      cg_byte(cg, 32);
-      cg_byte(cg, 48);
-      cg_piece(cg, 3);
-      cg_operand(cg, left_op);
+      if (cast_category((*(*e).left).data_type) == 6) {
+        // v1.1.3: unary `-` on a float-family operand -- `fneg`, never
+        // `sub <ty> 0, %x` (invalid IR for a float type, and wrong for
+        // `-0.0` even conceptually).
+        cg_byte(cg, 102); cg_byte(cg, 110); cg_byte(cg, 101); cg_byte(cg, 103); cg_byte(cg, 32);
+        cg_type(cg, s, (*e).type_file_idx, (*e).data_type);
+        cg_byte(cg, 32);
+        cg_operand(cg, left_op);
+      } else {
+        cg_piece(cg, 28);
+        cg_byte(cg, 32);
+        cg_type(cg, s, (*e).type_file_idx, (*e).data_type);
+        cg_byte(cg, 32);
+        cg_byte(cg, 48);
+        cg_piece(cg, 3);
+        cg_operand(cg, left_op);
+      }
     }
     cg_piece(cg, 0);
-    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   }
 
   if (k == 149) {
@@ -1027,22 +2825,22 @@ function gen_expr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
     // (see type_byte_size's own header comment on why not).
     if ((*e).left != null) {
       if (k == 155) {
-        return Operand { is_reg := false, reg := 0, imm := uint64_to_int64(type_byte_size(cg, s, (*(*e).left).type_file_idx, (*(*e).left).data_type)), is_null := false };
+        return Operand { is_reg := false, reg := 0, imm := uint64_to_int64(type_byte_size(cg, s, (*(*e).left).type_file_idx, (*(*e).left).data_type)), is_null := false, is_float_imm := false, float_bits := 0 };
       }
       if ((*(*e).left).data_type == null || (*(*(*e).left).data_type).kind != 122) {
         (*cg).had_error := true;
-        return Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+        return Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
       }
-      return Operand { is_reg := false, reg := 0, imm := (*(*(*e).left).data_type).int_val, is_null := false };
+      return Operand { is_reg := false, reg := 0, imm := (*(*(*e).left).data_type).int_val, is_null := false, is_float_imm := false, float_bits := 0 };
     }
     if (k == 155) {
-      return Operand { is_reg := false, reg := 0, imm := uint64_to_int64(type_byte_size(cg, s, file_idx, (*e).extra)), is_null := false };
+      return Operand { is_reg := false, reg := 0, imm := uint64_to_int64(type_byte_size(cg, s, file_idx, (*e).extra)), is_null := false, is_float_imm := false, float_bits := 0 };
     }
     if ((*e).extra == null || (*(*e).extra).kind != 122) {
       (*cg).had_error := true;
-      return Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+      return Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
     }
-    return Operand { is_reg := false, reg := 0, imm := (*(*e).extra).int_val, is_null := false };
+    return Operand { is_reg := false, reg := 0, imm := (*(*e).extra).int_val, is_null := false, is_float_imm := false, float_bits := 0 };
   }
 
   // STRUCT_LIT/ARRAY_LIT (postulate_v0_language_reference.md SS3.8): no
@@ -1062,11 +2860,11 @@ function gen_expr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
     lit_lr := find_struct_symbol(s, file_idx, (*e).tok.offset, (*e).tok.length);
     if (!lit_lr.found) {
       (*cg).had_error := true;
-      return Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+      return Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
     }
     lit_struct_decl := sym_decl(s, lit_lr.index);
     lit_struct_file := (*s).symbols.ptr[lit_lr.index].file_idx;
-    lit_base_op := Operand { is_reg := true, reg := lit_slot, imm := 0, is_null := false };
+    lit_base_op := Operand { is_reg := true, reg := lit_slot, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
 
     lit_field := (*e).first_child;
     while (lit_field != null) {
@@ -1096,7 +2894,7 @@ function gen_expr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
     cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 7);
     cg_type(cg, s, (*e).type_file_idx, (*e).data_type);
     cg_piece(cg, 8); cg_reg_ref(cg, lit_slot); cg_piece(cg, 0);
-    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   }
 
   if (k == 153) {
@@ -1107,7 +2905,7 @@ function gen_expr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
 
     lit_elem_ty := (*(*e).data_type).left;
     lit_elem_file := (*e).type_file_idx;
-    lit_base_op := Operand { is_reg := true, reg := lit_slot, imm := 0, is_null := false };
+    lit_base_op := Operand { is_reg := true, reg := lit_slot, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
 
     lit_field := (*e).first_child;
     lit_field_idx := 0;
@@ -1128,7 +2926,7 @@ function gen_expr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
     cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2); cg_piece(cg, 7);
     cg_type(cg, s, (*e).type_file_idx, (*e).data_type);
     cg_piece(cg, 8); cg_reg_ref(cg, lit_slot); cg_piece(cg, 0);
-    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   }
 
   if (k == 150 || k == 151) {
@@ -1139,11 +2937,11 @@ function gen_expr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
     cg_piece(cg, 8);
     cg_operand(cg, left_op);
     cg_piece(cg, 0);
-    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   }
 
   (*cg).had_error := true;
-  return Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  return Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
 }
 
 // field_decl's own position (0-based) among struct_decl's FIELD_DECL
@@ -1184,7 +2982,7 @@ function gen_member_addr(cg: *Codegen, s: *Sema, container_file: uint64, contain
   cg_piece(cg, 3);
   cg_byte(cg, 105); cg_uint(cg, 32); cg_byte(cg, 32); cg_uint(cg, index);
   cg_piece(cg, 0);
-  return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
 }
 
 // Broadcast-init/assignment (postulate_v1_language_reference.md SS4.1/
@@ -1203,7 +3001,7 @@ function gen_member_addr(cg: *Codegen, s: *Sema, container_file: uint64, contain
 function gen_broadcast_store(cg: *Codegen, s: *Sema, target_file: uint64, target_ty: *ASTNode, target_addr: Operand, elem_file: uint64, elem_ty: *ASTNode, val_op: Operand) : void {
   mut n : uint64 := int64_to_uint64((*target_ty).int_val);
   mut i : uint64 := 0;
-  mut elem_addr : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut elem_addr : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   while (i < n) {
     elem_addr := gen_member_addr(cg, s, target_file, target_ty, target_addr, i);
     cg_piece(cg, 1); cg_piece(cg, 9);
@@ -1239,17 +3037,17 @@ function is_broadcast_target(target_ty: *ASTNode, src_kind: uint32) : bool {
 function gen_addr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTNode) : Operand {
   mut base_ty : *ASTNode := null;
   mut base_file : uint64 := 0;
-  mut base_addr : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut base_addr : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   mut struct_ty : *ASTNode := null;
   mut struct_file : uint64 := 0;
   mut lr : LookupResult := LookupResult { found := false, index := 0 };
   mut struct_decl : *ASTNode := null;
   mut field_idx : uint64 := 0;
-  mut idx_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut idx_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   mut r : uint64 := 0;
 
   if ((*e).kind == 140 || (*e).kind == 163) {
-    return Operand { is_reg := true, reg := scope_reg_for_decl(sc, (*e).symbol_ref), imm := 0, is_null := false };
+    return Operand { is_reg := true, reg := scope_reg_for_decl(sc, (*e).symbol_ref), imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   }
   if ((*e).kind == 147 && (*e).op_type == 81) {
     return gen_expr(cg, s, sc, file_idx, (*e).left);
@@ -1269,7 +3067,7 @@ function gen_addr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
     lr := find_struct_symbol(s, struct_file, (*struct_ty).tok.offset, (*struct_ty).tok.length);
     if (!lr.found) {
       (*cg).had_error := true;
-      return Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+      return Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
     }
     struct_decl := sym_decl(s, lr.index);
     field_idx := find_field_index(struct_decl, (*e).symbol_ref);
@@ -1299,23 +3097,23 @@ function gen_addr(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, e: *ASTN
     cg_byte(cg, 32);
     cg_operand(cg, idx_op);
     cg_piece(cg, 0);
-    return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+    return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   }
 
   (*cg).had_error := true;
-  return Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  return Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
 }
 
 function gen_stmt(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, stmt: *ASTNode) : void {
   mut k : uint32 := (*stmt).kind;
-  mut cond_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut cond_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   mut then_l : uint64 := 0;
   mut else_l : uint64 := 0;
   mut end_l : uint64 := 0;
   mut cond_l : uint64 := 0;
   mut body_l : uint64 := 0;
-  mut ret_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
-  mut val_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut ret_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+  mut val_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   mut slot : uint64 := 0;
   mut pair : *ASTNode := null;
   mut pair_slots : Operand[16];
@@ -1327,7 +3125,7 @@ function gen_stmt(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, stmt: *A
   mut next_branch : *ASTNode := null;
   mut synth_bin : ASTNode := ASTNode { kind := 146, tok := Token { kind := 0, offset := 0, length := 0 }, first_child := null, next_sibling := null, data_type := null, is_mutable := false, int_val := 0, op_type := 0, left := null, right := null, extra := null, symbol_ref := null, is_constant := false, type_file_idx := 0 };
   mut synth_one : ASTNode := ASTNode { kind := 141, tok := Token { kind := 0, offset := 0, length := 0 }, first_child := null, next_sibling := null, data_type := null, is_mutable := false, int_val := 1, op_type := 0, left := null, right := null, extra := null, symbol_ref := null, is_constant := false, type_file_idx := 0 };
-  mut addr_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut addr_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   mut incdec_binop : int32 := 80;
   mut first_branch : bool := true;
 
@@ -1487,7 +3285,7 @@ function gen_stmt(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, stmt: *A
     if ((*stmt).left != null) {
       val_op := gen_expr(cg, s, sc, file_idx, (*stmt).left);
       if (is_broadcast_target((*stmt).data_type, (*(*stmt).left).kind)) {
-        gen_broadcast_store(cg, s, file_idx, (*stmt).data_type, Operand { is_reg := true, reg := slot, imm := 0, is_null := false }, (*(*stmt).left).type_file_idx, (*(*stmt).left).data_type, val_op);
+        gen_broadcast_store(cg, s, file_idx, (*stmt).data_type, Operand { is_reg := true, reg := slot, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 }, (*(*stmt).left).type_file_idx, (*(*stmt).left).data_type, val_op);
       } else {
         cg_piece(cg, 1); cg_piece(cg, 9);
         cg_type(cg, s, file_idx, (*stmt).data_type);
@@ -1570,6 +3368,80 @@ function gen_block(cg: *Codegen, s: *Sema, sc: *Scope, file_idx: uint64, block: 
   return last_kind == 133 || last_kind == 158 || last_kind == 159;
 }
 
+// v1.1.6: an OPERATOR_DECL's own `tok` is the overloaded operator's own
+// token (e.g. `==`), never a valid LLVM identifier on its own -- every
+// overload instead gets a synthetic name, `__operator_<N>`, where N is
+// its own stable position in Sema's own `(*s).operators` registration
+// array (populated once, at declare time, in declare_operator -- never
+// reordered afterward, so any two call sites computing this the same
+// way -- the definition in gen_program/gen_function and every BINARY_
+// EXPR call site resolved to it in gen_expr -- always agree without
+// needing to thread the index through the AST itself).
+function find_operator_index(s: *Sema, decl: *ASTNode) : uint64 {
+  mut i : uint64 := 0;
+  while (i < (*s).operator_count) {
+    if ((*(*s).operators)[i].decl == decl) { return i; }
+    i := i + 1;
+  }
+  return 0;
+}
+
+function cg_operator_name(cg: *Codegen, idx: uint64) : void {
+  cg_byte(cg, 95); cg_byte(cg, 95);
+  cg_byte(cg, 111); cg_byte(cg, 112); cg_byte(cg, 101); cg_byte(cg, 114);
+  cg_byte(cg, 97); cg_byte(cg, 116); cg_byte(cg, 111); cg_byte(cg, 114);
+  cg_byte(cg, 95);
+  cg_uint(cg, idx);
+}
+
+// A resolved operator overload (BINARY_EXPR.symbol_ref set by Sema's
+// own decorate_expr, once `find_operator_overload` matches) is called
+// exactly like an ordinary two-argument function -- `left_op`/`right_op`
+// are already-evaluated operands (gen_expr's own k==146 case computes
+// them before checking `symbol_ref`, same order as the built-in
+// arithmetic path it replaces), and the overload's own two PARAM_DECLs
+// give each argument's real declared type (never re-derived from the
+// call site, which might reach it through an implicit conversion the
+// declared parameter type itself already accounts for). `OperatorOverload.
+// file_idx` -- not this expression's own file -- is used for every type
+// lookup here, since the overload's own signature was written in
+// (and its type tokens still point into) that declaring file.
+function gen_operator_call(cg: *Codegen, s: *Sema, decl: *ASTNode, left_op: Operand, right_op: Operand) : Operand {
+  mut idx : uint64 := find_operator_index(s, decl);
+  mut ov_file : uint64 := (*(*s).operators)[idx].file_idx;
+  mut is_void : bool := is_void_type((*decl).data_type);
+  mut r : uint64 := 0;
+  mut param1 : *ASTNode := (*decl).first_child;
+  mut param2 : *ASTNode := (*param1).next_sibling;
+
+  cg_piece(cg, 1);
+  if (!is_void) {
+    r := new_reg(cg);
+    cg_reg_ref(cg, r);
+    cg_piece(cg, 2);
+  }
+  cg_piece(cg, 16);
+  cg_type(cg, s, ov_file, (*decl).data_type);
+  cg_byte(cg, 32);
+  cg_byte(cg, 64);
+  cg_operator_name(cg, idx);
+  cg_piece(cg, 24);
+  cg_type(cg, s, ov_file, (*param1).data_type);
+  cg_byte(cg, 32);
+  cg_operand(cg, left_op);
+  cg_piece(cg, 3);
+  cg_type(cg, s, ov_file, (*param2).data_type);
+  cg_byte(cg, 32);
+  cg_operand(cg, right_op);
+  cg_piece(cg, 25);
+  cg_piece(cg, 0);
+
+  if (is_void) {
+    return Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+  }
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+}
+
 function gen_function(cg: *Codegen, s: *Sema, func_decl: *ASTNode, file_idx: uint64) : void {
   mut sc : Scope := Scope { bindings := dynbindings_new(256), count := 0, ret_type := (*func_decl).data_type, ret_file := file_idx, loop_depth := 0 };
   mut param : *ASTNode := (*func_decl).first_child;
@@ -1586,7 +3458,11 @@ function gen_function(cg: *Codegen, s: *Sema, func_decl: *ASTNode, file_idx: uin
   cg_type(cg, s, file_idx, (*func_decl).data_type);
   cg_byte(cg, 32);
   cg_byte(cg, 64);
-  cg_slice(cg, &(*(*s).buffers)[file_idx].bytes, (*func_decl).tok.offset, (*func_decl).tok.length);
+  if ((*func_decl).kind == 162) {
+    cg_operator_name(cg, find_operator_index(s, func_decl));
+  } else {
+    cg_slice(cg, &(*(*s).buffers)[file_idx].bytes, (*func_decl).tok.offset, (*func_decl).tok.length);
+  }
   cg_piece(cg, 24);
   while (param != null) {
     if (pidx > 0) { cg_piece(cg, 3); }
@@ -1728,6 +3604,7 @@ function gen_struct_types(cg: *Codegen, s: *Sema) : void {
   }
 }
 
+
 // Linux x86-64 syscall numbers for exactly the twelve `extern
 // function` names postulate_v1_language_reference.md SS5.2 whitelists.
 // Any OTHER extern function name still only gets a bare `declare`
@@ -1814,7 +3691,7 @@ function cg_syscall_arg_reg(cg: *Codegen, which: uint64) : void {
 function gen_raw_syscall(cg: *Codegen, syscall_num: uint64, args: *(Operand[6]), n_args: uint64) : Operand {
   mut r : uint64 := new_reg(cg);
   mut i : uint64 := 0;
-  mut cur : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut cur : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
 
   cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
   cg_piece(cg, 16);
@@ -1854,7 +3731,7 @@ function gen_raw_syscall(cg: *Codegen, syscall_num: uint64, args: *(Operand[6]),
   }
   cg_byte(cg, 41);
   cg_piece(cg, 0);
-  return Operand { is_reg := true, reg := r, imm := 0, is_null := false };
+  return Operand { is_reg := true, reg := r, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
 }
 
 // Emits a full `define` for a whitelisted `extern function`, backing
@@ -1880,8 +3757,8 @@ function gen_syscall_extern(cg: *Codegen, s: *Sema, file_idx: uint64, decl: *AST
   mut ret_ty : *ASTNode := (*decl).data_type;
   mut a : uint64 := 0;
   mut rp : uint64 := 0;
-  mut result : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
-  mut arg_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut result : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+  mut arg_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
 
   cg_piece(cg, 4);
   cg_type(cg, s, file_idx, ret_ty);
@@ -1912,7 +3789,7 @@ function gen_syscall_extern(cg: *Codegen, s: *Sema, file_idx: uint64, decl: *AST
       a := new_reg(cg);
       cg_piece(cg, 1); cg_reg_ref(cg, a); cg_piece(cg, 2);
       cg_piece(cg, 53); cg_piece(cg, 51); cg_byte(cg, 32); cg_param_ref(cg, pidx); cg_piece(cg, 54); cg_piece(cg, 0);
-      arg_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false };
+      arg_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
       args[n_args] := arg_op;
     } else {
       if (llvm_int_width((*(*param).data_type).tok.kind) == 64) {
@@ -1923,7 +3800,7 @@ function gen_syscall_extern(cg: *Codegen, s: *Sema, file_idx: uint64, decl: *AST
         cg_param_ref(cg, pidx);
         cg_piece(cg, 3); cg_byte(cg, 48);
         cg_piece(cg, 0);
-        arg_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false };
+        arg_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
         args[n_args] := arg_op;
       } else {
         a := new_reg(cg);
@@ -1935,7 +3812,7 @@ function gen_syscall_extern(cg: *Codegen, s: *Sema, file_idx: uint64, decl: *AST
         cg_piece(cg, 60);
         cg_byte(cg, 105); cg_uint(cg, 64);
         cg_piece(cg, 0);
-        arg_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false };
+        arg_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
         args[n_args] := arg_op;
       }
     }
@@ -2021,9 +3898,100 @@ function gen_program(cg: *Codegen, s: *Sema, program: *ASTNode, file_idx: uint64
       if ((*child).kind == 113 && decl_is_supported(child)) {
         gen_function(cg, s, child, file_idx);
       }
+      // OPERATOR_DECL (162, v1.1.6): shaped exactly like FUNCTION_DECL
+      // (Sema's own decorate_program header comment) -- gen_function
+      // already needs no separate operator-aware variant either, beyond
+      // its own name-emission branch.
+      if ((*child).kind == 162 && decl_is_supported(child)) {
+        gen_function(cg, s, child, file_idx);
+      }
     }
     child := (*child).next_sibling;
   }
+}
+
+// `_start`'s own raw-stack-read for the two-parameter `main(argv,
+// argc)` form (v1.1.n, postulate_v1_language_reference.md SS6.3) --
+// four small, `_start`-only helpers, not generalized further since
+// nothing else in this file ever needs to read a raw `i64` address or
+// convert one this way.
+//
+// `movq %rsp, $0` has to be the ABSOLUTE FIRST instruction `_start`
+// ever executes -- the kernel hands the process its own initial
+// `argc`/`argv`/`envp` laid out ON THE STACK, at whatever `rsp` is at
+// the very moment control reaches `_start`, with no register or ABI
+// path to recover it once even ONE more instruction has touched `rsp`.
+// Confirmed the hard way: an ordinary (non-`naked`) `define void @
+// _start() { ... }` had `llc` insert a stray `pushq %rax` BEFORE this
+// exact inline-asm line (`_start` isn't recognized as special --
+// nothing here tells `llc` this function has no real caller/return, so
+// it silently applied its own ordinary stack-alignment prologue logic,
+// shifting `rsp` by 8 bytes before this code ever got a chance to read
+// it). The `naked` function attribute (gen_start's own definition,
+// below) suppresses ALL of that -- confirmed empirically, byte for
+// byte, against `llc`'s own disassembly, and then end to end with a
+// real compiled-and-linked binary invoked with real command-line
+// arguments (`argc`/`argv[0]` read back out and written to stdout,
+// matching the actual invocation exactly, both with and without extra
+// arguments). Safe per the SysV ABI's own documented guarantee that
+// the kernel's initial `rsp` is ALREADY 16-byte aligned at process
+// entry -- exactly the alignment an ordinary `call` instruction
+// expects immediately before it, so a `naked` `_start` calling `main`
+// with zero intervening stack traffic needs no alignment fixup of its
+// own either.
+function gen_read_rsp(cg: *Codegen) : Operand {
+  mut r : uint64 := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+  cg_piece(cg, 16);
+  cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32);
+  cg_byte(cg, 97); cg_byte(cg, 115); cg_byte(cg, 109); cg_byte(cg, 32);
+  cg_byte(cg, 115); cg_byte(cg, 105); cg_byte(cg, 100); cg_byte(cg, 101); cg_byte(cg, 101); cg_byte(cg, 102); cg_byte(cg, 102); cg_byte(cg, 101); cg_byte(cg, 99); cg_byte(cg, 116); cg_byte(cg, 32);
+  cg_byte(cg, 34);
+  cg_byte(cg, 109); cg_byte(cg, 111); cg_byte(cg, 118); cg_byte(cg, 113); cg_byte(cg, 32);
+  cg_byte(cg, 37); cg_byte(cg, 114); cg_byte(cg, 115); cg_byte(cg, 112);
+  cg_byte(cg, 44); cg_byte(cg, 32);
+  cg_byte(cg, 36); cg_byte(cg, 48);
+  cg_byte(cg, 34);
+  cg_piece(cg, 3);
+  cg_byte(cg, 34); cg_byte(cg, 61); cg_byte(cg, 114); cg_byte(cg, 34);
+  cg_byte(cg, 40); cg_byte(cg, 41);
+  cg_piece(cg, 0);
+  return reg_op(r);
+}
+
+function gen_inttoptr_i64(cg: *Codegen, op: Operand) : Operand {
+  mut r : uint64 := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+  cg_byte(cg, 105); cg_byte(cg, 110); cg_byte(cg, 116); cg_byte(cg, 116); cg_byte(cg, 111); cg_byte(cg, 112); cg_byte(cg, 116); cg_byte(cg, 114); cg_byte(cg, 32);
+  cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32);
+  cg_operand(cg, op);
+  cg_piece(cg, 60);
+  cg_piece(cg, 51);
+  cg_piece(cg, 0);
+  return reg_op(r);
+}
+
+function gen_load_i64(cg: *Codegen, ptr_op: Operand) : Operand {
+  mut r : uint64 := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+  cg_piece(cg, 7);
+  cg_byte(cg, 105); cg_uint(cg, 64);
+  cg_piece(cg, 8);
+  cg_operand(cg, ptr_op);
+  cg_piece(cg, 0);
+  return reg_op(r);
+}
+
+function gen_trunc_i64_to_i16(cg: *Codegen, op: Operand) : Operand {
+  mut r : uint64 := new_reg(cg);
+  cg_piece(cg, 1); cg_reg_ref(cg, r); cg_piece(cg, 2);
+  cg_piece(cg, 59);
+  cg_byte(cg, 105); cg_uint(cg, 64); cg_byte(cg, 32);
+  cg_operand(cg, op);
+  cg_piece(cg, 60);
+  cg_byte(cg, 105); cg_uint(cg, 16);
+  cg_piece(cg, 0);
+  return reg_op(r);
 }
 
 // Emits `_start`, the process's real ELF entry point, for whichever
@@ -2031,31 +3999,43 @@ function gen_program(cg: *Codegen, s: *Sema, program: *ASTNode, file_idx: uint64
 // FUNCTION_DECLs for the literal name (Module 3 doesn't yet enforce
 // v1's own "exactly one `main`, in `\Main`" rule, reference SS6.3, so
 // this walks every file via main()'s own per-file loop below and stops
-// at the first match; a well-formed program only ever has one). Calls
-// `@main` (still zero-parameter only -- the two-parameter `argv`/`argc`
-// form is `v1.1.5`, not yet parsed at all), coerces its return value
-// (`void` or any atomic type, SS6.3) to the raw `i64` an exit-code
-// register needs -- a pointer via `ptrtoint`, a narrower-than-64-bit
-// value via `zext` unconditionally (the exit syscall's own observable
-// code only depends on the low 8 bits regardless, so this doesn't need
-// to branch on `main`'s own signedness), `void` as a literal `0` --
-// then terminates the WHOLE process via `sys_exit_group` (231), not
-// `sys_exit` (60), which only ends the calling thread and would leave
-// any other still-running thread (started via `sys_clone`) alive.
-// `unreachable` afterward, since the syscall itself never returns.
-// Returns whether it found (and therefore emitted) `main` in THIS
-// file, so main()'s own driver loop knows to stop trying further files.
+// at the first match; a well-formed program only ever has one).
+// `_start` is always `naked` now (gen_read_rsp's own header comment
+// covers why) -- harmless for the zero-parameter form too (an ordinary
+// `call` needs no more stack setup than a `naked` entry already
+// provides, per the same SysV alignment guarantee), so there's exactly
+// one code shape rather than two. Calls `@main` with no arguments, or
+// with `(argv: **char, argc: uint16)` read directly off `_start`'s own
+// pristine initial stack -- Sema's own `main_params_valid` guarantees
+// `main_decl`'s param list is always one of exactly these two shapes
+// by the time this runs, nothing else to branch on. Coerces the return
+// value (`void` or any atomic type, SS6.3) to the raw `i64` an exit-
+// code register needs -- a pointer via `ptrtoint`, a narrower-than-
+// 64-bit value via `zext` unconditionally (the exit syscall's own
+// observable code only depends on the low 8 bits regardless, so this
+// doesn't need to branch on `main`'s own signedness), `void` as a
+// literal `0` -- then terminates the WHOLE process via `sys_exit_
+// group` (231), not `sys_exit` (60), which only ends the calling
+// thread and would leave any other still-running thread (started via
+// `sys_clone`) alive. `unreachable` afterward, since the syscall
+// itself never returns. Returns whether it found (and therefore
+// emitted) `main` in THIS file, so main()'s own driver loop knows to
+// stop trying further files.
 function gen_start(cg: *Codegen, s: *Sema, program: *ASTNode, file_idx: uint64) : bool {
   mut child : *ASTNode := (*program).first_child;
   mut main_decl : *ASTNode := null;
   mut buf : *DynBytes := &(*(*s).buffers)[file_idx].bytes;
   mut o : uint64 := 0;
-  mut call_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
-  mut code_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut call_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+  mut code_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   mut ret_ty : *ASTNode := null;
   mut a : uint64 := 0;
   mut args : Operand[6];
-  mut discard_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+  mut discard_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+  mut has_args : bool := false;
+  mut rsp_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+  mut argv_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
+  mut argc_op : Operand := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
 
   while (child != null) {
     if ((*child).kind == 113 && (*child).tok.length == 4) {
@@ -2067,22 +4047,35 @@ function gen_start(cg: *Codegen, s: *Sema, program: *ASTNode, file_idx: uint64) 
     child := (*child).next_sibling;
   }
   if (main_decl == null) { return false; }
+  has_args := (*main_decl).first_child != null;
 
   cg_piece(cg, 4);
   cg_piece(cg, 26);
   cg_byte(cg, 32); cg_byte(cg, 64);
   cg_byte(cg, 95); cg_byte(cg, 115); cg_byte(cg, 116); cg_byte(cg, 97); cg_byte(cg, 114); cg_byte(cg, 116);
   cg_piece(cg, 24); cg_piece(cg, 25);
+  cg_byte(cg, 32); cg_byte(cg, 110); cg_byte(cg, 97); cg_byte(cg, 107); cg_byte(cg, 101); cg_byte(cg, 100);
   cg_byte(cg, 32); cg_piece(cg, 22);
   cg_piece(cg, 20);
+
+  if (has_args) {
+    rsp_op := gen_read_rsp(cg);
+    argv_op := gen_inttoptr_i64(cg, gen_i64_binop(cg, 85, false, rsp_op, i64_imm(8)));
+    argc_op := gen_trunc_i64_to_i16(cg, gen_load_i64(cg, gen_inttoptr_i64(cg, rsp_op)));
+  }
 
   ret_ty := (*main_decl).data_type;
   if (is_void_type(ret_ty)) {
     cg_piece(cg, 1); cg_piece(cg, 16); cg_piece(cg, 26);
     cg_byte(cg, 32); cg_byte(cg, 64);
     cg_byte(cg, 109); cg_byte(cg, 97); cg_byte(cg, 105); cg_byte(cg, 110);
-    cg_piece(cg, 24); cg_piece(cg, 25); cg_piece(cg, 0);
-    code_op := Operand { is_reg := false, reg := 0, imm := 0, is_null := false };
+    cg_piece(cg, 24);
+    if (has_args) {
+      cg_piece(cg, 51); cg_byte(cg, 32); cg_operand(cg, argv_op);
+      cg_piece(cg, 3); cg_byte(cg, 105); cg_uint(cg, 16); cg_byte(cg, 32); cg_operand(cg, argc_op);
+    }
+    cg_piece(cg, 25); cg_piece(cg, 0);
+    code_op := Operand { is_reg := false, reg := 0, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
   } else {
     a := new_reg(cg);
     cg_piece(cg, 1); cg_reg_ref(cg, a); cg_piece(cg, 2);
@@ -2090,14 +4083,19 @@ function gen_start(cg: *Codegen, s: *Sema, program: *ASTNode, file_idx: uint64) 
     cg_type(cg, s, file_idx, ret_ty);
     cg_byte(cg, 32); cg_byte(cg, 64);
     cg_byte(cg, 109); cg_byte(cg, 97); cg_byte(cg, 105); cg_byte(cg, 110);
-    cg_piece(cg, 24); cg_piece(cg, 25); cg_piece(cg, 0);
-    call_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false };
+    cg_piece(cg, 24);
+    if (has_args) {
+      cg_piece(cg, 51); cg_byte(cg, 32); cg_operand(cg, argv_op);
+      cg_piece(cg, 3); cg_byte(cg, 105); cg_uint(cg, 16); cg_byte(cg, 32); cg_operand(cg, argc_op);
+    }
+    cg_piece(cg, 25); cg_piece(cg, 0);
+    call_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
 
     if ((*ret_ty).kind == 121) {
       a := new_reg(cg);
       cg_piece(cg, 1); cg_reg_ref(cg, a); cg_piece(cg, 2);
       cg_piece(cg, 53); cg_piece(cg, 51); cg_byte(cg, 32); cg_operand(cg, call_op); cg_piece(cg, 54); cg_piece(cg, 0);
-      code_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false };
+      code_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
     } else {
       if (llvm_int_width((*ret_ty).tok.kind) == 64) {
         code_op := call_op;
@@ -2109,7 +4107,7 @@ function gen_start(cg: *Codegen, s: *Sema, program: *ASTNode, file_idx: uint64) 
         cg_byte(cg, 32); cg_operand(cg, call_op);
         cg_piece(cg, 60); cg_byte(cg, 105); cg_uint(cg, 64);
         cg_piece(cg, 0);
-        code_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false };
+        code_op := Operand { is_reg := true, reg := a, imm := 0, is_null := false, is_float_imm := false, float_bits := 0 };
       }
     }
   }

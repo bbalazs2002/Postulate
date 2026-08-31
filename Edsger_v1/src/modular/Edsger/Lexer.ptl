@@ -47,7 +47,7 @@ use \Edsger\Dynamic;
 //   44  elseif     45 break     46 continue   47 ref       48 operator
 //   49  pure
 //   90  float32    91 float64   92 float      93 ufloat32  94 ufloat64
-//   95  ufloat     96 string
+//   95  ufloat     96 rune
 //   97  @shadow (whole directive, one token, alongside `40 @autoload`)
 //
 //   50  :  (lone)             51  ;      52  ,      53  .      54  (
@@ -169,6 +169,27 @@ function is_hex_digit(b: uint8) : bool {
   return (b >= 48 && b <= 57) || (b >= 97 && b <= 102) || (b >= 65 && b <= 70);
 }
 
+// v1.1.n: a based-form literal's OWN value-digit alphabet is restricted
+// to what's actually valid for its declared base (2/8/10/16) -- unlike
+// the pre-float based-form INTEGER scan, which always accepted the full
+// hex alphabet regardless of the declared base (harmless there, since
+// an integer literal never had anything after its own last value digit
+// to disambiguate against). A based-form FLOAT needs this: base 10's
+// own exponent marker is `e`/`E`, which `is_hex_digit` also accepts as
+// a value digit (14) -- `10n9e5` would otherwise never reach the
+// exponent check at all, `e` always being swallowed as one more
+// mantissa digit first. Restricting the alphabet per base is also just
+// the ordinary behavior every other language's own based-integer
+// literals already have (Rust/C++14 binary literals, etc.) -- the old
+// permissiveness was never a deliberate design choice, just untested
+// until an exponent made it observable.
+function is_value_digit_for_base(b: uint8, base: uint64) : bool {
+  if (base == 16) { return is_hex_digit(b); }
+  if (base == 8) { return b >= 48 && b <= 55; }
+  if (base == 2) { return b == 48 || b == 49; }
+  return is_digit(b);
+}
+
 function is_alpha(b: uint8) : bool {
   return (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || b == 95;
 }
@@ -287,11 +308,16 @@ function skip_trivia(r: *SourceReader) : TriviaResult {
 }
 
 // v1.1.n: also scans float literals -- plain decimal (digit+ . digit+
-// (exponent)?) and based-form (digit+ n value_digit+ (. value_digit+
-// (exponent)?)?). The exponent marker for a based-form float depends on
-// the base's own numeric value (`p`/`P` for base 16, since its own
-// digit alphabet already includes `e`/`f`; `e`/`E` for every other
-// base) -- `base_value` accumulates the leading digit+ run's own
+// (exponent)?) and based-form (digit+ n value_digit+ . value_digit+
+// (exponent)?) -- the fraction is MANDATORY for a based-form float,
+// same as it always was: `16nFp3` (an exponent with no dot at all) is
+// deliberately NOT a float -- it lexes as based-form INTEGER `16nF`
+// followed by a separate, unrelated `p3` token (a parse error in any
+// real expression position), not a float literal. The exponent marker
+// for a based-form float depends on the base's own numeric value
+// (`p`/`P` for base 16, since its own digit alphabet already includes
+// `e`/`f`; `e`/`E` for every other base) -- `base_value` accumulates
+// the leading digit+ run's own
 // decimal value for exactly this one check, nothing else. Exponent
 // digits themselves are always plain decimal, regardless of the
 // literal's own base.
@@ -320,13 +346,22 @@ function scan_number(r: *SourceReader) : NumberResult {
 
   if (reader_peek(r) == 110) {
     // Based form: digit+ 'n' value_digit+, optionally '.' value_digit+,
-    // optionally an exponent.
+    // an exponent only ever meaningful (and only ever scanned) once
+    // that fraction is present -- `16nFp3` (no dot) stops right after
+    // `F`, leaving `p3` an unrelated token, not folded into this
+    // literal at all. (v1.1.n's own digit alphabet fix stays either
+    // way: value digits are restricted to what's actually valid for
+    // the declared base -- is_value_digit_for_base -- instead of always
+    // the full hex alphabet, since base 10/8/2's own `e`/`E` exponent
+    // marker is also a valid HEX digit and would otherwise always be
+    // swallowed as one more mantissa/fraction digit before this scan
+    // ever got to check for it.)
     n_pos := (*r).cursor;
     reader_advance(r);
     has_value_digit := false;
     looping := true;
     while (looping) {
-      if (is_hex_digit(reader_peek(r))) {
+      if (is_value_digit_for_base(reader_peek(r), base_value)) {
         has_value_digit := true;
         reader_advance(r);
       } else {
@@ -337,13 +372,13 @@ function scan_number(r: *SourceReader) : NumberResult {
       had_error := true;
       error_at := n_pos + 1;
     } else {
-      if (reader_peek(r) == 46 && is_hex_digit(reader_peek_at(r, 1))) {
+      if (reader_peek(r) == 46 && is_value_digit_for_base(reader_peek_at(r, 1), base_value)) {
         is_float := true;
         dot_pos := (*r).cursor;
         reader_advance(r);
         looping := true;
         while (looping) {
-          if (is_hex_digit(reader_peek(r))) {
+          if (is_value_digit_for_base(reader_peek(r), base_value)) {
             reader_advance(r);
           } else {
             looping := false;
@@ -425,12 +460,15 @@ function scan_number(r: *SourceReader) : NumberResult {
 // byte -- 0 for plain ASCII (single-byte literal, stays fixed-type
 // `char`, unchanged), 1/2/3 for a real multi-byte code point (becomes
 // an untyped char/rune-family constant -- a Sema-level distinction,
-// made later by inspecting this same token's own byte length; the
-// lexer's only job is accepting the whole sequence as one char_body
-// instead of erroring on it). A stray/invalid leading byte (a bare
-// continuation byte, or 0xF8-0xFF) is treated as ordinary ASCII width
-// (0 extra) -- not valid UTF-8, but the lexer stays permissive here and
-// lets whatever reads the token's text later reject it if it matters.
+// made later by re-inspecting this same token's own DECODED content
+// (char_literal_is_multibyte, not the raw token byte length -- a `\n`-
+// style escape is 4 raw bytes but decodes to exactly one, a bug this
+// exact confusion caused and fixed 2026-08-31); the lexer's only job
+// here is accepting the whole sequence as one char_body instead of
+// erroring on it). A stray/invalid leading byte (a bare continuation
+// byte, or 0xF8-0xFF) is treated as ordinary ASCII width (0 extra) --
+// not valid UTF-8, but the lexer stays permissive here and lets
+// whatever reads the token's text later reject it if it matters.
 function utf8_extra_bytes(lead: uint8) : uint64 {
   if (lead >= 240 && lead <= 247) { return 3; }
   if (lead >= 224 && lead <= 239) { return 2; }
@@ -593,6 +631,14 @@ function classify_word(r: *SourceReader, off: uint64, len: uint64) : int32 {
     if ((*buf).ptr[off + 0] == 117 && (*buf).ptr[off + 1] == 105 && (*buf).ptr[off + 2] == 110 && (*buf).ptr[off + 3] == 116) { result := 29; }
     if ((*buf).ptr[off + 0] == 99 && (*buf).ptr[off + 1] == 104 && (*buf).ptr[off + 2] == 97 && (*buf).ptr[off + 3] == 114) { result := 36; }
     if ((*buf).ptr[off + 0] == 112 && (*buf).ptr[off + 1] == 117 && (*buf).ptr[off + 2] == 114 && (*buf).ptr[off + 3] == 101) { result := 49; }
+    // v1.1.n: `rune` -- a builtin scalar (a 4-byte Unicode codepoint
+    // value, Go's own `rune = int32` precedent), NOT a std-defined
+    // struct matched by spelling (Sema's old is_rune_type) -- reuses
+    // kind 96, freed when native `string` moved out of the compiler
+    // entirely (`string` itself is never a keyword here any more; a
+    // std-defined `struct string {...}` needs its own name to lex as a
+    // plain identifier, kind 1, like any other struct).
+    if ((*buf).ptr[off + 0] == 114 && (*buf).ptr[off + 1] == 117 && (*buf).ptr[off + 2] == 110 && (*buf).ptr[off + 3] == 101) { result := 96; }
   }
   if (len == 5) {
     if ((*buf).ptr[off + 0] == 99 && (*buf).ptr[off + 1] == 111 && (*buf).ptr[off + 2] == 110 && (*buf).ptr[off + 3] == 115 && (*buf).ptr[off + 4] == 116) { result := 14; }
@@ -615,7 +661,6 @@ function classify_word(r: *SourceReader, off: uint64, len: uint64) : int32 {
     if ((*buf).ptr[off + 0] == 115 && (*buf).ptr[off + 1] == 105 && (*buf).ptr[off + 2] == 122 && (*buf).ptr[off + 3] == 101 && (*buf).ptr[off + 4] == 111 && (*buf).ptr[off + 5] == 102) { result := 41; }
     if ((*buf).ptr[off + 0] == 101 && (*buf).ptr[off + 1] == 108 && (*buf).ptr[off + 2] == 115 && (*buf).ptr[off + 3] == 101 && (*buf).ptr[off + 4] == 105 && (*buf).ptr[off + 5] == 102) { result := 44; }
     if ((*buf).ptr[off + 0] == 117 && (*buf).ptr[off + 1] == 102 && (*buf).ptr[off + 2] == 108 && (*buf).ptr[off + 3] == 111 && (*buf).ptr[off + 4] == 97 && (*buf).ptr[off + 5] == 116) { result := 95; }
-    if ((*buf).ptr[off + 0] == 115 && (*buf).ptr[off + 1] == 116 && (*buf).ptr[off + 2] == 114 && (*buf).ptr[off + 3] == 105 && (*buf).ptr[off + 4] == 110 && (*buf).ptr[off + 5] == 103) { result := 96; }
   }
   if (len == 7) {
     if ((*buf).ptr[off + 0] == 117 && (*buf).ptr[off + 1] == 105 && (*buf).ptr[off + 2] == 110 && (*buf).ptr[off + 3] == 116 && (*buf).ptr[off + 4] == 112 && (*buf).ptr[off + 5] == 116 && (*buf).ptr[off + 6] == 114) { result := 43; }

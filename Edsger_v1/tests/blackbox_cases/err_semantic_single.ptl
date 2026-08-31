@@ -1,0 +1,10 @@
+namespace \Main;
+
+// A single, unambiguous semantic error: assigning an int literal
+// directly to a pointer-typed local. Expected: Sema rejects this with
+// one clear type-mismatch error and exits non-zero.
+
+function main() : int32 {
+  mut p : *int32 := 5;
+  return 0;
+}

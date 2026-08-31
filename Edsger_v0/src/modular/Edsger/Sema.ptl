@@ -1024,6 +1024,22 @@ function is_literal_kind(k: uint32) : bool {
   return k == 141 || k == 144 || k == 145 || k == 153 || k == 155 || k == 156;
 }
 
+// 2026-08-31: `-N` (a UNARY_EXPR wrapping a literal directly) anchors
+// the same way a bare literal does -- `mut x : int64 := -1;` should
+// behave exactly like `mut x : int64 := 1;`, not silently default the
+// inner `1` to `int32` first (UNARY_EXPR itself was never itself a
+// "literal kind", so every call site below used to route it through
+// plain decorate_expr instead, which has no expected-type context to
+// give the inner literal at all) and then fail the outer comparison
+// against a wider declared/expected type. Every call site that used to
+// gate on is_literal_kind(e.kind) directly now goes through this
+// instead; decorate_literal_with_expected's own new k==147 branch
+// (below) does the actual work once routed here.
+function is_literal_expr(e: *ASTNode) : bool {
+  if (is_literal_kind((*e).kind)) { return true; }
+  return (*e).kind == 147 && (*e).op_type == 80 && (*e).left != null && is_literal_kind((*(*e).left).kind);
+}
+
 // `expected`/`expected_file` describe whatever context this literal
 // (or untyped `sizeof`/`lengthof`) sits in -- the OTHER operand in a
 // binary expression, a decl's own declared type, an lvalue being
@@ -1050,6 +1066,29 @@ function decorate_literal_with_expected(s: *Sema, p: *Parser, sc: *Scope, file_i
   mut measured : *ASTNode := null;
   mut local_var : *ASTNode := null;
   mut lr2 : LookupResult := LookupResult { found := false, index := 0 };
+  mut lcat : int32 := 0;
+
+  // 2026-08-31: `-N`, N a literal -- decorate the INNER literal against
+  // the same `expected` (so e.g. `mut x : int64 := -1;` anchors the `1`
+  // to int64 before negating, not to int32 first), then apply the same
+  // signed-operand-only restriction decorate_expr's own ordinary
+  // (non-anchored) unary `-` handling already enforces elsewhere in
+  // this file -- an anchored `-1` targeting an UNSIGNED expected type
+  // is still a type error (kind 13), same as negating an already-
+  // uint64-typed value is; anchoring must never be a backdoor around
+  // that rule.
+  if (k == 147 && (*e).op_type == 80 && (*e).left != null && is_literal_kind((*(*e).left).kind)) {
+    decorate_literal_with_expected(s, p, sc, file_idx, (*e).left, expected, expected_file);
+    if ((*s).had_error) { return; }
+    lcat := cast_category((*(*e).left).data_type);
+    if (lcat != 1 || is_unsigned_for_cast((*(*(*e).left).data_type).tok.kind)) {
+      set_error(s, e, file_idx, 13);
+      return;
+    }
+    (*e).data_type := (*(*e).left).data_type;
+    (*e).type_file_idx := (*(*e).left).type_file_idx;
+    return;
+  }
 
   if (k == 153) {
     if (expected == null || (*expected).kind != 122) {
@@ -1179,7 +1218,7 @@ function set_expected_mismatch(s: *Sema, node: *ASTNode, file_idx: uint64, expec
 // check against, e.g. an operand this module doesn't yet impose one on)
 // just decorates normally and skips the comparison entirely.
 function check_expected(s: *Sema, p: *Parser, sc: *Scope, file_idx: uint64, e: *ASTNode, expected: *ASTNode, expected_file: uint64) : void {
-  if (is_literal_kind((*e).kind)) {
+  if (is_literal_expr(e)) {
     decorate_literal_with_expected(s, p, sc, file_idx, e, expected, expected_file);
   } else {
     decorate_expr(s, p, sc, file_idx, e);
@@ -1252,8 +1291,8 @@ function decorate_expr(s: *Sema, p: *Parser, sc: *Scope, file_idx: uint64, e: *A
 
   if (k == 146) {
     op := (*e).op_type;
-    left_lit := is_literal_kind((*(*e).left).kind);
-    right_lit := is_literal_kind((*(*e).right).kind);
+    left_lit := is_literal_expr((*e).left);
+    right_lit := is_literal_expr((*e).right);
 
     // Untyped-constant anchoring (SS3.7): decorate whichever side ISN'T
     // a bare literal first, then let its resolved type anchor the
@@ -1695,14 +1734,12 @@ function decorate_program(s: *Sema, p: *Parser, program: *ASTNode, file_idx: uin
   }
 }
 
+// 2026-08-31: same fix, same reason, as int64_to_uint64 above -- was an
+// O(n) counting loop, now a plain (narrowing) `as` cast, which this
+// compiler already supports (unlike Hoare, the one tool in this whole
+// lineage that genuinely has no alternative).
 function int32_of_int_val(n: int64) : int32 {
-  mut result : int32 := 0;
-  mut steps : int64 := n;
-  while (steps > 0) {
-    result := result + 1;
-    steps := steps - 1;
-  }
-  return result;
+  return n as int32;
 }
 
 // ---------------------------------------------------------------------
@@ -1876,8 +1913,8 @@ function open_and_read_file(fs: *FileSet, slot: uint64, path_buf: *(uint8[512]),
 // Tokenizes + parses buffers[slot] into a fresh PROGRAM root, reusing
 // the ONE shared Parser (its tok_kind/offset/length arrays are pure
 // per-file scratch, safe to reset and reuse; its node pool is the
-// shared arena and is deliberately NOT reset, so node_count keeps
-// accumulating across every file).
+// shared arena and is deliberately NOT reset, so every file's nodes
+// keep accumulating into the same chunk chain).
 function process_file(fs: *FileSet, p: *Parser, slot: uint64) : void {
   (*p).src := &(*(*fs).buffers)[slot].bytes;
   (*p).src_len := (*(*fs).lens)[slot];
@@ -1970,14 +2007,20 @@ function digit_to_ascii(d: uint64) : uint8 {
   return result;
 }
 
+// v1.1.n (Edsger v1) 2026-08-31: was an O(n) counting loop -- not O(digit
+// count), O(the VALUE itself) -- and every parsed INT_LIT's own value
+// runs through exactly this (or Parser.ptl's own uint64_to_int64, the
+// other direction) at parse time, unconditionally. A real, ordinary
+// user literal like `mut x : uint64 := 5000000000;` therefore made this
+// compiler hang for 5 billion loop iterations -- confirmed directly
+// against this exact binary (postulate-edsger-release), still running
+// past 15 seconds before this fix. int64/uint64 are both plain 64-bit
+// `i64` at the LLVM level (no separate signed/unsigned integer type
+// there), so this is a true no-op cast, not an approximation of one --
+// `as` was available the entire time, ported forward here from Edsger
+// v1's own identical fix (docs/postulate_stage1_bootstrap_plan.md).
 function int64_to_uint64(n: int64) : uint64 {
-  mut result : uint64 := 0;
-  mut steps : int64 := n;
-  while (steps > 0) {
-    result := result + 1;
-    steps := steps - 1;
-  }
-  return result;
+  return n as uint64;
 }
 
 function append_byte(out: *DynBytes, pos: uint64, b: uint8) : uint64 {

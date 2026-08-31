@@ -1,0 +1,6 @@
+namespace \Main;
+
+function main() : int32 {
+  break;
+  return 0;
+}

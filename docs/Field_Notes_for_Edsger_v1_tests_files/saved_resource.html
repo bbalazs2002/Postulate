@@ -1,0 +1,1107 @@
+<!DOCTYPE html>
+<!-- saved from url=(0253)https://34484edb-d7de-4d17-9445-85a88bf82e46.frame.claudeusercontent.com/_f/1788201884-bad5/?__frame_t=H5v4w-je_li4GX66Yz_cPeMD.04eee1cc-8d79-4d5b-8ee8-08638bfdf4a7.930fa664-4d9a-49f7-8419-8fbc35e65c8c.1788205497&__frame_v=manifest.155e997702a4b8fc.json -->
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8"><!-- frame-runtime --><!--<base href="/_f/1788201884-bad5/">--><base href="."><script>window.__FRAME_PREAMBLE={"v":1,"capabilities":{"artifact":"artifact.D_F1mx8d.js","assets":"assets.8Gk803W0.js","comments":"comments.GLuHR3zP.js","db":"db.h-3sndFg.js","downloads":"downloads.C3GSvEDP.js","embed":"embed.CxGAyc-v.js","mcp":"mcp.Bvma3qD7.js","network":"network.B5UA9Su4.js","notifications":"notifications.ssU4jy7G.js","permissions":"permissions.BNySkLV5.js","room":"room.BMMoe2BY.js","sample":"sample.BW2Uysoh.js","self":"artifact.D_F1mx8d.js","user":"user.BpKav-Rf.js"},"transforms":"_transforms.DSB5x63f.js","comments":"_comments.BoakUwmM.js","translate":"_translate.5HCW4BJh.js"}</script><script>(function(){"use strict";var te=["light","dark","system"],re=/^[A-Za-z0-9_-]{1,64}$/,$=/^[a-zA-Z_:][a-zA-Z0-9_:.-]{0,127}$/,ne=new Set(["class","hidden","value","checked","style","title","alt","placeholder","lang","dir","role","tabindex","disabled","readonly","contenteditable","open","colspan","rowspan"]);function oe(e){const t=e.toLowerCase();return t.startsWith("data-")||t.startsWith("aria-")||ne.has(t)}var Be="http://www.w3.org/1999/xhtml",se="http://www.w3.org/2000/svg",ae=new Set(["script","style","iframe","noscript","noframes","noembed","xmp","plaintext","template","title","textarea","object","embed"]),ie=new Set(["script","style"]);function ce(e){const t=e.localName.toLowerCase();return e.namespaceURI==="http://www.w3.org/1999/xhtml"?!ae.has(t):e.namespaceURI===se?!ie.has(t):!1}function M(e,t){return e===t||(e===160||e===32)&&(t===160||t===32)}function le(e,t){const r=e.length,n=t.length;let s=0;for(;s<r&&s<n&&M(e.charCodeAt(s),t.charCodeAt(s));)s++;let o=0;for(;o<r-s&&o<n-s&&M(e.charCodeAt(r-1-o),t.charCodeAt(n-1-o));)o++;return{p:s,s:o}}function ue(e,t){const r=e.firstChild;if(e.childNodes.length!==1||r===null||r.nodeType!==Node.TEXT_NODE){e.textContent=t;return}const n=r.data,s=n.length,o=t.length,{p:i,s:c}=le(n,t);i===s&&c===0&&s===o||r.replaceData(i,s-i-c,t.slice(i,o-c));const h=r.data,p=e.ownerDocument.getSelection?.()??null,w=p!==null&&p.rangeCount>0&&(p.anchorNode===r||p.focusNode===r)?{anchor:p.anchorNode,anchorOffset:p.anchorOffset,focus:p.focusNode,focusOffset:p.focusOffset}:null;let m=-1,g=-1;for(let f=0;f<h.length&&f<t.length;f++){const v=h.charCodeAt(f),b=t.charCodeAt(f);v!==b&&M(v,b)&&(m<0&&(m=f),g=f)}const a=m>=0;if(a&&r.replaceData(m,g-m+1,t.slice(m,g+1)),a&&w!==null&&w.anchor!==null&&w.focus!==null)try{p.setBaseAndExtent(w.anchor,w.anchorOffset,w.focus,w.focusOffset)}catch{}}var fe=new Set(["html","head","body","frameset"]);function de(e){return e.namespaceURI==="http://www.w3.org/1999/xhtml"&&fe.has(e.localName)}function pe(e){if(e===null||typeof e!="object")return!1;const t=e;if(typeof t.target!="string"||!re.test(t.target)||t.text!==void 0&&typeof t.text!="string")return!1;if(t.attrsSet!==void 0){if(t.attrsSet===null||typeof t.attrsSet!="object")return!1;for(const[r,n]of Object.entries(t.attrsSet))if(!$.test(r)||typeof n!="string")return!1}if(t.attrsRemoved!==void 0){if(!Array.isArray(t.attrsRemoved))return!1;for(const r of t.attrsRemoved)if(typeof r!="string"||!$.test(r))return!1}return!0}function me(e,t){if(e===null||typeof e!="object")return!1;const{seq:r,elements:n}=e;if(typeof r!="number"||!Number.isSafeInteger(r)||!Array.isArray(n)||n.length===0||n.length>64)return!1;for(let s=0;s<n.length;s++)if(!t(n[s]))return!1;return!0}function he(e){return e===null||typeof e!="object"?!1:me(e.__frame_patch,pe)}function _e(e){if(e===null||typeof e!="object")return!1;const t=e.__frame_init;return t!==null&&typeof t=="object"}function ve(e){return e!==null&&typeof e=="object"&&e.__frame_size_poke===!0}function ye(e){if(e===null||typeof e!="object")return!1;const t=e.__frame_theme;if(t===null||typeof t!="object")return!1;const r=t.theme;return typeof r=="string"&&te.includes(r)}var A=/^[\w.-]+\.js$/;function we(e,t,r){return r?"inert":typeof t=="string"&&A.test(t)?e?[t]:"inert":e?"inert":"framed"}function ge(){return{post(e,t){parent.postMessage(e,t)},on(e){const t=r=>{r.source===parent&&e(r.data,r.origin,r.isTrusted)};return addEventListener("message",t),()=>removeEventListener("message",t)}}}function be(){return{post:()=>{},on:()=>()=>{}}}var j="__frame_scroll",Ee=150,Ae=310,Se=160,Te=3e4;function ke(){let e=0,t=!1,r=!1,n=!1,s=0,o=null;const i=l=>{try{sessionStorage.setItem(j,JSON.stringify({y:l}))}catch{}},c=()=>{if(clearTimeout(e),o===null)return;const l=o;o=null,i(l)},h=()=>{if(t){t=!1;return}r=!0,o=scrollY,clearTimeout(e),e=setTimeout(c,Ee)};try{addEventListener("scroll",h,{passive:!0}),addEventListener("pagehide",c)}catch{}const p=()=>{let l;try{l=sessionStorage.getItem(j)}catch{return null}if(l===null)return null;let _;try{_=JSON.parse(l)}catch{_=null}const d=_?.y;if(!(typeof d=="number"&&Number.isFinite(d)&&d>=0)){try{sessionStorage.removeItem(j)}catch{}return null}return d};let w=!1;const m=l=>{try{const _=scrollY;scrollTo({top:l,left:0,behavior:"instant"}),s=l,n=!0,clearTimeout(e),o=null,i(l);const d=scrollY;d!==_&&(t=!0),d!==l&&!w&&(w=!0,addEventListener("load",()=>{try{if(scrollY===d){const T=p();m(T!==null?T:s)}}catch{}},{once:!0}))}catch{}},g=()=>{try{return!!location.hash}catch{return!0}};let a=!1;const f=()=>{try{if(a||innerWidth>Ae||innerHeight>Se)return;a=!0;const l=Date.now(),_=()=>{try{removeEventListener("resize",_)}catch{}if(Date.now()-l>Te||r||g())return;const d=p();m(d!==null?d:s)};addEventListener("resize",_)}catch{}};let v=!1,b=!1;return{restore(){if(v||(v=!0,g()))return;const l=p();l!==null&&(m(l),f())},promoted(){if(b||(b=!0,g()))return;const l=p();l!==null?(m(l),f()):n&&m(s)}}}function Re(e,t,r,n){let s=null;try{s=window.trustedTypes?.createPolicy("frame-runtime",{createScriptURL:h=>h})??null}catch{}const o=window.Worker,i=o?.prototype,c=Object.freeze({Worker:o,workerOn:i?.addEventListener,workerPost:i?.postMessage,workerTerminate:i?.terminate,fetch:window.fetch.bind(window),preventDefault:Event.prototype.preventDefault,policy:s,origins:t});r(e).then(h=>h?.bootTopLevel?h.bootTopLevel(c,n):n.settle()).catch(()=>n.settle())}var De="modulepreload",Ie=function(e){return"/"+e},Ue={},Le=function(t,r,n){let s=Promise.resolve();function o(i){const c=new Event("vite:preloadError",{cancelable:!0});if(c.payload=i,window.dispatchEvent(c),!c.defaultPrevented)throw i}return s.then(i=>{for(const c of i||[])c.status==="rejected"&&o(c.reason);return t().catch(o)})},Oe=window===top,q=Object.getOwnPropertyDescriptor(window,"claude"),k=we(Oe,window.__FRAME_PREAMBLE?.topLevel,q?.writable===!1),N=typeof k=="object"&&k[0],y=N?be():ge();(function(){const e=Object.defineProperty,t=globalThis,r=["RTCPeerConnection","webkitRTCPeerConnection","RTCDataChannel","RTCIceCandidate","RTCSessionDescription","RTCRtpSender","RTCRtpReceiver"];let n=0;for(let s=0;s<r.length;s++){const o=r[s];try{e(t,o,{value:void 0,writable:!1,configurable:!1})}catch{try{delete t[o]}catch{}try{e(t,o,{value:void 0,writable:!1,configurable:!0})}catch{}}typeof t[o]=="function"&&n++}if(n&&k==="framed")try{y.post({__frame_rtc_lockdown_failed:n},"*")}catch{}})();var Pe=1e4,Y=Object.freeze([...window.__FRAME_PREAMBLE?.origins??["https://claude.ai","https://preview.claude.ai"]]);function X(e){for(const t of Y)if(t.endsWith(":*"))try{const r=new URL(e);if(`${r.protocol}//${r.hostname}:*`===t)return!0}catch{}else if(e===t)return!0;return!1}var R=Object.freeze({...window.__FRAME_PREAMBLE?.capabilities}),B=window.__FRAME_PREAMBLE?.transforms,D=window.__FRAME_PREAMBLE?.comments,I=window.__FRAME_PREAMBLE?.translate;function S(e){return Le(()=>import("/_runtime/"+e),void 0)}function G(e,t){return{contract:e.contract,changes:new Set(e.changes??[]),flags:new Set(e.flags??[]),capabilities:e.capabilities??{},capBudgets:e.capBudgets??{},transforms:new Map,shellOrigin:t,mount:x,hooks:O,pipe:()=>({wrap:(r,n)=>(...s)=>{try{return n(...s)}catch(o){return Promise.reject(o)}}})}}var L=null,E=null;function V(e,t,r){try{Object.defineProperty(e,t,{value:r,writable:!1,configurable:!1,enumerable:!0})}catch{try{Object.defineProperty(e,t,{value:r,writable:!1,configurable:!0,enumerable:!0})}catch{}}}var U=!1,O={editBefore:null,edit:null};function Ce(e,t,r=!1){const n=[];let s;if(r)try{O.editBefore?.(e)}catch{}for(const o of e.elements){const i=document.querySelector(`[data-id="${o.target}"]`);if(!i){s=o.target;break}if([...Object.keys(o.attrsSet??{}),...o.attrsRemoved??[]].some(c=>!oe(c))){s=o.target;break}if(o.text!==void 0&&(!ce(i)||de(i))){s=o.target;break}for(const[c,h]of Object.entries(o.attrsSet??{}))if(!J(i,c)){try{i.setAttribute(c,h)}catch{}Z(i,c,h)}for(const c of o.attrsRemoved??[])J(i,c)||(i.removeAttribute(c),Z(i,c,null));typeof o.text=="string"&&ue(i,o.text),n.push(o.target)}if(r)try{O.edit?.(e.seq,n,s)}catch{}if(s!==void 0){y.post({__frame_patch_miss:{seq:e.seq}},t);return}try{document.dispatchEvent(new CustomEvent("claude:edit",{detail:{seq:e.seq,targets:n}}))}catch{}}function Z(e,t,r){if(!(e instanceof HTMLInputElement))return;const n=t.toLowerCase();n==="checked"?e.checked=r!==null:n==="value"&&e.type!=="file"&&(e.value=r??"")}function J(e,t){const r=t.toLowerCase(),n=e;return r==="data-id"||(r==="value"||r==="checked")&&(n.__artifactSecret===!0||/^(password|hidden|file)$/.test(n.type??"")||/(^|\s)(cc-|one-time-code|current-password|new-password)/i.test(`${e.getAttribute("autocomplete")??""} ${n.autocomplete??""}`))}function Q(e){const t=document.documentElement;e==="light"||e==="dark"?(t.dataset.theme=e,t.style.colorScheme=e,U=!0):U&&(delete t.dataset.theme,t.style.colorScheme="",U=!1)}var P=new Map;function Me(){let e;const t={u:new Promise(r=>{e=r}),r:r=>{t.done=!0,e(r)},done:!1,nulled:!1};return t}function F(){for(const e of P.values())e.done||(e.nulled=!0,e.r(null))}var je=Object.freeze(Object.assign(Object.create(null),{call:Function.prototype.call,apply:Function.prototype.apply,bind:Function.prototype.bind})),x=(e,t)=>{const r=P.get(e);if(!r||r.done){r?.nulled&&E&&y.post({__frame_cap_telemetry:{kind:"cap-load-error",cap:e}},E);return}const n=typeof t=="function"?Object.setPrototypeOf(t,je):Object.assign(Object.create(null),t);typeof n.then=="function"&&delete n.then,r.r(Object.freeze(n))};function ee(){const e=q?.value??{};V(window,"claude",e);for(const t of Object.keys(R)){if(e[t]!==void 0){V(e,t,e[t]);continue}P.set(t,Me())}if(e.use===void 0){const t=r=>{if(typeof r!="string"||!Object.hasOwn(R,r))return Promise.resolve(null);const n=P.get(r);return n?n.u:Promise.resolve(e[r]??null)};try{Object.defineProperty(e,"use",{value:t,writable:!0,configurable:!0,enumerable:!1})}catch{}}}if(k==="framed"){const e=B&&A.test(B)?S(B).catch(()=>{}):Promise.resolve(void 0),t=a=>{if(a.type==="auxclick"&&a.button!==1)return;const f=a.target,v=f&&f.closest?f.closest("a[href],area[href]"):null;if(!v)return;const b=v.getAttribute("href");if(!b)return;let l;try{l=new URL(b,document.baseURI)}catch{return}if((l.protocol==="http:"||l.protocol==="https:")&&l.origin!==location.origin){a.preventDefault();const _=(v.getAttribute("target")??"").toLowerCase(),d=a.type==="auxclick"||a.metaKey||a.ctrlKey||a.shiftKey||a.altKey||!["","_self","_top","_parent"].includes(_);y.post({__frame_nav:!0,url:l.href,newTab:d},"*")}};addEventListener("click",t,!0),addEventListener("auxclick",t,!0);const r={},n=a=>{a.isTrusted&&(r.pointer=!0)},s=a=>{a.isTrusted&&(r.click=!0)};addEventListener("pointermove",n,{capture:!0,passive:!0}),addEventListener("click",s,{capture:!0,passive:!0}),e.then(a=>{a?.wireNav&&(a.wireNav(),removeEventListener("click",t,!0),removeEventListener("auxclick",t,!0),removeEventListener("pointermove",n,!0),removeEventListener("click",s,!0),a.wireEngagement?.(r))});let o=null;try{o=ke()}catch{}ee();let i=null,c=null,h=0;const p=y.on((a,f)=>{X(f)&&_e(a)&&(i=a.__frame_init,E=f,p(),clearTimeout(h),c?.())});y.post({__frame_connect:!0},"*");const w=new Promise(a=>{c=a,h=setTimeout(()=>{p(),a()},Pe)}),m=document.readyState==="loading"?new Promise(a=>document.addEventListener("DOMContentLoaded",()=>a(),{once:!0})):Promise.resolve();m.then(()=>{try{o?.restore()}catch{}});const g={cb:null};y.on((a,f)=>{if(X(f)&&ve(a)){try{o?.promoted()}catch{}g.cb?.()}}),w.then(async()=>{if(!i||!E){F();return}Q(i.theme);const a=E;let f=!1,v=!1;y.on((u,z,C)=>{if(z!==a)return;ye(u)&&Q(u.__frame_theme.theme),he(u)&&Ce(u.__frame_patch,a,C);const H=u?.__fc_mode;H&&typeof H=="object"&&!f&&D&&A.test(D)&&(f=!0,S(D).then(K=>K.install?.(a,H.on===!0)).catch(()=>{}));const W=u?.__ft_cmd;W&&typeof W=="object"&&!v&&I&&A.test(I)&&(v=!0,S(I).then(K=>K.install?.(a,W)).catch(()=>{}))});const b=Object.keys(i.capabilities??{}).filter(u=>Object.hasOwn(R,u)).map(u=>[u,R[u]]).filter(u=>typeof u[1]=="string"&&A.test(u[1])),l=await Promise.allSettled(b.map(([,u])=>S(u))),_=await e,d=E;if(_?.buildBoot||y.post({__frame_cap_telemetry:{kind:"cap-load-error",cap:"_transforms"}},d),_?.buildBoot)try{L=_.buildBoot(i,_.TRANSFORMS??{},{shellOrigin:d,mount:x,hooks:O},u=>y.post({__frame_cap_telemetry:u},d))}catch{y.post({__frame_cap_telemetry:{kind:"cap-load-error",cap:"_transforms"}},d),L=G(i,d)}else L=G(i,d);const T=u=>y.post({__frame_cap_telemetry:{kind:"cap-load-error",cap:u}},d),Ne=L;l.forEach((u,z)=>{const C=b[z][0];if(u.status!=="fulfilled"){T(C);return}try{u.value?.install?.(Ne)}catch{T(C)}}),F(),await m,y.post({__frame_ready:!0},E),e.then(u=>u?.installSizeReporter?.(d,g))})}else N&&(ee(),Re(N,Y,S,{settle:F,mount:x}))})();</script><!-- /frame-runtime --><meta name="viewport" content="width=device-width,initial-scale=1"><style>:root{color-scheme:light}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found]){display:none!important}</style><style>:root [href="https://adstub.net/cina777/"], :root [href="https://adstub.net/judi89/"], :root [href^="//mage98rquewz.com/"], :root div.content-showcase-itru-sufficient-2d:not(.q7d5z1l):not(.x9a7b3k), :root div[class*="publift-widget-"]:has(.fuse-slot-sticky), :root .inset-x-0[x-data="adblockBanner()"], :root #hero a[download="Unicore.zip"], :root body > div[data-captcha-enable="true"] > div.cleanslate[id^="google-captcha-"] > div.captcha-box, :root html[data-scrapbook-source][data-scrapbook-create][data-scrapbook-title] > body.no-js > div.main-wrapper[role="main"] > div.main-content, :root html > body.body > div.container > div.content > form > table.optoutForm, :root html > body > div.container > form#unsubscribe-form[onsubmit="submitUnsubscribeForm(event)"], :root html[lang] > body:not([class]):not([id]):not([style]) > div.background-container > div.container > div.captcha-box, :root html > #nc-cover:not(body), :root body > .cf-root, :root .cjs-container > #checkbox-window, :root .wp-singular > div[data-sm][style*="2147483647"] > iframe[style*="100%"][allow*="clipboard-write"], :root #ipBar + .main, :root #mainBtn[onclick="startVerify()"], :root #turnstile[onclick="handleClick()"], :root body > .page > .verify-row, :root body > .page > #mainVerifyRow, :root html[lang] > body.ishome > div.adult + main.main, :root .container a[title="AI Jerk OFF"][href][target="_blank"], :root body > #mdl-register.modal.anm-e.regnow, :root .flex a[href^="http://adpostup.com/"], :root #app-root ~ a[href][target="_blank"][style="position: fixed;top: 0;left: 0;width: 100%;height: 100%;display: block;z-index: 9999999;cursor: auto"], :root #wrapper ~ a[href][target="_blank"][style="position: fixed;top: 0;left: 0;width: 100%;height: 100%;display: block;z-index: 9999999;cursor: auto"], :root .header ~ div[style^="position:fixed;inset:0;z-index:2147483647;background:black;opacity:0.01;height:"], :root img[width="728"][height="90"], :root button.btn[data-openuri*="/4/"], :root #adbtm[onclick="badr();"], :root #teaser3[style^="width: 100%;height:0;text-align: center;display: scroll;position:fixed;"], :root a[href^="https://www.polybuzz.ai/"] img.responsive-image, :root .kln > a[href^="https://www.polybuzz.ai/"], :root html[lang][style^="--main-bg-color"] > body:not([class]):not([id]) > div#container[style="visibility: visible;"] > div#banner[style="opacity:0"] ~ main:not([class]):not([id]) > div#message, :root #donate > a[href][style][onclick="thank_you()"][target="_blank"][rel="nofollow"], :root .jwplayer ~ div[style="position:absolute;top:0;left:0;width: 100%;height: 100%;z-index:2147483647"], :root iframe.lazyloaded[data-src^="https://rcm-fe.amazon-adsystem.com/"], :root div[style^="position: fixed; inset: 0px; z-index: 2147483647; background: black; opacity: 0.01"], :root .skel-layers-fixed a[href*=".com/smartpop/"], :root [style^="position: fixed; inset: 0px; z-index: 2147483647; background-color: transparent; pointer-events: auto; cursor: auto; margin: 0px; padding: 0px; display: block;"], :root .ads-iframe:not([style="position: absolute; left: -10px; top: -10px;"]), :root .ad-content:not(:empty), :root div[style="position: fixed; display: block; width: 100%; height: 100%; inset: 0px; background-color: rgba(0, 0, 0, 0); z-index: 300000;"], :root #weatherad:not(:empty), :root #topbannerad:not(:empty), :root #topBannerAd:not(:empty), :root #ad_img:not(:empty), :root #adContext:not(:empty), :root .ad-300x250:not(.ads), :root [data-ad-width]:not([style$="left: -10000px !important; top: -1000px !important;"]):not(.adsbygoogle), :root .adunit:not(.text-ad), :root .adslot_1:not(.text-ad), :root [href="https://adstub.net/ratu89/"], :root #ads-footer:not([style^="position: absolute; left: -5000px"]), :root a.tdn[href^="https://landing.brazzersnetwork.com/"], :root #ads-1:not([style^="position: absolute; left: -5000px"]), :root #adframe:not(frameset):not([style^="position: absolute; left: -5000px"]), :root #ad_slot:not([style^="position: absolute; left: -5000px"]), :root #ad_big:not([style^="position: absolute; left: -5000px"]), :root #ad_area:not([style^="position: absolute; left: -5000px"]), :root #ad_300:not([style^="position: absolute; left: -5000px"]), :root a[dontfo=""][style$="position: absolute; z-index: 2147483647;"], :root [href^="https://join.enjoyx.com/track/"], :root a[href*=".click/?z="][href*="&n"], :root [href^="//taghaugh.com/"], :root div[class$="player-promo-col"], :root [href^="https://www.safestcontentgate.com/"], :root [href^="//cadsecs.com/"], :root [href^="//mellowads.com/"], :root .cjs-container > #verify-window, :root [href^="https://fireads.online/"], :root html[lang="vi"] .sspp-area, :root html[lang="tr"] > body.has-footer-ad.has-pageskin-desktop a.pageskin-desktop-wrapper, :root html[lang="tr"] #aa-wp .container-ads-adjustment, :root #videojs ~ div[style="position: absolute; top: 0px; left: 0px; width: 100%; height: 100%; z-index: 2147483646;"], :root .close-btn4[onclick="closeAd4()"], :root .close-btn3[onclick="closeAd3()"], :root .close-btn[onclick="closeAd()"], :root #go-to-top + div[id][class], :root .bb ~ main#container .containerAds, :root #midadd:not(:empty), :root #adzerk:not(:empty), :root [href^="//x4pollyxxpush.com/"], :root #advert-header:not(:empty), :root div.card > div#cbRow.checkbox-row[onclick="startVerify()"], :root #tongkatlol ~ script[src^="/shrinke/js/"] ~ .main-content-box > div[style="width:100%;height:110px"], :root body > div[style$="z-index: 2147483647; top: 0px; left: 0px; position: fixed; display: block;"], :root html > body > div.container.m-p > #checkbox-window.checkbox-window, :root .container a[href^="https://seduced.com"][href*="ref="], :root #kt_player .fp-brand, :root a[id][href="https://toolkitspro.com"][rel^="noopener noreferrer"], :root #kt_player #ads_iframe, :root .header-container a[href^="https://candyai.gg/"], :root [src^="//dombnrs.com/"], :root [href="https://adstub.net/arab777/"], :root #kt_player ~ #sp-player, :root a[href*="/go.php?a_aid="], :root [href^="https://klsdee.com/"], :root [href^="//producebreed.com/"], :root #modern-player-root ~ div[id^="custom-invisible-overlay-"][class^="custom-popup-overlay-"], :root [href="//xxxrevpushclcdu.com/app.webp"], :root [href^="https://adult.xyz/"], :root [href^="https://popcash.net/"], :root a[href^="http://www.poweredbyliquidfire.mobi/"], :root [href^="https://t.mobtyb.com/"], :root [data-lnguri*="vipbox"], :root .reklama:not(.ads), :root a[href^="https://syndication.exdynsrv.com/splash.php"], :root [href*="/afu.php"], :root span[id^="ezoic-pub-ad-placeholder-"], :root ins.adsbygoogle[data-ad-slot], :root ins.adsbygoogle[data-ad-client], :root img[src^="https://s-img.adskeeper.com/"], :root #download a[download="Unicore.zip"], :root guj-ad, :root gpt-ad, :root div#spot-holder.spot-holder[style="display: block;"], :root div[ow-ad-unit-wrapper], :root div[id^="zergnet-widget"], :root html[lang] > body:not([class]):not([id]):not([style]) > div.container > div.recaptcha-box, :root div[id^="vuukle-ad-"], :root div[id^="taboola-stream-"], :root div[id^="sticky_ad_"], :root div[id^="st"][style^="z-index: 999999999;"], :root div[id^="rc-widget-"], :root html > body > div.content > dl > dd.dd1 > div.min_sider > form#form1[action="unsubscribe.php"], :root div[id^="mrec-leaderboard-"], :root div[id^="gpt_ad_"], :root div[id^="ezoic-pub-ad-"], :root div[id^="dfp-ad-"], :root div[id^="adspot-"], :root a[onclick="openAuc();"], :root ps-connatix-module, :root div[id^="ad_position_"], :root [data-ad-module]:not([style$="left: -10000px !important; top: -1000px !important;"]):not(.adsbygoogle), :root a[id][href="https://chpadblock.com/"][rel^="noopener noreferrer"], :root div[id^="ad-div-"], :root [href="https://adstub.net/rusia777/"], :root #banner468:not([style^="position: absolute; left: -5000px"]), :root div[data-id-advertdfpconf], :root div[data-dfp-id], :root div[style="top: 0px; left: 0px; width: 1287px; height: 500px; position: fixed; z-index: 2147483647;"], :root hl-adsense, :root div[data-contentexchange-widget], :root div[data-alias="300x250 Ad 2"], :root div[data-adzone], :root #buy-sell-ads:not(:empty), :root div[data-adunit-path], :root div[data-adname], :root div[data-ad-targeting], :root div[data-ad-region], :root div[data-ad-placeholder], :root div[aria-label="Ads"], :root .google-ad:not(.testAd), :root display-ads, :root #ad_space:not([style^="position: absolute; left: -5000px"]), :root display-ad-component, :root atf-ad-slot, :root aside[id^="adrotate_widgets-"], :root div[style^="position:fixed;inset:0px;z-index:2147483647;background:black;opacity:0.01"], :root aside[aria-label="retailmedia.complimentarySponsored"], :root html[lang] > body#body > * > div.cvh.BlockClicksActivityBusy, :root amp-fx-flying-carpet, :root amp-embed[type="taboola"], :root html > #nochain-demo-frame:not(body), :root html[lang="tr"] #aa-wp .rnd-ads-adjustment, :root amp-connatix-player, :root div[id^="google_dfp_"], :root ad-slot, :root a[href^="https://www.purevpn.com/"][href*="&utm_source=aff-"], :root a[href^="https://www.onlineusershielder.com/"], :root html[lang="tr"] > body.has-footer-ad.has-pageskin-desktop a.pageskin-click-right, :root a[href^="https://financeads.net/tc.php?"], :root a[href^="https://www.mrskin.com/tour"], :root a[href^="https://www.infowarsstore.com/"] > img, :root a[href^="https://www.highperformancecpmgate.com/"], :root amp-ad, :root a[href^="https://www.highcpmrevenuenetwork.com/"], :root a[href^="https://www.get-express-vpn.com/offer/"], :root a[href^="https://lnkxt.bannerator.com/"], :root a[href^="https://www.geekbuying.com/dynamic-ads/"], :root #cmdTextDisplay ~ *, :root [href^="https://groorsoa.net/"], :root a[href^="https://www.financeads.net/tc.php?"], :root a[href^="https://www.effectiveratecpm.com/"], :root [href^="https://www.herbanomic.com/"] > img, :root a[href^="https://www.dql2clk.com/"], :root [data-template-type="nativead"], :root a[href^="https://www.adultempire.com/"][href*="?partner_id="], :root a[href^="https://www.nutaku.net/signup/landing/"], :root a[href^="https://www.dating-finder.com/signup/?ai_d="], :root a[href^="https://wolf-327b.com/"], :root body > .content-wrapper > .cf-wrap, :root [data-ad-manager-id]:not([style$="left: -10000px !important; top: -1000px !important;"]):not(.adsbygoogle), :root a[href^="https://voluum.prom-xcams.com/"], :root a[href^="https://twinrdsyte.com/"], :root div[data-type="_mgwidget"]:not(.eyeo), :root .category-ads:not(html):not(body):not(.post), :root a[href^="https://twinrdsrv.com/"], :root [href="https://snvhost.com/"], :root a[href^="https://trk.nfl-online-streams.club/"], :root a[href^="https://tracking.avapartner.com/"], :root a[href^="https://track.wg-aff.com"], :root a[href^="https://track.ultravpn.com/"], :root a[href^="https://track.afcpatrk.com/"], :root [href="https://t.me/Russia_Vs_Ukraine_War3"], :root a[href^="https://track.adform.net/"], :root a[href^="https://torguard.net/aff.php"] > img, :root .menu-item a[href^="https://go.rmhfrtnd.com"], :root [data-identity="adhesive-ad"], :root a[href^="https://tc.tradetracker.net/"] > img, :root a[href^="https://tatrck.com/"], :root a[href^="https://click.candyoffers.com/"], :root [href^="https://zstacklife.com/"] img, :root a[href^="https://t.aslnk.link/"], :root .container a[href^="https://go.mavrtracktor.com/"], :root a[onmousedown^="this.href='https://paid.outbrain.com/network/redir?"], :root a[href^="https://t.ajump1.com/"], :root a[href^="https://t.adating.link/"], :root a[href^="https://go.trackitalltheway.com/"], :root [href^="https://track.fiverr.com/visit/"] > img, :root a[href^="https://syndication.exoclick.com/"], :root a[href^="https://syndication.dynsrvtbg.com/"], :root div[data-alias="300x250 Ad 1"], :root a[href^="https://syndicate.contentsserved.com/"], :root a[href^="https://svb-analytics.trackerrr.com/"], :root a[onmousedown^="this.href='https://paid.outbrain.com/network/redir?"] + .ob_source, :root a[href^="http://www.iyalc.com/"], :root a[href^="https://claring-loccelkin.com/"], :root a[href^="https://stardomcoit.com/"], :root a[href^="https://track.aftrk5.com/"], :root a[href^="https://slkmis.com/"], :root a[href^="https://myclick-2.com/"], :root a[href^="https://sexynearme.com/"], :root a[href^="https://s.zlinkt.com/"], :root a[href^="https://s.zlinkr.com/"], :root bottomadblock, :root a[href^="https://s.zlinkd.com/"], :root [href="https://adstub.net/gaza88/"], :root a[href^="https://ad.doubleclick.net/"], :root a[href^="https://static.fleshlight.com/images/banners/"], :root a[href^="https://s.zlink7.com/"], :root a[href^="https://s.ma3ion.com/"], :root a[href^="https://www.privateinternetaccess.com/"] > img, :root a[href^="https://s.gentlefieldpattern.com/"], :root a[href^="https://s.eunow4u.com/"], :root a[href^="https://random-affiliate.atimaze.com/"], :root #downloadAd:not(:empty), :root #kt_player > div[style$="display: block;"][style*="inset: 0px;"], :root a[href^="https://quotationfirearmrevision.com/"], :root a[href^="https://pubads.g.doubleclick.net/"], :root a[href^="https://prf.hn/click/"][href*="/camref:"] > img, :root a[href^="https://www.dating-finder.com/?ai_d="], :root a[href^="https://serve.awmdelivery.com/"], :root a[href^="https://prf.hn/click/"][href*="/adref:"] > img, :root app-ad, :root [href^="https://ap.octopuspop.com/click/"] > img, :root a[href^="https://postback1win.com/"], :root html[lang] > body#body > * > div.cv-xwrapper > div.cvc > div.cv-inner, :root [href^="https://go.mavrtracktor.com/"], :root a[href^="https://a.adtng.com/"], :root a[href^="https://playnano.online/offerwalls/?ref="], :root a[href^="https://mmwebhandler.aff-online.com/"], :root a[href^="https://www.bet365.com/"][href*="affiliate="], :root a[href^="https://pb-track.com/"], :root a[href^="https://pb-front.com/"], :root a[href^="https://paid.outbrain.com/network/redir?"], :root a[href^="https://streamate.com/landing/click/"], :root div[class^="Adstyled__AdWrapper-"], :root a[href^="https://osfultrbriolenai.info/"], :root a[href^="https://upsups.click/"], :root .ad-placeholder:not(#detect, #detect_ad_empire, #filter_ads_by_classname, .adsbox), :root a[href^="https://ndt5.net/"], :root a[href^="https://natour.naughtyamerica.com/track/"], :root a.poly-title[href^="https://www.polybuzz.ai/"], :root a[href^="https://mediaserver.entainpartners.com/renderBanner.do?"], :root [data-ad-name], :root a[href^="https://loboclick.com/"], :root a[href^="https://lead1.pl/"], :root .cta-button[onclick="openUpdateModal()"], :root a[href^="https://landing.brazzersnetwork.com/"], :root a[href^="https://join.bannedsextapes.com/track/"], :root [href^="https://exi8ef83z9.com/"], :root a[href^="https://jaxofuna.com/"], :root a[href^="https://italarizege.xyz/"], :root .category-ad:not(html):not(body):not(.post), :root a[href^="https://s.happyleafmotion.com/"], :root a[href^="https://identicaldrench.com/"], :root a[href^="https://helmethomicidal.com/"], :root #adsquare:not([style^="position: absolute; left: -5000px"]), :root a[href^="https://golinks.work/"], :root a[href^="https://go.xxxjmp.com"], :root [class^="div-gpt-ad"]:not([style^="width: 1px; height: 1px; position: absolute; left: -10000px; top: -"]), :root a[href^="https://zirdough.net/"], :root [class^="tile-picker__CitrusBannerContainer-sc-"], :root a[href^="https://go.xxxiijmp.com"], :root .ad-link:not(.adsbox), :root a[href^="https://go.xtbaffiliates.com/"], :root a[href^="https://go.xlviirdr.com"], :root div[class$="-adlabel"], :root a[href^="https://go.xlviiirdr.com"], :root a[href^="https://go.xlivrdr.com"], :root a[href^="https://ismlks.com/"], :root [href^="https://www.mypillow.com/"] > img, :root a[href^="https://go.xlirdr.com"], :root [data-css-class="dfp-inarticle"], :root a[href^="https://go.tmrjmp.com"], :root a[href^="https://go.markets.com/visit/?bta="], :root a[href^="https://billing.purevpn.com/aff.php"] > img, :root a[href^="https://go.hpyrdr.com/"], :root [data-lnguri^="https://s3.amazonaws.com"], :root a[href^="https://lijavaxa.com/"], :root a[href^="https://go.goaserv.com/"], :root a[href^="https://go.etoro.com/"] > img, :root a[href^="https://go.dmzjmp.com"], :root a[href^="https://www.bang.com/?aff="], :root #mgb-container > #mgb, :root a[href^="https://go.admjmp.com"], :root a[href^="https://get.surfshark.net/aff_c?"][href*="&aff_id="] > img, :root a[href^="https://datewhisper.life/"], :root a[href^="https://click.linksynergy.com/fs-bin/"] > img, :root a[href^="https://get-link.xyz/"], :root a[href^="https://www.mrskin.com/account/"], :root a[id][href="https://hamrocsit.com"][rel^="noopener noreferrer"], :root a[href^="https://www.adskeeper.com"], :root #vidcloud-player > #overlay-container, :root a[data-redirect^="https://paid.outbrain.com/network/redir?"], :root [href^="https://clicks.affstrack.com/"] > img, :root a[href^="https://engine.phn.doublepimp.com/"], :root a[href^="https://dl-protect.net/"], :root a[href*=".foxqck.com/"], :root a[href^="https://ctosrd.com/"], :root div[id*="ScriptRoot"]:not(.eyeo), :root a[href^="https://clixtrac.com/"], :root a[href^="https://clicks.pipaffiliates.com/"], :root #ad_footer:not([style^="position: absolute; left: -5000px"]), :root app-advertisement, :root a[href^="https://getmatchedlocally.com/"], :root a[href^="https://clickins.slixa.com/"], :root a[href^="https://combodef.com/"], :root a[href^="https://click.hoolig.app/"], :root a[href^="https://track.totalav.com/"], :root a[href^="https://ctrdwm.com/"], :root img[src^="https://images.purevpnaffiliates.com"], :root a[href^="https://porntubemate.com/"], :root a[href^="https://clickadilla.com/"], :root a[href^="https://click.dtiserv2.com/"], :root a[href^="https://www.adxsrve.com/"], :root a[href^="https://click.Ggpickaff.com/"], :root a[href^="https://go.awdeliverynet.com/"], :root a[href^="https://go.xlvirdr.com"], :root a[href^="https://cam4com.go2cloud.org/"], :root a[onclick^="window.location.replace('https://random-affiliate.atimaze.com/"], :root a[href^="https://bongacams2.com/track?"], :root a[href^="https://t.ajrkm1.com/"], :root #main-content a[href^="https://hub.buzzaffiliates.com/"], :root a[href^="https://bongacams10.com/track?"], :root a[href*=".g2afse.com/"], :root a[href^="https://bodelen.com/"], :root a[href^="//hoodingluster.com/"], :root a[href^="https://black77854.com/"], :root a[href^="https://rixofa.com/"], :root a[href^="https://best-experience-cool.com/"], :root [data-taboola-options], :root a[href^="https://believessway.com/"], :root a[href^="https://Click.ggpickaff.com/"], :root a[href^="https://banners.livepartners.com/"], :root a[href^="http://revolvemockerycopper.com/"], :root a[href^="https://awptjmp.com/"], :root a[href^="https://join.sexworld3d.com/track/"], :root a[href^="https://track.cam4tracking.com/"], :root a[href^="https://aweptjmp.com/"], :root a[href^="https://ausoafab.net/"], :root #tabVideo > .rmedia, :root a[href^="https://aj1070.online/"], :root a[href^="https://ads.planetwin365affiliate.com/"], :root a[href^="https://ads.leovegas.com/"], :root a[href^="https://a.medfoodhome.com/"], :root .nya-slot[style], :root a[href^="https://a.bestcontentweb.top/"], :root a[href^="https://adultfriendfinder.com/go/"], :root a[href^="https://a.bestcontentoperation.top/"], :root a[href^="https://a2.adform.net/"], :root a[href^="https://a.candyai.love/"], :root .banner-img > .pbl, :root [data-m-ad-id], :root a[href^="https://a-ads.com/"], :root [data-testid^="section-AdRowBillboard"], :root .ad-placeholder:not(#filter_ads_by_classname):not(#detect_ad_empire):not(#detect):not(.adsbox), :root broadstreet-zone-container, :root a[href^="https://ak.psaltauw.net/"], :root a[href^="https://1winpb.com/"], :root a[href^="https://chaturbate.com/in/?"], :root a[href^="https://prf.hn/click/"][href*="/creativeref:"] > img, :root a[href*="&maxads="], :root a[href^="http://www.adultempire.com/unlimited/promo?"][href*="&partner_id="], :root a[href^="https://1betandgonow.com/"], :root div[id^="optidigital-adslot"], :root [href^="https://wsup.ai/"], :root a[href^="https://123-stream.org/"], :root a[href^="https://in.rabbtrk.com/"], :root a[href^="http://www.h4trck.com/"], :root [href^="https://a.acebet.com/api/click?"], :root #video_player ~ div[id] div[style^="position:fixed;inset:0px;z-index:"], :root a[href^="http://www.friendlyduck.com/AF_"], :root .btn-primary[onclick="showVerification()"], :root a[href^="http://partners.etoro.com/"], :root [href="https://chaturbate.jjgirls.com/"] > img, :root body div#notificationPopup.notificationPopupBlock, :root a[href^="http://cam4com.go2cloud.org/aff_c?"], :root a[href^="https://ads.betfair.com/redirect.aspx?"], :root #leader_ad:not(:empty), :root amp-ad-custom, :root [href^="http://referrer.website/"], :root a[href^="http://trk.globwo.online/"], :root a-ad, :root a[href^="https://offhandpump.com/"], :root a[href^="http://stickingrepute.com/"], :root #slashboxes > .deals-rail, :root [href^="http://mypillow.com/"] > img, :root a[href^="http://bongacams.com/track?"], :root .fp-ui > a[href][target="_blank"][style^="position: absolute; inset: 0px;"], :root a[href^="//startgaming.net/tienda/" i], :root a[href^="https://a.medfoodsafety.com/"], :root a[href^="//go.eabids.com/"], :root a[href^=" https://www.friendlyduck.com/AF_"], :root [data-cl-spot-id], :root a[href*="/jump/next.php?r="], :root #banner728x90:not([style^="position: absolute; left: -5000px"]), :root div[id^="lazyad-"], :root a[href^="http://com-1.pro/"], :root [href^="https://www.profitablegatecpm.com/"], :root a[href*=".cfm?domain="][href*="&fp="], :root #vstr ~ #overlay, :root [id^="section-ad-banner"], :root [id^="ad_slider"], :root html#html[sti][vic][lang] > body#allbody, :root [href^="https://www.onclickperformance.com/"], :root a[href^="https://www.goldenfrog.com/vyprvpn?offer_id="][href*="&aff_id="], :root a[href^="https://wmctjd.com/"], :root a[href*="//jjgirls.com/sex/Chaturbate"], :root [id^="ad-wrap-"], :root a[href^="http://sarcasmadvisor.com/"], :root .ad-slot:not(.adsbox):not(.adsbygoogle), :root [href^="https://www.restoro.com/"], :root [href^="https://www.targetingpartner.com/"], :root .close-btn2[onclick="closeAd2()"], :root a[href^="https://join.virtuallust3d.com/"], :root .section-subheader > .section-hotel-prices-header, :root [href^="https://www.hostg.xyz/"] > img, :root [href*="passtechusa.com"], :root a[href^="https://bngpt.com/"], :root a[href^="http://adultfriendfinder.com/go/"], :root a[href^="https://fastestvpn.com/lifetime-special-deal?a_aid="], :root a[href^="https://tour.mrskin.com/"], :root a[href^="https://s.zlink3.com/"], :root a[href^="http://sneakyadministration.com/"], :root [href^="https://www.brighteonstore.com/products/"] img, :root citrus-ad-wrapper, :root a[href^="https://go.grinsbest.com/"], :root [href^="https://www.avantlink.com/click.php"] img, :root html.canvas > body.wp-singular + div[popover="manual"], :root a[href^="https://t.acam.link/"], :root a[href^="https://go.strpjmp.com/"], :root [href^="https://url.totaladblock.com/"], :root div[id^="ad-position-"], :root a[href^="https://www.toprevenuegate.com/"], :root a[href^="https://bc.game/"], :root a[href^="https://bngprm.com/"], :root [href^="https://shiftnetwork.infusionsoft.com/go/"] > img, :root a[href^="https://trk.softonixs.xyz/"], :root [href^="https://wct.link/click?"], :root [href^="//look.utndln.com/offer"], :root div[data-adunit], :root app-large-ad, :root [href^="https://turtlebids.irauctions.com/"] img, :root a[href^="https://iqbroker.com/"][href*="?aff="], :root .p-post-ad:not(html):not(body), :root #vplayer ~ img[id][onclick], :root [href^="https://rpwmct.com/"], :root a[href^="https://go.cmtaffiliates.com/"], :root [href^="https://mylead.global/stl/"] > img, :root [data-testid="adBanner-wrapper"], :root [href^="https://optimizedelite.com/"] > img, :root a[href^="https://go.rmishe.com/"], :root [href^="https://ilovemyfreedoms.com/landing-"], :root a[href^="https://go.xxxijmp.com"], :root [href^="https://istlnkcl.com/"], :root a[href^="https://go.nordvpn.net/aff"] > img, :root #tongkatlol ~ script[src^="/shrinke/js/"] ~ .main-content-box + .content-box > div[id][style^="position: fixed; display: block; width: 100%;"], :root .\[\&_\.gdprAdTransparencyCogWheelButton\]\:\!pjra-z-\[5\], :root [href^="http://clicks.totemcash.com/"], :root a[href^="https://ad.zanox.com/ppc/"] > img, :root [data-d-ad-id], :root a[href*=".engine.adglare.net/"], :root [class~="mailpoet_form_popup_overlay"], :root a[href^="https://www.brazzersnetwork.com/landing/"], :root a[href^="https://explore-site.com/"], :root .AdBody:not(body), :root [href="https://adstub.net/indo666/"], :root [href^="https://glersakr.com/"], :root a[href^="https://tm-offers.gamingadult.com/"], :root [href^="https://charmingdatings.life/"], :root [data-id^="div-gpt-ad"], :root a[href^="https://tracker.loropartners.com/"], :root [href^="https://awbbjmp.com/"], :root a[href^="https://go.bushheel.com/"], :root a[href^="https://ctjdwm.com/"], :root body > div.mw[role="main"] > .mc, :root a[href^="https://camfapr.com/landing/click/"], :root div[data-ad-wrapper], :root .gnt_em_vp_c[data-g-s="vp_dk"], :root [href="//sexcams.plus/"], :root [href^="http://www.mypillow.com/"] > img, :root a[href^="https://join.virtualtaboo.com/track/"], :root [id^="ad_sky"], :root [name^="google_ads_iframe"], :root [href^="https://go.xlrdr.com"], :root [href*="uselnk.com/"], :root a[href^="https://s.cant3am.com/"], :root .nav-item[href^="https://candyai.gg/"], :root [data-testid^="taboola-"], :root a[href^="https://track.1234sd123.com/"], :root zeus-ad, :root [data-testid="prism-ad-wrapper"], :root [href^="https://antiagingbed.com/discount/"] > img, :root a[href*=".adsrv.eacdn.com/"], :root #teaser1[style^="width:autopx;"], :root [href^="https://www.cloudways.com/en/?id"], :root #modal[doskip][prclck], :root body > .main-wrapper > .main-content > .intro > #checkbox-window, :root [data-uri^="https://s3.amazonaws.com"], :root [href^="https://mypatriotsupply.com/"] > img, :root a[href^="https://go.hpyjmp.com"], :root iframe[scrolling="no"][sandbox*="allow-popups allow-modals"][style^="width: 100%; height: 100%; border: none;"], :root [href^="https://mystore.com/"] > img, :root html[lang] > body.startnew > div#sections > section#section_uname, :root span[data-ez-ph-id], :root [href^="https://track.aftrk1.com/"], :root html[lang] > body:not([style]) > div.captchaBody, :root #adheader:not([style^="position: absolute; left: -5000px"]), :root div[id^="adngin-"], :root [data-rc-widget], :root a[href^="https://stellarcashflow.net/trck/"], :root [data-mobile-ad-id], :root [href^="https://join.playboyplus.com/track/"], :root html > #bw-cf-root, :root [href^="https://go.smljmp.com/"], :root a[href^="https://gamingadlt.com/?offer="], :root a[href^="https://go.bbrdbr.com"], :root a[href^="https://fc.lc/ref/"], :root body.user-clicked[style="cursor: auto;"] > #root > .app-container, :root a[href^="https://pb-imc.com/"], :root a[href^="https://www8.smartadserver.com/"], :root topadblock, :root a[href^="//s.zlinkd.com/"], :root a[href^="https://adclick.g.doubleclick.net/"], :root [data-freestar-ad][id], :root [data-dynamic-ads], :root [data-desktop-ad-id], :root [href^="https://track.wg-aff.com/click"], :root a[href^="https://go.rmhfrtnd.com"], :root [data-asg-ins], :root [data-block-type="ad"], :root [onclick*="content.ad/"], :root [href^="https://go.rdrjmp.com/"], :root a[href^="https://snowdayonline.xyz/"], :root a[href^="https://join.dreamsexworld.com/"], :root a[href^="http://join.brokestraightboys.com/track/"], :root div[id^="div-ads-"], :root [href^="https://rapidgator.net/article/premium/ref/"], :root a[href^="https://track.aftrk3.com/"], :root [href^="https://join3.bannedsextapes.com"], :root [href^="https://join.girlsoutwest.com/"], :root html > body.hold-transition.theme-primary.bg-img[style^="background-image"][style*="wallpaperaccess.com"][style*="background-repeat"][style*="background-size"], :root AMP-AD, :root [data-ad-cls], :root .ad-box:not(#ad-banner):not(:empty), :root body > .wrapper > .card-box > #step-1, :root [data-ez-name], :root a[style="width:100%;height:100%;z-index:10000000000000000;position:absolute;top:0;left:0;"], :root .ob_container .item-container-obpd, :root #ads_top:not(a), :root a[href^="https://go.mnaspm.com/"], :root a[href^="https://service.bv-aff-trx.com/"], :root .ad_slot:not(.text-ad), :root #st-ami + div[id][class*=" "], :root a[href^="https://6-partner.com/"], :root [class^="s2nPlayer"], :root a[href^="https://traffdaq.com/"], :root [data-testid="ad_testID"], :root [href^="https://ad.admitad.com/"], :root [href^="https://mypillow.com/"] > img, :root [data-testid="commercial-label-taboola"], :root a[href^="http://tc.tradetracker.net/"] > img, :root [class^="amp-ad-"], :root .ad_unit:not(.text-ad, .adsbox), :root [href="https://clickaine.com"], :root #playerOverlay[style="position:absolute; z-index:3"], :root a[href^="https://www.liquidfire.mobi/"], :root .grid > .container > #aside-promotion, :root DFP-AD, :root #hero + div.marquee-wrap + section#games + section#features + #download, :root #ads-banner:not([style^="position: absolute; left: -5000px"]), :root AD-SLOT, :root a[href^="https://www.googleadservices.com/pagead/aclk?"] > img, :root body > .security-container[style="opacity: 1; transform: translateY(0px);"], :root a[href^="https://a.bestcontentfood.top/"], :root #kt_player > a[target="_blank"], :root [href^="https://zone.gotrackier.com/"], :root .ad-area:not(.text-ad), :root a[href^="https://ab.advertiserurl.com/aff/"], :root #adSpecial:not(:empty), :root a[data-oburl^="https://paid.outbrain.com/network/redir?"], :root .sidebar-ad:not(.adsbygoogle), :root a[href^="https://s.zlinkn.com/"], :root a[href^="https://go.xxxvjmp.com/"], :root .ads_container:not(.text-ad), :root [class^="adDisplay-module"], :root div[style^="z-index: 999999; background-image: url(\"data:image/gif;base64,"][style$="position: absolute;"], :root [href^="https://affiliate.fastcomet.com/"] > img, :root a[href^="https://t.ajrkm3.com/"], :root in-page-message[doskip], :root [href^="https://aads.com/campaigns/"], :root a[href^="https://juicyads.in/"], :root #ad_728:not([style^="position: absolute; left: -5000px"]), :root div[id^="apn_native_ad_slot_"], :root .adhesion:not(body), :root body > div.captcha-container > div.captcha-card, :root ad-shield-ads, :root a[href^="https://hot-growngames.life/"], :root .ad_box:not(.text-ad), :root [href^="https://wap4dollar.com/ad/nonadult/serve.php"], :root [href="https://jdrucker.com/gold"] > img, :root .fp-player > div[style="position: absolute; inset: 0px; overflow: hidden; z-index: 160; background: transparent; display: block;"], :root .ad-wrap:not(#google_ads_iframe_checktag), :root a[href^="https://www.friendlyduck.com/AF_"], :root html[lang="tr"] #aa-wp + .fixed-footer .footer-ad-container, :root [href^="https://ad1.adfarm1.adition.com/"], :root #teaser3[style^="width:autopx;"], :root a[href^="https://gml-grp.com/"], :root a[href^="https://activate-game.com/"], :root .ob_dual_right > .ob_ads_header ~ .odb_div, :root a[href^="https://wittered-mainging.com/"], :root div[id][style^="position: fixed; inset: 0px; z-index: 2147483647; background: black"][style*="opacity: 0.01"], :root #teaser3[style="width: 100%;text-align: center;display: scroll;position:fixed;bottom: 0;margin: 0 auto;z-index: 103;"], :root html[lang="tr"] > body.has-footer-ad.has-pageskin-desktop a.pageskin-click-left, :root [data-revive-zoneid], :root a[href^="https://go.skinstrip.net"][href*="?campaignId="], :root figure.movie-detail-banner div[style="position: absolute; top: 0px; left: 0px; width: 100%; height: 100%; z-index: 999; cursor: pointer;"], :root #teaser2[style^="width:autopx;"], :root a[href^="https://losingoldfry.com/"], :root #player div[style$="cursor: pointer; position: absolute; width: 100%; height: 100%; padding: 1rem; z-index: 2147483647;"], :root div[style="position: fixed; inset: 0px; z-index: 2147483647; pointer-events: auto;"], :root .scroll-fixable.rail-right > .deals-rail, :root div[id^="adrotate_widgets-"], :root .Ad-Container:not(.adsbygoogle) { display: none !important; }</style></head><body>
+<title>Field Notes for Edsger</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+:root{
+  --bg:#EEF0E9;
+  --surface:#FBFBF8;
+  --surface-2:#F1F2EB;
+  --ink:#1C1F1B;
+  --muted:#5C6A62;
+  --muted-2:#7C887F;
+  --rule:#D6D9CD;
+  --accent:#AD4E1B;
+  --accent-ink:#FBFBF8;
+  --accent-soft:#F0DCC9;
+  --lang-c:#4E738F;
+  --lang-cpp:#3A6482;
+  --lang-go:#2E8272;
+  --lang-rust:#A8481A;
+  --lang-managed:#77598F;
+  --code-bg:#26271F;
+  --code-ink:#E9E6D8;
+  --shadow: 0 1px 2px rgba(28,31,27,0.06), 0 6px 20px rgba(28,31,27,0.05);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#15170F;
+    --surface:#1C1F17;
+    --surface-2:#22261B;
+    --ink:#EDEEE4;
+    --muted:#A7AF9E;
+    --muted-2:#8A9284;
+    --rule:#33372B;
+    --accent:#E58A4F;
+    --accent-ink:#1C1F17;
+    --accent-soft:#3A2A1B;
+    --lang-c:#8FB6D6;
+    --lang-cpp:#7FAAD0;
+    --lang-go:#6FC3AD;
+    --lang-rust:#E58A4F;
+    --lang-managed:#C1A2DE;
+    --code-bg:#0F100B;
+    --code-ink:#E9E6D8;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#15170F;
+  --surface:#1C1F17;
+  --surface-2:#22261B;
+  --ink:#EDEEE4;
+  --muted:#A7AF9E;
+  --muted-2:#8A9284;
+  --rule:#33372B;
+  --accent:#E58A4F;
+  --accent-ink:#1C1F17;
+  --accent-soft:#3A2A1B;
+  --lang-c:#8FB6D6;
+  --lang-cpp:#7FAAD0;
+  --lang-go:#6FC3AD;
+  --lang-rust:#E58A4F;
+  --lang-managed:#C1A2DE;
+  --code-bg:#0F100B;
+  --code-ink:#E9E6D8;
+  --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+}
+
+*{box-sizing:border-box;}
+body{
+  margin:0;
+  background:var(--bg);
+  color:var(--ink);
+  font-family:'IBM Plex Sans', system-ui, sans-serif;
+  font-size:16px;
+  line-height:1.6;
+}
+h1,h2,h3,.display{
+  font-family:'Fraunces', Georgia, serif;
+  text-wrap:balance;
+  font-weight:600;
+  letter-spacing:-0.01em;
+}
+code, pre, .mono{
+  font-family:'IBM Plex Mono', ui-monospace, monospace;
+}
+a{ color:var(--accent); text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent); text-underline-offset:2px; }
+a:hover{ text-decoration-thickness:2px; }
+
+.skip{position:absolute;left:-9999px;}
+
+.shell{
+  max-width:1180px;
+  margin:0 auto;
+  padding:0 clamp(16px,4vw,48px) 96px;
+}
+
+/* ---------- Masthead ---------- */
+header.masthead{
+  padding:clamp(40px,7vw,76px) 0 40px;
+  border-bottom:1px solid var(--rule);
+  display:flex;
+  flex-direction:column;
+  gap:22px;
+}
+.eyebrow{
+  font-family:'IBM Plex Mono', monospace;
+  font-size:12.5px;
+  letter-spacing:0.14em;
+  text-transform:uppercase;
+  color:var(--accent);
+  display:flex;
+  align-items:center;
+  gap:10px;
+}
+.eyebrow::before{
+  content:"";
+  width:22px;height:1px;
+  background:var(--accent);
+  display:inline-block;
+}
+h1.title{
+  font-size:clamp(2.1rem, 4.4vw, 3.4rem);
+  line-height:1.05;
+  margin:0;
+  max-width:16ch;
+}
+.dek{
+  font-size:clamp(1.02rem,1.6vw,1.18rem);
+  color:var(--muted);
+  max-width:62ch;
+  margin:0;
+}
+.dek strong{ color:var(--ink); font-weight:600; }
+
+.methodology{
+  display:flex;
+  flex-wrap:wrap;
+  gap:10px;
+  margin-top:6px;
+}
+.chip{
+  font-family:'IBM Plex Mono', monospace;
+  font-size:12px;
+  padding:5px 10px;
+  border-radius:99px;
+  border:1px solid var(--rule);
+  background:var(--surface);
+  color:var(--muted);
+  white-space:nowrap;
+}
+
+/* ---------- Layout: sidebar + content ---------- */
+.layout{
+  display:grid;
+  grid-template-columns: 210px minmax(0,1fr);
+  gap:clamp(24px,4vw,56px);
+  margin-top:40px;
+  align-items:start;
+}
+@media (max-width: 880px){
+  .layout{ grid-template-columns: 1fr; }
+}
+
+nav.toc{
+  position:sticky;
+  top:24px;
+  display:flex;
+  flex-direction:column;
+  gap:2px;
+  padding-bottom: 12px;
+}
+@media (max-width: 880px){
+  nav.toc{
+    position:static;
+    flex-direction:row;
+    overflow-x:auto;
+    gap:8px;
+    padding-bottom:10px;
+    border-bottom:1px solid var(--rule);
+    margin-bottom:8px;
+  }
+}
+nav.toc a{
+  font-size:13.5px;
+  color:var(--muted);
+  text-decoration:none;
+  padding:7px 10px;
+  border-radius:8px;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  white-space:nowrap;
+}
+nav.toc a:hover{ background:var(--surface-2); color:var(--ink); }
+nav.toc .dot{ width:8px;height:8px;border-radius:50%; flex:none; }
+nav.toc .dot.priorities{ background:var(--accent); }
+nav.toc .dot.c{ background:var(--lang-c); }
+nav.toc .dot.cpp{ background:var(--lang-cpp); }
+nav.toc .dot.go{ background:var(--lang-go); }
+nav.toc .dot.rust{ background:var(--lang-rust); }
+nav.toc .dot.managed{ background:var(--lang-managed); }
+
+main{ min-width:0; }
+
+section.block{ margin-top:8px; padding-top:56px; scroll-margin-top:20px; }
+section.block:first-child{ padding-top:8px; }
+
+.section-head{
+  display:flex;
+  align-items:baseline;
+  gap:14px;
+  flex-wrap:wrap;
+  margin-bottom:8px;
+}
+.section-head h2{
+  font-size:clamp(1.5rem,2.6vw,2rem);
+  margin:0;
+}
+.lang-tag{
+  font-family:'IBM Plex Mono',monospace;
+  font-size:12px;
+  letter-spacing:0.06em;
+  text-transform:uppercase;
+  padding:3px 9px;
+  border-radius:6px;
+  color:var(--accent-ink);
+  font-weight:600;
+}
+.section-intro{ color:var(--muted); max-width:74ch; margin:6px 0 28px; }
+
+/* ---------- Priority board ---------- */
+.priority-grid{
+  display:grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px,1fr));
+  gap:14px;
+  margin-top:24px;
+}
+.pcard{
+  background:var(--surface);
+  border:1px solid var(--rule);
+  border-radius:12px;
+  padding:18px 18px 16px;
+  box-shadow:var(--shadow);
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
+.pcard .rank{
+  font-family:'IBM Plex Mono',monospace;
+  font-size:12px;
+  color:var(--accent);
+  font-weight:600;
+}
+.pcard h3{
+  font-size:1.05rem;
+  margin:0;
+  line-height:1.3;
+}
+.pcard p{ margin:0; color:var(--muted); font-size:14.5px; }
+.pcard .langs{
+  display:flex;
+  gap:6px;
+  flex-wrap:wrap;
+  margin-top:4px;
+}
+.taglet{
+  font-family:'IBM Plex Mono',monospace;
+  font-size:10.5px;
+  letter-spacing:0.04em;
+  padding:2px 7px;
+  border-radius:5px;
+  color:var(--accent-ink);
+  font-weight:600;
+}
+.taglet.c{ background:var(--lang-c); }
+.taglet.cpp{ background:var(--lang-cpp); }
+.taglet.go{ background:var(--lang-go); }
+.taglet.rust{ background:var(--lang-rust); }
+.taglet.managed{ background:var(--lang-managed); }
+
+/* ---------- Finding cards ---------- */
+.findings{ display:flex; flex-direction:column; gap:16px; }
+.finding{
+  background:var(--surface);
+  border:1px solid var(--rule);
+  border-left:4px solid var(--accent-c, var(--muted));
+  border-radius:10px;
+  padding:18px 22px 20px;
+  box-shadow:var(--shadow);
+}
+.finding h3{
+  font-size:1.12rem;
+  margin:0 0 8px;
+  display:flex;
+  align-items:baseline;
+  gap:10px;
+  flex-wrap:wrap;
+}
+.finding p{ margin:0 0 10px; color:var(--ink); }
+.finding p.desc{ color:var(--ink); }
+.finding pre{
+  background:var(--code-bg);
+  color:var(--code-ink);
+  padding:12px 14px;
+  border-radius:8px;
+  overflow-x:auto;
+  font-size:13px;
+  line-height:1.55;
+  margin:10px 0;
+}
+.finding .verdict{
+  display:flex;
+  gap:8px;
+  align-items:flex-start;
+  margin-top:10px;
+  padding-top:10px;
+  border-top:1px dashed var(--rule);
+}
+.finding .verdict .vlabel{
+  font-family:'IBM Plex Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.06em;
+  text-transform:uppercase;
+  color:var(--muted-2);
+  flex:none;
+  padding-top:2px;
+}
+.finding .verdict p{ font-size:14.5px; color:var(--muted); margin:0; }
+.finding .verdict.hot p{ color:var(--ink); font-weight:500; }
+.src{ font-size:12.5px; color:var(--muted-2); margin-top:10px; }
+.src a{ color:var(--muted-2); }
+
+.finding.c{ --accent-c: var(--lang-c); }
+.finding.cpp{ --accent-c: var(--lang-cpp); }
+.finding.go{ --accent-c: var(--lang-go); }
+.finding.rust{ --accent-c: var(--lang-rust); }
+.finding.managed{ --accent-c: var(--lang-managed); }
+.finding.skip{ opacity:0.72; }
+.finding.skip pre{ display:none; }
+
+footer.colophon{
+  margin-top:72px;
+  padding-top:24px;
+  border-top:1px solid var(--rule);
+  color:var(--muted-2);
+  font-size:13.5px;
+  display:flex;
+  justify-content:space-between;
+  gap:16px;
+  flex-wrap:wrap;
+}
+</style>
+
+<a class="skip" href="https://34484edb-d7de-4d17-9445-85a88bf82e46.frame.claudeusercontent.com/_f/1788201884-bad5/#main-content">Skip to content</a>
+
+<div class="shell">
+
+  <header class="masthead">
+    <span class="eyebrow">Postulate · Edsger v1 test-design input</span>
+    <h1 class="title">Field notes from five other languages</h1>
+    <p class="dek">A survey of documented bugs, footguns, and compiler-optimizer miscompilations in <strong>C, C++, Go, Rust</strong>, and a filtered pass over <strong>C#, Java, Python, JavaScript, and PHP</strong> — read specifically against Postulate's own feature set, to seed the next round of black-box test cases for Edsger.</p>
+    <div class="methodology">
+      <span class="chip">5 parallel research passes</span>
+      <span class="chip">~90 findings surveyed</span>
+      <span class="chip">filtered for Postulate relevance</span>
+      <span class="chip">2026-08-31</span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <nav class="toc" aria-label="Sections">
+      <a href="https://34484edb-d7de-4d17-9445-85a88bf82e46.frame.claudeusercontent.com/_f/1788201884-bad5/#priorities"><span class="dot priorities"></span>Cross-cutting priorities</a>
+      <a href="https://34484edb-d7de-4d17-9445-85a88bf82e46.frame.claudeusercontent.com/_f/1788201884-bad5/#lang-c"><span class="dot c"></span>C</a>
+      <a href="https://34484edb-d7de-4d17-9445-85a88bf82e46.frame.claudeusercontent.com/_f/1788201884-bad5/#lang-cpp"><span class="dot cpp"></span>C++</a>
+      <a href="https://34484edb-d7de-4d17-9445-85a88bf82e46.frame.claudeusercontent.com/_f/1788201884-bad5/#lang-go"><span class="dot go"></span>Go</a>
+      <a href="https://34484edb-d7de-4d17-9445-85a88bf82e46.frame.claudeusercontent.com/_f/1788201884-bad5/#lang-rust"><span class="dot rust"></span>Rust</a>
+      <a href="https://34484edb-d7de-4d17-9445-85a88bf82e46.frame.claudeusercontent.com/_f/1788201884-bad5/#lang-managed"><span class="dot managed"></span>C#/Java/Py/JS/PHP</a>
+    </nav>
+
+    <main id="main-content">
+
+      <!-- ============ PRIORITIES ============ -->
+      <section class="block" id="priorities">
+        <div class="section-head">
+          <h2>Where independent research converged</h2>
+        </div>
+        <p class="section-intro">These items surfaced from <em>more than one</em> language track without prompting — the strongest signal in this whole survey that they're structural, not language trivia. Ranked as a rough "write this test first" order.</p>
+
+        <div class="priority-grid">
+
+          <div class="pcard">
+            <span class="rank">01</span>
+            <h3>Fixed-width integer overflow has no decided policy yet</h3>
+            <p>Wrap, trap, UB, or an explicit <code>checked_*</code>/<code>wrapping_*</code> API family — C leaves it UB and lets <code>opt</code> exploit that; Go and Rust each argue with themselves about it for a decade. Pick one per operation, per width, and write it down before it becomes accidental behavior.</p>
+            <div class="langs"><span class="taglet c">C</span><span class="taglet go">Go</span><span class="taglet rust">Rust</span><span class="taglet managed">Managed</span></div>
+          </div>
+
+          <div class="pcard">
+            <span class="rank">02</span>
+            <h3><code>INT_MIN / -1</code> and <code>-INT_MIN</code></h3>
+            <p>Two's-complement's one true asymmetry: the positive range is one short. x86 <code>idiv</code> traps on it (SIGFPE-shaped), C calls it UB, Go has a four-year-old open issue about it. Needs a defined answer at every signed width — int8 through int64.</p>
+            <div class="langs"><span class="taglet c">C</span><span class="taglet go">Go</span><span class="taglet managed">Managed</span></div>
+          </div>
+
+          <div class="pcard">
+            <span class="rank">03</span>
+            <h3>Wrong <code>nsw</code>/<code>nuw</code>/<code>noalias</code> hints under <code>opt</code></h3>
+            <p>The single most directly actionable finding in the whole survey: LLVM's poison-generating and no-alias attributes are a contract the frontend makes with the optimizer. Get it wrong and the miscompilation is silent — documented, real, and recurring in both Rust's and LLVM's own history, on the exact pipeline Edsger now shares.</p>
+            <div class="langs"><span class="taglet cpp">C++</span><span class="taglet rust">Rust</span><span class="taglet c">C</span></div>
+          </div>
+
+          <div class="pcard">
+            <span class="rank">04</span>
+            <h3>Pointer↔<code>uintptr</code>↔pointer round-trips under optimization</h3>
+            <p>Provenance is a real, separate concept from the bit pattern in LLVM's model. A cast-away-and-back pointer can legally be treated as a "different" pointer by an aggressive alias analysis — exactly the reinterpret idiom Postulate's <code>as</code>-casts invite.</p>
+            <div class="langs"><span class="taglet c">C</span><span class="taglet rust">Rust</span></div>
+          </div>
+
+          <div class="pcard">
+            <span class="rank">05</span>
+            <h3>The NaN quirk is a real deviation, not a curiosity</h3>
+            <p>Every mainstream language guarantees <code>NaN != NaN</code> is <code>true</code> — the one universally-relied-on NaN property. Postulate's ordered-<code>fcmp</code> lowering makes it read <code>false</code> instead. Confirmed independently by two research tracks as the highest-priority float finding.</p>
+            <div class="langs"><span class="taglet managed">Managed</span><span class="taglet go">Go</span></div>
+          </div>
+
+          <div class="pcard">
+            <span class="rank">06</span>
+            <h3>Struct-copy semantics at every access path</h3>
+            <p>C#'s "mutate through a property getter, the write vanishes" and Go's "value-receiver mutates a copy" are the same bug: an access path that <em>looks</em> like an lvalue but silently hands back a temporary. Postulate structs are value types too — prove every access path (return value, field chain, array element) is unambiguous.</p>
+            <div class="langs"><span class="taglet managed">Managed</span><span class="taglet go">Go</span></div>
+          </div>
+
+          <div class="pcard">
+            <span class="rank">07</span>
+            <h3>Operator-overload consistency is unenforced</h3>
+            <p>A confirmed, existing Postulate gap: nothing stops <code>==</code> being declared without a matching <code>!=</code>, or in only one operand order. C#'s <code>GetHashCode</code> mismatch class and C++'s member-vs-free-function asymmetry are the same root cause wearing different clothes.</p>
+            <div class="langs"><span class="taglet cpp">C++</span><span class="taglet managed">Managed</span></div>
+          </div>
+
+          <div class="pcard">
+            <span class="rank">08</span>
+            <h3>Cross-file symbol mismatch should be a hard error</h3>
+            <p>C/C++ linkers match symbols by name only, never by signature — the mechanical root of ODR violations, real ones, in Firefox and MySQL. Edsger's own multi-file <code>use</code> resolution can close this gap outright by re-checking every imported signature against its real definition, something C++ structurally never did.</p>
+            <div class="langs"><span class="taglet cpp">C++</span></div>
+          </div>
+
+          <div class="pcard">
+            <span class="rank">09</span>
+            <h3>Uninitialized reads and LLVM's poison semantics</h3>
+            <p>An <code>undef</code>/<code>poison</code> value can legally evaluate to a <em>different</em> concrete value each time it's read — a documented source of real LLVM miscompilations. Postulate's manual mmap/stack memory has no auto-zero anywhere; this is inherited by construction, not by choice.</p>
+            <div class="langs"><span class="taglet c">C</span></div>
+          </div>
+
+          <div class="pcard">
+            <span class="rank">10</span>
+            <h3>No memory model for the raw futex/clone primitives</h3>
+            <p>A compiler that assumes single-threaded execution can legally turn a busy-wait spin-loop on shared memory into an infinite loop with the check hoisted out. Go's own scheduler has shipped real lost-wakeup bugs on the exact futex pattern Postulate's future <code>std::mutex</code> will need to get right.</p>
+            <div class="langs"><span class="taglet c">C</span><span class="taglet go">Go</span></div>
+          </div>
+
+          <div class="pcard">
+            <span class="rank">11</span>
+            <h3><code>own *T</code>/ghost-map vs. Rust's two failure histories</h3>
+            <p>Rust's borrow checker has a well-documented false-positive history (self-reference, disjoint fields, flow-insensitivity) <em>and</em>, separately, a noalias-attribute miscompilation history. Postulate's ghost-map design sidesteps the first by construction — but inherits the second the moment it starts emitting alias hints from ownership info.</p>
+            <div class="langs"><span class="taglet rust">Rust</span></div>
+          </div>
+
+          <div class="pcard">
+            <span class="rank">12</span>
+            <h3>Generic diagnostics: design the constraint check before the constraint</h3>
+            <p>C++ fails deep inside the generic body because there's no declared contract to check against until instantiation; Go's pre-1.18 debate and its awkward <code>constraints.Ordered</code> workaround for "no operator overloading" are the same problem from the other side. Postulate has real overloading already — generics should be designed to use it directly, not reinvent Go's interface plumbing.</p>
+            <div class="langs"><span class="taglet cpp">C++</span><span class="taglet go">Go</span></div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- ============ C ============ -->
+      <section class="block" id="lang-c">
+        <div class="section-head">
+          <h2>C</h2>
+          <span class="lang-tag" style="background:var(--lang-c)">mandatory</span>
+        </div>
+        <p class="section-intro">C's own literature is almost entirely about one mechanism: the optimizer is licensed to assume undefined behavior never happens, and then reasons backward from that assumption to delete the code that would have handled it. Every entry below is a variation on that one theme — which makes it the most load-bearing research track for Edsger's brand-new <code>opt</code> pipeline specifically.</p>
+
+        <div class="findings">
+
+          <div class="finding c">
+            <h3>Signed overflow licenses loop/branch elimination</h3>
+            <p class="desc">Because signed overflow is UB, <code>for (i = 1; i &gt; 0; i += i)</code> can be optimized to an unconditional infinite loop — GCC has shipped exactly this at <code>-O2</code>/<code>-O3</code> on real, innocent-looking code.</p>
+            <pre>for (int i = 1; i &gt; 0; i += i) { ... }
+// -O2: becomes while(true) -- overflow "can't happen"</pre>
+            <div class="verdict hot"><span class="vlabel">Test</span><p>Compile the same overflow-adjacent loop at every <code>-O</code> level and diff the runtime result, not just "does it compile."</p></div>
+            <p class="src">Sources: <a href="http://kristerw.blogspot.com/2016/02/how-undefined-signed-overflow-enables.html">Krister Walfridsson</a> · CERT INT32-C</p>
+          </div>
+
+          <div class="finding c">
+            <h3>Null-check deleted because an earlier dereference "proved" non-null</h3>
+            <p class="desc">CVE-2009-1897 (Linux <code>tun</code> driver): GCC saw <code>tun-&gt;sk</code> dereferenced, concluded <code>tun</code> can't be null, and deleted the <code>if (!tun)</code> guard written <em>after</em> it — a real privilege-escalation bug.</p>
+            <pre>struct sock *sk = tun-&gt;sk;   // dereference
+if (!tun) return -EBADFD;    // deleted: "tun is already proven non-null"</pre>
+            <div class="verdict hot"><span class="vlabel">Test</span><p>Dereference-then-null-check on the same pointer, at <code>-O2</code>: the check must not silently disappear.</p></div>
+            <p class="src">Source: <a href="https://research.checkpoint.com/2020/optout-compiler-undefined-behavior-optimizations/">Check Point Research, OptOut</a></p>
+          </div>
+
+          <div class="finding c">
+            <h3>A pointer past the array end is UB before it's even dereferenced</h3>
+            <p class="desc"><code>a + 11</code> on a 10-element array is UB the moment it's <em>computed</em>, whether or not it's ever read — and this licenses eliminating bounds-check idioms built on "the pointer will just be wrong, not undefined."</p>
+            <pre>int a[10];
+int *p = a + 11;  // UB at computation time, no read needed
+int *q = a - 1;   // also UB</pre>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Directly applicable — Postulate's pointer arithmetic (<code>p+n</code>, <code>p1-p2</code>) is a real, named language feature. Test transient out-of-bounds intermediates specifically.</p></div>
+            <p class="src">Sources: Walfridsson, "C pointers are not hardware pointers" · CERT ARR30-C</p>
+          </div>
+
+          <div class="finding c">
+            <h3>Strict aliasing breaks type-punning through a cast</h3>
+            <p class="desc">Writing through a <code>float*</code> obtained by casting an <code>int*</code> is UB under <code>-fstrict-aliasing</code> (on by default at <code>-O2</code>+); real projects (the Linux kernel among them) build with <code>-fno-strict-aliasing</code> specifically because this bites production code.</p>
+            <pre>float f = 1.0f;
+int *ip = (int*)&amp;f;
+*ip = 0;             // may not be observed through f at -O2
+printf("%f\n", f);   // surprising result</pre>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Postulate's pointer↔pointer reinterpret <code>as</code>-casts are exactly this idiom. Test a write-then-read round trip through a reinterpreted type at every <code>-O</code> level.</p></div>
+            <p class="src">Sources: <a href="https://developers.redhat.com/blog/2020/06/02/the-joys-and-perils-of-c-and-c-aliasing-part-1">Red Hat Developer</a> · <a href="https://blog.regehr.org/archives/1307">Regehr</a></p>
+          </div>
+
+          <div class="finding c">
+            <h3>Struct padding leaks and defeats <code>memcmp</code></h3>
+            <p class="desc">Padding bytes between fields are unspecified content; comparing two field-identical structs byte-for-byte can report them unequal, and copying a struct wholesale can leak stale stack contents (CVE-2010-4083).</p>
+            <pre>struct S { char a; int b; };  // padding after a
+struct S x = {1,2}, y = {1,2};
+memcmp(&amp;x, &amp;y, sizeof(S));    // not guaranteed equal</pre>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Postulate structs use natural/ABI alignment — the same padding exists. Any future struct-equality operator must compare field-by-field, never byte-by-byte.</p></div>
+          </div>
+
+          <div class="finding c">
+            <h3>Dead-store elimination deletes security-motivated zeroing</h3>
+            <p class="desc">A <code>memset</code> that zeroes a secret right before it goes out of scope is a classic optimizer target: if nothing reads the buffer afterward, the write is "dead" and gets removed — CWE-14, still a live footgun without <code>memset_s</code> or a volatile-shaped escape hatch.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Postulate has no libc/allocator wrapper yet, but the same shape recurs the moment someone wants to scrub memory before <code>sys_munmap</code>. Worth a "don't optimize this write away" primitive before it's needed.</p></div>
+            <p class="src">Source: <a href="https://owasp.org/www-community/vulnerabilities/Insecure_Compiler_Optimization">OWASP: Insecure Compiler Optimization</a></p>
+          </div>
+
+          <div class="finding c">
+            <h3>The optimizer assumes single-threaded execution</h3>
+            <p class="desc">A data race is UB in the C/C++ memory model, so a spin-loop reading shared memory with no explicit fence can be hoisted into an unconditional infinite loop — the compiler is allowed to assume the flag never changes "on its own."</p>
+            <pre>while (ready == 0) { }  // may become an unconditional loop without a fence</pre>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Postulate's threading is raw <code>sys_clone</code>/<code>sys_futex</code> with no declared memory model yet. A busy-wait on shared memory is exactly this pattern — needs an explicit answer before <code>opt</code> is trusted near it.</p></div>
+            <p class="src">Source: <a href="https://book-of-gehn.github.io/articles/2020/02/07/Compiler-Optimizations-under-RC.html">Compiler Optimizations under a Race Condition</a></p>
+          </div>
+
+          <div class="finding c">
+            <h3>Poison/undef values can evaluate differently on each read</h3>
+            <p class="desc">LLVM's <code>undef</code> semantics let a single "uninitialized" value resolve to <em>different</em> concrete values at each use — a real, documented source of miscompilation in LLVM's own history (the <code>phi(X, undef) → X</code> transform bug).</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Edsger emits LLVM IR directly and now runs it through <code>opt</code> — this is inherited, not chosen. Test a doubly-used uninitialized local at <code>-O0</code> vs. <code>-O2</code> for consistency.</p></div>
+            <p class="src">Sources: <a href="https://llvm.org/docs/UndefinedBehavior.html">LLVM UB manual</a> · Lee et al., <a href="https://users.cs.utah.edu/~regehr/papers/undef-pldi17.pdf">Taming Undefined Behavior in LLVM</a> (PLDI'17)</p>
+          </div>
+
+          <div class="finding c">
+            <h3><code>restrict</code>-shaped aliasing assumptions on <code>ref</code> parameters</h3>
+            <p class="desc">C's <code>restrict</code> tells the optimizer two pointers never overlap; if the caller aliases them anyway, a vectorized/reordered loop body silently produces the wrong answer.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>If Edsger's backend ever auto-attaches <code>noalias</code> to <code>ref</code> parameters, aliased-<code>ref</code> arguments become exactly this bug. Test two <code>ref</code> parameters bound to the same variable.</p></div>
+          </div>
+
+          <div class="finding c">
+            <h3>Shift by ≥ the type's width</h3>
+            <p class="desc"><code>x &lt;&lt; 32</code> on a 32-bit value is UB; most hardware masks the shift amount instead of shifting to zero, so the "obviously wrong" result (<code>x</code> unchanged) is what actually ships on many backends.</p>
+            <pre>uint32_t x = 1;
+uint32_t y = x &lt;&lt; 32;  // UB; often y == 1 on real x86 codegen, not 0</pre>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Test every fixed-width shift with an amount ≥ the type's own bit width — needs a defined, documented result, consistent across <code>-O</code> levels.</p></div>
+            <p class="src">Source: CERT INT34-C</p>
+          </div>
+
+          <div class="finding c">
+            <h3>Reinterpreting raw bytes as <code>bool</code> risks a trap representation</h3>
+            <p class="desc">A <code>bool</code>/<code>_Bool</code> that isn't bit-pattern 0 or 1 (via type-punning) is UB; a <code>switch</code> compiled to a jump table can then branch to an arbitrary address on the "impossible" value.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Postulate allows exactly this kind of reinterpretation. Test a byte-reinterpreted <code>bool</code> that isn't strictly 0/1 flowing into a branch, at every optimization level.</p></div>
+          </div>
+
+          <div class="finding c">
+            <h3>Uninitialized reads as information leaks</h3>
+            <p class="desc">Reading an uninitialized struct field in practice often returns a previous stack/heap occupant's data — the root of the Samba ACL-bypass class of bug and CVE-2010-4083.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Postulate's manual mmap/stack memory has no auto-zero. Fits directly into the project's own multi-error/IDE-diagnostics goal: an uninitialized-read warning is exactly the kind of thing worth flagging, not silently compiling.</p></div>
+          </div>
+
+          <div class="finding c">
+            <h3>Real, dated <code>-O2</code>/<code>-O3</code> miscompilation regressions</h3>
+            <p class="desc">Not one incident but a recurring class: GCC miscompiled the Linux kernel's initramfs zlib decompression at <code>-O3</code> in 2021 (Linus Torvalds flagged it directly); GCC Bugzilla #106187 and fresh 2025 LLVM issues (#128528, #122496) show this remains an open, ongoing risk even in decades-old, heavily-fuzzed toolchains.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>The actionable lesson isn't a single test case — it's a discipline: build a differential-testing corpus that runs every fixture at <code>-O0</code> through <code>-O3</code> and diffs the <em>runtime result</em>, automatically, on every change.</p></div>
+            <p class="src">Sources: <a href="https://lkml.iu.edu/hypermail/linux/kernel/2105.0/00160.html">LKML thread</a> · <a href="https://gcc.gnu.org/bugzilla/show_bug.cgi?id=106187">GCC Bugzilla #106187</a></p>
+          </div>
+
+          <div class="finding c">
+            <h3>Pointer↔<code>uintptr_t</code>↔pointer provenance loss</h3>
+            <p class="desc">A pointer round-tripped through an integer type can, under LLVM's formal provenance model, lose the "permission" the optimizer associates with the original pointer — a subtle, rarely-tested miscompilation source in optimized code.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>This is an explicit Postulate feature (<code>as</code>-cast pointer↔<code>uintptr</code>↔pointer). Test the full round trip — cast to <code>uintptr</code>, do arithmetic, cast back, dereference — at <code>-O0</code> vs. <code>-O3</code>.</p></div>
+          </div>
+
+          <div class="finding c">
+            <h3>Unsigned underflow is defined — and dangerous precisely because it is</h3>
+            <p class="desc"><code>size_t len = 0; len - 1</code> wraps to the type's maximum value, silently, with no UB and therefore no optimizer "help" catching it — a classic buffer-overrun trigger when it feeds a loop bound or index.</p>
+            <pre>size_t len = 0;
+for (size_t i = 0; i &lt; len - 1; i++) buf[i] = 0;  // len-1 == SIZE_MAX</pre>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Postulate's unsigned types will have the identical wraparound. Confirm it's consistent across every <code>-O</code> level and consider whether an unsigned-underflow diagnostic belongs in the IDE-diagnostics goal.</p></div>
+          </div>
+
+          <div class="finding c skip">
+            <h3>Mixed signed/unsigned comparison implicit conversion</h3>
+            <p class="desc">C silently converts the signed side to unsigned in a mixed comparison, so <code>-1 &lt; 5u</code> is <code>false</code>. Postulate's explicit-cast-only design likely rules this out entirely.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Low priority — useful mainly as a negative test: confirm mixed-signedness comparison without an explicit cast is a compile error, not a silent conversion.</p></div>
+          </div>
+
+          <div class="finding c skip">
+            <h3>Multiple unsequenced side effects (<code>i = i++ + i++</code>)</h3>
+            <p class="desc">Classic sequence-point UB. Postulate likely has no expression-level <code>++</code>/<code>--</code> (only statement-level), which may rule this out structurally.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Worth one test of function-argument evaluation order determinism as the closest surviving analog.</p></div>
+          </div>
+
+          <div class="finding c skip">
+            <h3><code>goto fail; goto fail;</code> — Apple's 2014 SSL bug</h3>
+            <p class="desc">Not a compiler bug: a duplicated, unconditional <code>goto</code> silently skipped signature verification. Syntactically legal C, invisible to most static analysis.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>An argument for a specific IDE diagnostic: unreachable code after an unconditional jump, and duplicated consecutive statements.</p></div>
+            <p class="src">Source: <a href="https://www.imperialviolet.org/2014/02/22/applebug.html">ImperialViolet</a></p>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- ============ C++ ============ -->
+      <section class="block" id="lang-cpp">
+        <div class="section-head">
+          <h2>C++</h2>
+          <span class="lang-tag" style="background:var(--lang-cpp)">mandatory</span>
+        </div>
+        <p class="section-intro">Two threads worth pulling on: template diagnostics as the thing Postulate's own roadmap names as the anti-pattern to avoid, and the multi-file/ABI mismatch history as a preview of what Edsger's own cross-file <code>use</code> resolution needs to close off from the start.</p>
+
+        <div class="findings">
+
+          <div class="finding cpp">
+            <h3>SFINAE: substitution failure isn't reported, it's just silent removal</h3>
+            <p class="desc">When template substitution fails, the standard doesn't treat it as an error — the compiler just drops that overload. Once every candidate is gone, the final message describes the symptom ("no matching function") never the cause.</p>
+            <pre>template&lt;class T&gt;
+auto f(T t) -&gt; decltype(t.foo());  // silently removed for any T without .foo()</pre>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>The direct argument for Postulate's generics to report constraint failures as first-class errors at definition-check time, not as silent candidate pruning discovered only at the call site.</p></div>
+            <p class="src">Sources: <a href="https://en.wikipedia.org/wiki/Substitution_failure_is_not_an_error">SFINAE, Wikipedia</a></p>
+          </div>
+
+          <div class="finding cpp">
+            <h3>Errors report from inside the generic body, levels deep</h3>
+            <p class="desc">Because templates type-check only after substitution, a bad call-site argument is reported from inside the <em>definition</em>, often several instantiation levels down, with one mistake triggering a cascade of unrelated-looking errors in everything that depended on it.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>This is precisely what Postulate's roadmap names by name as the anti-pattern to avoid, in favor of Rust's two-location model: check the generic's own body once against its declared contract, then give a monomorphization failure a single point of blame at the call site.</p></div>
+          </div>
+
+          <div class="finding cpp">
+            <h3>Concepts fixed <em>when</em> constraints are checked, not what templates express</h3>
+            <p class="desc">C++20 concepts move the check earlier — before instantiation — so failures name a constraint instead of unwinding an instantiation trace. The fix was entirely about timing, not new type-system power.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>A real precedent for Rust's approach, but Postulate's v1.2 plan (unconstrained generics) means this applies as a signpost for later: unconstrained generics reintroduce a version of the "nothing to check against" problem this was built to solve.</p></div>
+          </div>
+
+          <div class="finding cpp skip">
+            <h3>Two-phase lookup's <code>typename</code>/<code>template</code> tax</h3>
+            <p class="desc">Dependent names default to "value" until instantiation, forcing disambiguator keywords purely to help the parser — a self-inflicted ambiguity from deferred checking, not a real semantic issue.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Worth avoiding by design if Postulate generics ever reference a type parameter's own members — resolve it structurally rather than with a user-facing disambiguator.</p></div>
+          </div>
+
+          <div class="finding cpp skip">
+            <h3>Even Rust's trait-bound errors aren't perfect</h3>
+            <p class="desc">Rust has its own open issues with confusing supertrait-bound messages — but every one is still anchored to one named, textually-local requirement, never a multi-level instantiation trace.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Calibration, not a new problem: good diagnostics require declared bounds to check against. "Add constrained generics" and "add good generic diagnostics" are the same milestone.</p></div>
+          </div>
+
+          <div class="finding cpp">
+            <h3>Monomorphization bloat is orthogonal to everything else about templates</h3>
+            <p class="desc">Every distinct instantiation is a fully separate code copy — no structural sharing even between identical layouts — producing real compile-time and binary-size blowup, independent of SFINAE, specialization, or variadics.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Applies to Postulate's planned monomorphization exactly as-is. Plan for instantiation deduplication (structurally-identical types share codegen) from day one, not as a later optimization.</p></div>
+            <p class="src">Source: <a href="https://thephd.dev/sol3-compile-times-binary-sizes">thePasture: compile times &amp; binary sizes</a></p>
+          </div>
+
+          <div class="finding cpp skip">
+            <h3>Deep recursive instantiation crashes the compiler, not just the build</h3>
+            <p class="desc">GCC has shipped internal compiler errors and segfaults, not clean diagnostics, on deeply recursive template metaprogramming exceeding its instantiation-depth limit.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Edsger's monomorphizer needs an explicit, gracefully-diagnosed recursion cap tested before shipping — a typo shouldn't be able to crash the compiler.</p></div>
+            <p class="src">Source: <a href="https://gcc-bugs.gcc.gnu.narkive.com/jjJUppnv/bug-c-54318-new-c-11-bogus-template-instantiation-depth-exceeds-maximum-error-segfault">GCC PR 54318</a></p>
+          </div>
+
+          <div class="finding cpp">
+            <h3>Member-function operators break symmetry with implicit conversions</h3>
+            <p class="desc"><code>a + b</code> as a member function desugars to <code>a.operator+(b)</code>, so an implicit conversion works for the right-hand operand but not the left — <code>a + 1</code> compiles, <code>1 + a</code> doesn't, for an operator that should be symmetric.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Postulate's free-function-only operator declarations (<code>operator ==(a: A, b: B)</code>) already sidestep this whole class — worth a test confirming both operand orders resolve consistently when only one direction is declared, since that's the remaining risk.</p></div>
+            <p class="src">Source: <a href="https://blog.ycshao.com/2017/10/16/effective-c-item-24-declare-non-member-functions-when-type-conversions-should-apply-to-all-parameters/">Effective C++ item 24</a></p>
+          </div>
+
+          <div class="finding cpp">
+            <h3>One-direction-only comparison overloads are silently order-dependent</h3>
+            <p class="desc">Defining <code>operator==(A, int)</code> without the mirror <code>operator==(int, A)</code> means <code>a == 5</code> and <code>5 == a</code> can silently take different code paths, with no compiler warning.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>A confirmed Postulate gap — operands need not match types today, with no enforced mirror overload. Decide and test: require the mirror, auto-derive it, or diagnose its absence.</p></div>
+            <p class="src">Source: <a href="https://medium.com/@simontoth/daily-bit-e-of-c-c-20-spaceship-operator-vs-equality-fc73998485dc">Daily bit(e) of C++</a></p>
+          </div>
+
+          <div class="finding cpp skip">
+            <h3>Spaceship doesn't imply equality</h3>
+            <p class="desc">A user-provided (non-defaulted) <code>operator&lt;=&gt;</code> does not auto-generate <code>operator==</code> — a rule that surprises people expecting "one operator, everything follows."</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Only relevant if Postulate ever unifies ordering under one operator — a cautionary tale that equality and ordering are distinct enough to need separate, independently correct implementations.</p></div>
+          </div>
+
+          <div class="finding cpp skip">
+            <h3>Ambiguous overload resolution via multiple implicit conversions</h3>
+            <p class="desc">Two overloads each reachable via a different implicit user-defined conversion, neither strictly better, rejects the call — and adding an unrelated overload elsewhere can retroactively break it.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Substantially defused already by Postulate having no implicit coercion; worth one test that exact-type overload resolution gives a clean "no match" rather than a near-match guess.</p></div>
+          </div>
+
+          <div class="finding cpp">
+            <h3>The One Definition Rule: silent, undiagnosed miscompilation across files</h3>
+            <p class="desc">Two translation units defining the same symbol differently is UB with <em>no diagnostic required</em> — the linker may pick either, or under LTO, blend them. Real instances: Firefox with GCC8+LTO, MySQL blocked from LTO builds until patched.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Edsger's namespace/<code>use</code> imports create the same surface. Make a signature mismatch across files a hard compile-time error, resolved against one canonical declaration — something C++'s linker structurally never checked.</p></div>
+            <p class="src">Sources: <a href="https://bugzilla.mozilla.org/show_bug.cgi?id=1516758">Firefox Bugzilla 1516758</a> · <a href="https://gieseanw.wordpress.com/2018/10/30/oops-i-violated-odr-again/">"Oops!... I violated ODR again"</a></p>
+          </div>
+
+          <div class="finding cpp">
+            <h3>Linkers match by name only, never by signature</h3>
+            <p class="desc">A function declared one way in file A and defined incompatibly in file B links "successfully" — wrong argument count, type, or ABI produces silently wrong codegen at the call site, not a link error.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Directly relevant to <code>use</code>-based imports: Edsger should type-check every imported symbol against its real definition itself, rather than delegating that guarantee to a linker that structurally can't provide it.</p></div>
+          </div>
+
+          <div class="finding cpp skip">
+            <h3>ABI-level layout drift: GCC5's dual <code>std::string</code></h3>
+            <p class="desc">A struct-layout change shipped behind a build-time macro; mixing object files built with different macro values produced link errors or silent runtime corruption from treating one layout as the other.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>If Postulate's struct/ABI layout ever changes between Edsger versions, mixing object files from different versions should be a refused link, not a silent mismatch — cheap to add a layout fingerprint now.</p></div>
+            <p class="src">Source: <a href="https://gcc.gnu.org/onlinedocs/libstdc++/manual/using_dual_abi.html">GCC libstdc++ dual ABI manual</a></p>
+          </div>
+
+          <div class="finding cpp">
+            <h3>Wrong <code>nsw</code>/<code>nuw</code> flags let a middle-end pass poison correct IR</h3>
+            <p class="desc"><code>nsw</code>/<code>nuw</code> are a frontend's promise to the optimizer ("this never overflows"); real LLVM bugs have come from passes incorrectly attaching or propagating them, making transformed IR more poisonous than the source ever was.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Directly actionable: Edsger's codegen should not emit these flags unless it has actually proven the precondition — not "the arithmetic looks like it probably doesn't overflow."</p></div>
+            <p class="src">Sources: <a href="https://github.com/llvm/llvm-project/issues/114903">llvm/llvm-project#114903</a> · Lee et al., <a href="https://web.ist.utl.pt/nuno.lopes/pubs/undef-pldi17.pdf">PLDI'17</a></p>
+          </div>
+
+          <div class="finding cpp">
+            <h3>Wrong <code>noalias</code>/alias-analysis metadata reorders memory operations</h3>
+            <p class="desc">Multiple real LLVM bugs (TBAA/GVN replacing a pointer with <code>undef</code>, BasicAA returning <code>NoAlias</code> for pointers that could actually alias) show that bad alias metadata — from a compiler bug or an over-confident frontend — silently drops or reorders stores.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Forward-looking to <code>own *T</code>: if ownership info is ever lowered to <code>noalias</code> hints, get the proof obligation right first. A wrong hint here is worse than no optimization at all.</p></div>
+            <p class="src">Sources: <a href="https://github.com/llvm/llvm-project/issues/122537">llvm/llvm-project#122537</a> · <a href="https://github.com/llvm/llvm-project/issues/98978">#98978</a></p>
+          </div>
+
+          <div class="finding cpp skip">
+            <h3>LTO opens cross-unit miscompilation classes that don't exist without it</h3>
+            <p class="desc">Whole-program visibility both fixes and creates bugs — documented cases include LTO replacing <code>main</code>'s body with an infinite loop, and academic fuzzing finding non-trivial miscompilation rates specifically under LTO.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Lower priority until Edsger does cross-module/whole-program optimization across <code>use</code>-imported namespaces — revisit then.</p></div>
+            <p class="src">Source: <a href="https://people.inf.ethz.ch/suz/publications/issta15-ltobugs.pdf">Randomized Stress-Testing of LTO (ISSTA'15)</a></p>
+          </div>
+
+          <div class="finding cpp">
+            <h3>Strict-aliasing violations regress silently across optimizer versions</h3>
+            <p class="desc">Type-punned code often "works" under weak optimization and breaks only once a <em>later</em> compiler version's stronger alias analysis notices — the same source, recompiled, produces a silent behavior change with no error at either point.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Relevant to Postulate's manual-mmap model: decide what aliasing assumptions, if any, <code>opt</code> may make about two differently-typed pointers into the same raw memory region.</p></div>
+          </div>
+
+          <div class="finding cpp">
+            <h3>Transient out-of-bounds pointer arithmetic is UB even when it "comes back in bounds"</h3>
+            <p class="desc"><code>&amp;x - 1 + 1</code> is UB despite looking harmless and running fine today — the same "assume UB never happens, delete the check" reasoning as signed-overflow UB, applied to pointers instead of integers.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Given Postulate's real pointer arithmetic, this needs an explicit, documented answer: are transient out-of-bounds intermediate pointers permitted? <code>opt</code> must not assume in-boundedness beyond what the semantics actually guarantee.</p></div>
+            <p class="src">Source: <a href="https://research.swtch.com/ub">research!rsc: C and C++ Prioritize Performance over Correctness</a></p>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- ============ GO ============ -->
+      <section class="block" id="lang-go">
+        <div class="section-head">
+          <h2>Go</h2>
+          <span class="lang-tag" style="background:var(--lang-go)">mandatory</span>
+        </div>
+        <p class="section-intro">Go is the useful control group: no pointer arithmetic, no operator overloading, defined (not UB) overflow — and yet its own bug tracker, and its own runtime built on the exact futex/mmap primitives Postulate exposes raw, still surface real, hard-won lessons.</p>
+
+        <div class="findings">
+
+          <div class="finding go">
+            <h3>The loop-variable-by-reference bug (fixed in 1.22, after 12+ years)</h3>
+            <p class="desc">Go's <code>for</code> loop reused one variable binding across every iteration; a closure or goroutine capturing it saw whatever value it held when it <em>ran</em>, almost always the last one.</p>
+            <pre>for i := 0; i &lt; 3; i++ {
+    go func() { fmt.Println(i) }() // pre-1.22: prints "3 3 3"
+}</pre>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Postulate has no closures, but a <code>ref</code> parameter or a function-type variable capturing a loop-scoped local by address reproduces the exact bug if storage is reused across iterations. Test: take a pointer inside a loop, store each into an array, dereference all after the loop — each must see its own iteration's value.</p></div>
+            <p class="src">Source: <a href="https://go.dev/blog/loopvar-preview">go.dev/blog/loopvar-preview</a></p>
+          </div>
+
+          <div class="finding go">
+            <h3>Silent narrowing conversion → a real Kubernetes CVE</h3>
+            <p class="desc">Trail of Bits found <code>int32(port)</code> silently truncating an out-of-range <code>int</code> with zero runtime check — <code>kubectl expose --port=4294967376</code> wrapped into a small, valid-looking port number.</p>
+            <pre>port, _ := strconv.Atoi(userInput)
+p := int32(port)  // silently wraps, no panic</pre>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Postulate's explicit-only <code>as</code>-casts are already stricter than Go's implicit narrowing — but the wraparound itself is the same shape. Test large-value narrowing casts across every width pair and confirm the wrap semantics are defined and documented.</p></div>
+            <p class="src">Source: <a href="https://dev.to/ccoveille/about-the-gosec-g115-drama-or-how-i-faced-back-integer-conversion-overflow-in-go-1302">gosec G115 writeup</a></p>
+          </div>
+
+          <div class="finding go">
+            <h3>Defined signed overflow, and Go's own open <code>INT_MIN / -1</code> question</h3>
+            <p class="desc">Go deliberately specifies wraparound over UB — then spent four separate proposal threads (#19624, #30209, #30613) debating checked-arithmetic types anyway. A still-open spec issue (#1764) asks Go to define <code>int8(-128) / -1</code> explicitly.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>LLVM's <code>sdiv</code>/<code>srem</code> on this exact input is UB unless explicitly guarded. Since Postulate promises defined semantics, this needs a guard in codegen at every signed width — not an inherited LLVM default.</p></div>
+            <p class="src">Source: <a href="https://github.com/golang/go/issues/1764">golang/go#1764</a></p>
+          </div>
+
+          <div class="finding go skip">
+            <h3>Truncating <code>%</code>, not floored modulo</h3>
+            <p class="desc">Go's own designers explicitly chose truncation (<code>-16 % 7 == -2</code>) over Python-style flooring, to keep "remainder" strictly separate from "mathematical modulus."</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Pin down and document Postulate's own convention for negative operands across every signed width — cheap to verify, easy to get silently wrong porting an idiom from another language.</p></div>
+            <p class="src">Source: <a href="https://github.com/golang/go/issues/448">golang/go#448</a></p>
+          </div>
+
+          <div class="finding go skip">
+            <h3>Float-to-int overflow sign-flips, with no defined behavior</h3>
+            <p class="desc"><code>int32(float32(2^31))</code> gives <code>-2147483648</code> — a spec gap Go has left open for years (#19405).</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Postulate's float→int <code>as</code>-casts need an explicit, tested out-of-range answer — saturate, wrap, or trap — rather than inheriting whatever <code>fptosi</code> happens to do.</p></div>
+          </div>
+
+          <div class="finding go skip">
+            <h3>NaN permanently strands map keys</h3>
+            <p class="desc"><code>NaN != NaN</code> means a NaN map key can never be retrieved or deleted again — plus a distinct historical Go compiler bug (#2609) from comparing floats via <code>memcmp</code> instead of real float equality.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Forward-looking to any future hash container. More immediate: confirm no Edsger-generated equality lowering for float-containing structs ever falls back to bitwise <code>memcmp</code>.</p></div>
+            <p class="src">Sources: <a href="https://github.com/golang/go/issues/20660">golang/go#20660</a> · <a href="https://github.com/golang/go/issues/2609">#2609</a></p>
+          </div>
+
+          <div class="finding go skip">
+            <h3>nil map panics on write, nil slice doesn't</h3>
+            <p class="desc">Two "empty by default" types with opposite contracts — every reference-ish type in Go (map, slice, chan, func, pointer, interface) has its own subtly different nil rule.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Not applicable to Postulate's current pointer/array model — but a clean design lesson for whenever a hash-map type gets added: pick one nil contract, apply it uniformly.</p></div>
+          </div>
+
+          <div class="finding go skip">
+            <h3>A typed-nil pointer boxed into an interface isn't nil</h3>
+            <p class="desc">Go's most infamous gotcha: <code>err != nil</code> can be <code>true</code> even when the concrete pointer inside it is nil, because the interface value still carries type info.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Not applicable today (no interfaces/boxing) — flag as a future risk only if Postulate ever adds tagged unions or a boxed "any" for the verification system.</p></div>
+          </div>
+
+          <div class="finding go">
+            <h3>Arrays are value types — a lesson Postulate can do better than Go at</h3>
+            <p class="desc">Assigning or passing a Go array copies every element, correctly per spec, but constantly surprises people used to slice-style reference semantics living right next to it syntactically.</p>
+            <pre>a := [3]int{1, 2, 3}
+b := a       // full copy
+b[0] = 99
+fmt.Println(a[0]) // still 1</pre>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Postulate's fixed arrays are presumably value types too. Since Postulate <em>has</em> real <code>ref</code> parameters (Go has none), this is a place to be more explicit than Go: test that array-in-struct copy, by-value array parameters, and <code>ref</code>-parameter array aliasing are all airtight and unambiguous.</p></div>
+          </div>
+
+          <div class="finding go skip">
+            <h3>Value-receiver methods silently mutate a copy</h3>
+            <p class="desc">A method with a value receiver operates on a copy; mutations vanish on return, with no diagnostic distinguishing it from a pointer receiver at the call site.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Largely defused by Postulate having no implicit receivers at all — still worth a positive regression test that <code>ref</code>/pointer parameters reliably mutate and by-value parameters reliably don't, including through an overloaded operator taking <code>self</code> by value.</p></div>
+          </div>
+
+          <div class="finding go skip">
+            <h3><code>append()</code> aliases or reallocates based on hidden capacity</h3>
+            <p class="desc">The exact same call site either mutates the shared backing array or silently breaks aliasing, depending on runtime capacity invisible in the type.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Not applicable today (fixed arrays only) — essential input for whenever a growable-array type is designed: make the aliasing/reallocation boundary statically visible, or route it through the planned <code>own</code>-pointer model where ownership is unambiguous by construction.</p></div>
+          </div>
+
+          <div class="finding go">
+            <h3>A real, shipped optimizer-pass miscompilation: the "prove" pass</h3>
+            <p class="desc">Go's SSA backend "prove" pass (which eliminates bounds checks via inferred value ranges) has shipped real, incorrect range assumptions — a check silently removed because the analysis was unsound, not because the check was actually redundant.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>The exact failure mode most relevant to Edsger's own optimizing middle end. Recommend differential-testing every fixture at every <code>-O</code> level, with particular attention to anything relying on a bounds check or the pointer-arithmetic direction rule (<code>p+n</code> valid, <code>n+p</code> rejected).</p></div>
+            <p class="src">Source: <a href="https://ciolek.dev/posts/when-the-compiler-lies">Jakub Ciolek: When the compiler lies</a></p>
+          </div>
+
+          <div class="finding go skip">
+            <h3>Escape-analysis heuristics drift silently across compiler versions</h3>
+            <p class="desc">A struct that stack-allocated in Go 1.23 started heap-allocating in 1.24, undocumented in release notes — an internal optimizer heuristic changing observable behavior across a version bump.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Postulate's manual, GC-free memory model has no equivalent "escape analysis" to drift — a genuine structural advantage. Discipline lesson: pin exact expected codegen per <code>-O</code> level in golden tests so any future Edsger lowering-strategy change is caught by regression, not discovered in production.</p></div>
+            <p class="src">Source: <a href="https://github.com/golang/go/issues/73536">golang/go#73536</a></p>
+          </div>
+
+          <div class="finding go">
+            <h3>Go's own runtime has shipped real futex lost-wakeup bugs</h3>
+            <p class="desc">Multiple filed Go runtime issues (#55120, #24608, #22398, #62451) show goroutines permanently blocked in <code>futex()</code> — the classic "wakeup arrives between the condition check and the wait call" race, in a hand-rolled scheduler built directly on raw futex.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Directly shapes the design of Postulate's future <code>std::mutex</code>/<code>condvar</code> (already roadmapped on <code>sys_clone</code>/<code>sys_futex</code>): the waiter must re-check its condition atomically with respect to the waker, handle spurious wakeups, and account for wake-count-vs-waiter-count races — the exact bug classes Go's own scheduler hit in production.</p></div>
+            <p class="src">Sources: <a href="https://github.com/golang/go/issues/55120">golang/go#55120</a> · <a href="https://github.com/golang/go/issues/22398">#22398</a></p>
+          </div>
+
+          <div class="finding go">
+            <h3><code>mmap</code>/<code>madvise</code> semantics drift across kernels and flags</h3>
+            <p class="desc">Go's allocator hit real memory corruption from mmap/madvise interaction with newer kernel features (#35777), and had to choose carefully between <code>MADV_DONTNEED</code> (safe, always faults) and <code>MADV_FREE</code> (faster, but "maybe still there" until reclaimed).</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>This is Postulate's exact manual <code>sys_mmap</code>/<code>sys_mremap</code>/<code>sys_munmap</code> surface, with no GC to smooth over a mistake. Test <code>mremap</code> growth/shrink at real page boundaries and double-<code>munmap</code>/use-after-<code>munmap</code> behavior explicitly — should trap, never silently corrupt.</p></div>
+            <p class="src">Source: <a href="https://github.com/golang/go/issues/35777">golang/go#35777</a></p>
+          </div>
+
+          <div class="finding go">
+            <h3>Go's generics retrospective: the operator-overloading gap they didn't have to have</h3>
+            <p class="desc">A decade of public debate, then a design critics call readability-hostile — and because Go has no operator overloading, generic numeric code needs awkward <code>constraints.Ordered</code>-style interfaces just to use <code>+</code>/<code>&lt;</code> generically at all.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Primary design input for v1.2: Postulate already has real operator overloading, so generic code should be able to use a type parameter's overloaded operators directly, instead of reinventing Go's constraint-interface plumbing after the fact.</p></div>
+            <p class="src">Source: <a href="https://go.googlesource.com/proposal/+/refs/heads/master/design/43651-type-parameters.md">Go Type Parameters Proposal</a></p>
+          </div>
+
+          <div class="finding go skip">
+            <h3><code>defer</code> is function-scoped, not block-scoped</h3>
+            <p class="desc"><code>defer f.Close()</code> inside a loop holds every resource open until the whole function returns, not each iteration — routinely exhausts file-descriptor limits.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Not applicable (no <code>defer</code>) — but the underlying lesson generalizes directly to whenever Postulate designs scope-exit cleanup for <code>own *T</code>: tie release to the actual lexical scope the resource was acquired in, not the nearest enclosing function.</p></div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- ============ RUST ============ -->
+      <section class="block" id="lang-rust">
+        <div class="section-head">
+          <h2>Rust</h2>
+          <span class="lang-tag" style="background:var(--lang-rust)">mandatory</span>
+        </div>
+        <p class="section-intro">The most heavily-weighted track, on purpose: Postulate's planned <code>own *T</code>/ghost-map memory-safety model is a direct alternative to Rust's borrow checker, and needs an explicit answer for the two, quite different, historically-real failure classes Rust has actually hit.</p>
+
+        <div class="findings">
+
+          <div class="finding rust">
+            <h3>Self-referential structs force <code>unsafe</code>/<code>Pin</code> — and Postulate simply doesn't try</h3>
+            <p class="desc">The borrow checker can't express "field B references field A of the same struct," because moving the struct invalidates B with no way for the type system to update it. Rust's fix, <code>Pin</code>, is subtle and still forces <code>unsafe</code> to construct the reference at all.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Postulate's ghost-map tracks address <em>liveness</em>, not intra-struct aliasing — a struct holding a raw <code>*T</code> into a sibling field is simply outside what the check covers. Worth stating explicitly in design docs: this is an avoided problem, not a solved one.</p></div>
+            <p class="src">Sources: <a href="https://rust-lang.github.io/rfcs/3467-unsafe-pinned.html">RFC 3467</a> · <a href="https://blog.cloudflare.com/pin-and-unpin-in-rust/">Cloudflare: Pin and Unpin</a></p>
+          </div>
+
+          <div class="finding rust">
+            <h3>The "get-or-insert" false positive — flow-insensitivity rejects safe code</h3>
+            <p class="desc">NLL reasons about lifetimes as regions, not per-branch control flow, so returning a mutable reference from one match arm and computing a fresh one in another is rejected even though the two borrows never coexist at runtime — the canonical "the borrow checker is technically wrong" example.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Postulate's <code>ref</code> parameters have no aliasing enforcement at all today, so this specific false-positive can't happen — but the corresponding true positive (two live mutable aliases to the same data) is also currently undetected. If exclusivity checking is ever added, it faces the identical region-vs-flow-sensitivity choice Rust already got wrong once (motivating the still-in-progress Polonius rewrite).</p></div>
+            <p class="src">Sources: <a href="https://blog.rust-lang.org/2026/08/04/enabling-polonius-alpha-on-nightly/">Polonius alpha on nightly</a> · <a href="https://ketansingh.me/posts/limitations-of-rust-borrow-checker/">Limitations of the Rust Borrow Checker</a></p>
+          </div>
+
+          <div class="finding rust skip">
+            <h3>Disjoint-field borrows: whole-struct conservatism</h3>
+            <p class="desc">The checker analyzes one function at a time, so a method call that only touches one field is treated as if it might touch the whole struct — blocking a simultaneous, genuinely-safe borrow of a different field.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Doesn't exist in Postulate today (no field-granularity aliasing model at all) — not solved, just not yet attempted. Would resurface exactly this way if per-field ownership is ever added.</p></div>
+            <p class="src">Source: <a href="https://smallcultfollowing.com/babysteps/blog/2024/06/02/the-borrow-checker-within/">babysteps: the borrow checker within</a></p>
+          </div>
+
+          <div class="finding rust">
+            <h3>"Fighting the borrow checker" is Rust's own measured #1 adoption barrier</h3>
+            <p class="desc">Rust's 2023 survey: 31% of non-users cite perceived difficulty as their primary reason to avoid the language; 24% of people who tried and quit cite difficulty specifically.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>The strongest point in Postulate's favor in this whole survey: no lifetime syntax, no elision rules, no fighting-the-checker mental model to teach, since verification is automatic and compiler-inserted rather than programmer-reasoned. The likely tradeoff — a different learnability cliff around "this path doesn't consume/free the <code>own *T</code>" errors — is untested and worth watching for once real programs use it.</p></div>
+            <p class="src">Source: <a href="https://blog.rust-lang.org/2025/02/13/2024-State-Of-Rust-Survey-results/">2024 State of Rust Survey</a></p>
+          </div>
+
+          <div class="finding rust">
+            <h3><code>noalias</code> is weaker than what Rust actually needs to claim</h3>
+            <p class="desc">Rust wants "this <code>&amp;mut T</code> aliases nothing, for its whole lifetime, even across nested calls" — but LLVM's <code>noalias</code> attribute technically only means "nothing in this function's own scope." The mismatch has caused both missed optimizations and real miscompilations.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>The single most actionable finding in the whole survey for Edsger's <code>opt</code> integration: <code>own *T</code>'s linear, exclusive semantics is a <em>stronger</em> claim than plain LLVM <code>noalias</code>. Naively attaching the attribute without matching Rust's still-evolving rules is a realistic path to silent miscompilation at <code>-O2</code>/<code>-O3</code>.</p></div>
+            <p class="src">Sources: <a href="https://github.com/rust-lang/rust/issues/53105">rust-lang/rust#53105</a> · <a href="https://github.com/rust-lang/rust/pull/106371">PR #106371</a></p>
+          </div>
+
+          <div class="finding rust">
+            <h3>A real, shipped <code>noalias</code> miscompilation from inlining + loop unrolling</h3>
+            <p class="desc">Enabling "mutable noalias" in 2021 broke the <code>ring</code> crypto crate: LLVM failed to give duplicated, inlined-then-unrolled copies of a function distinct alias-scope tags, so it concluded pointers from different copies could never alias — even though at runtime they did. GCC miscompiled the equivalent pattern too.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Not Rust-specific — an LLVM-pipeline hazard Edsger shares exactly, since it routes through the same inlining/unrolling/GVN passes. If ownership-derived scope metadata is ever emitted, it must be tagged per dynamic-object-identity, not per static call site.</p></div>
+            <p class="src">Source: <a href="https://github.com/rust-lang/rust/issues/84958">rust-lang/rust#84958</a></p>
+          </div>
+
+          <div class="finding rust">
+            <h3>Forming a reference is itself a claim — even in <code>unsafe</code> code</h3>
+            <p class="desc">Building an intrusive linked list in <code>unsafe</code> Rust: merely <em>creating</em> a <code>&amp;mut</code> to a node, without writing through it, was treated by Stacked Borrows as invalidating other live pointers to the same memory — even same-node self-loops in a one-element list. The fix abandoned references for raw-pointer reads/writes entirely.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Directly relevant to Postulate's own raw-pointer arena/buffer patterns. Because Postulate has no reference type distinct from a plain pointer, it structurally avoids "forming a reference is an event" — a real advantage, as long as Edsger never attaches Rust-style reference-derived LLVM attributes to a plain <code>*T</code> or <code>own *T</code>.</p></div>
+            <p class="src">Source: <a href="https://chadaustin.me/2024/10/intrusive-linked-list-in-rust/">Chad Austin: Unsafe Rust Is Harder Than C</a></p>
+          </div>
+
+          <div class="finding rust">
+            <h3>The actix-web soundness controversy</h3>
+            <p class="desc">A 2020 audit found a widely-deployed framework (100+ <code>unsafe</code> blocks) handing out multiple live mutable references to the same data, plus unsound reference-mutability coercion and lifetime extension — a real, production, use-after-free-shaped bug from an expert author.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Postulate has no safe/unsafe split at all — every line is "unsafe-shaped" by Rust's own standard. The strongest possible argument for prioritizing the <code>own</code>/ghost-map work: in Rust this class of bug is at least contained to flagged <code>unsafe</code> blocks; in Edsger today it can appear anywhere, with no tooling to flag it as suspicious at all.</p></div>
+            <p class="src">Sources: <a href="https://www.theregister.com/2020/01/21/rust_actix_web_framework_maintainer_quits/">The Register</a> · <a href="https://raphlinus.github.io/rust/2020/01/18/soundness-pledge.html">Raph Levien: The Soundness Pledge</a></p>
+          </div>
+
+          <div class="finding rust skip">
+            <h3>264 unsafe-Rust soundness bugs, found by one automated study</h3>
+            <p class="desc">RUDRA found 264 previously-unknown memory-safety bugs across published crates via automated pattern analysis — 76 CVEs, 112 RustSec advisories — from uninitialized-memory misuse, bounds violations, and aliasing violations.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Every one of these categories maps onto Postulate's raw-syscall/manual-mmap surface today with zero automated detection — the empirical case that this bug class is common, not theoretical, even in a language whose whole pitch is memory safety.</p></div>
+            <p class="src">Source: <a href="https://taesoo.kim/pubs/2021/bae:rudra.pdf">RUDRA (Bae et al.)</a></p>
+          </div>
+
+          <div class="finding rust">
+            <h3>Integer overflow's dual-mode design is still debated a decade later</h3>
+            <p class="desc">RFC 560: panic in debug builds, silently wrap in release. A deliberate defense-in-depth compromise, and still contested (RFC PR #2635 proposed always-panic-in-release for <code>usize</code>) — a documented "worked in testing, broke in prod" trap when a bug only panics under <code>debug_assertions</code>.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Open question this research could not resolve from available information: what does Edsger's own overflow behavior do today, and does it change across <code>-O</code> levels? Given Postulate shares the exact <code>opt -O0..-O3</code> pipeline, the identical debug/release-parity trap applies — resolve and document this explicitly per integer width and per <code>-O</code> level now.</p></div>
+            <p class="src">Sources: <a href="https://rust-lang.github.io/rfcs/0560-integer-overflow.html">RFC 0560</a> · <a href="https://huonw.github.io/blog/2016/04/myths-and-legends-about-integer-overflow-in-rust/">Myths and Legends about Integer Overflow in Rust</a></p>
+          </div>
+
+          <div class="finding rust skip">
+            <h3><code>get_unchecked</code>: unchecked-access UB from composing two reasonable unsafe trait impls</h3>
+            <p class="desc">Pre-1.52, <code>Zip</code>'s internal optimization called an unsafe trait method twice for the same index under certain conditions — UB that emerged from composition, not from any single function looking wrong in isolation.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Worth checking whether Edsger's own array indexing ever elides bounds checks at higher <code>-O</code> levels the way Rust's <code>get_unchecked</code> intentionally does — and whether that's <code>-O</code>-level-dependent (same debug/release-parity risk as overflow, above).</p></div>
+          </div>
+
+          <div class="finding rust skip">
+            <h3><code>noalias</code> in return position: a distinct, separately-discovered bug</h3>
+            <p class="desc">Return-position pointers were mistakenly marked <code>noalias</code>, implying the returned pointer aliases nothing reachable <em>before the call</em> — false for an identity-like function. A second, independent discovery from the same underlying attribute-emission mechanism as the parameter case.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>If Edsger ever emits <code>noalias</code>/<code>dereferenceable</code> on functions returning <code>own *T</code>, test the pass-through/identity case specifically — a second, independent failure mode from the parameter-position bug above.</p></div>
+            <p class="src">Source: <a href="https://github.com/rust-lang/rust/pull/106371">rust-lang/rust PR #106371</a></p>
+          </div>
+
+          <div class="finding rust skip">
+            <h3>Lifetime elision isn't a scope, it's a placeholder — and Postulate simply has none</h3>
+            <p class="desc"><code>'a</code> looks like a concrete region of code but is a parametric placeholder resolved per call site; <code>&amp;mut T</code> is invariant in <code>T</code> while <code>&amp;T</code> is covariant, and lifetime subtyping runs "backwards" from intuition.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>The strongest "we don't have this problem, by construction" item for the v1.2 generics design: monomorphized, lifetime-free type parameters have no elision-rule table and no variance question at all, because there's nothing for a lifetime to be co/contra/invariant with. Worth stating as a deliberate, permanent scope exclusion in the design notes.</p></div>
+          </div>
+
+          <div class="finding rust skip">
+            <h3>Miri: a dynamic oracle for what the type system can't statically prove</h3>
+            <p class="desc">Because the type system can't check <code>unsafe</code> code's invariants, Rust built a separate interpreter that dynamically enforces its aliasing model at runtime — catching violations only in whatever tests it's actually run against.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Useful contrast for evaluating Why3: Postulate is aiming for static, sound verification — strictly stronger than Miri's test-coverage-dependent checking if achievable, but historically far harder to scale. Worth an explicit plan for verification timeouts/non-termination on larger <code>own *T</code>-heavy programs before that becomes a surprise.</p></div>
+          </div>
+
+          <div class="finding rust">
+            <h3>Laundering a shared reference into a mutable one via <code>transmute</code></h3>
+            <p class="desc">Explicitly documented as UB: <code>transmute::&lt;&amp;T, &amp;mut T&gt;</code> violates the exclusivity the optimizer assumes for <code>&amp;mut</code>, independent of whether the underlying memory is "really" exclusively accessed at runtime.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>The direct Postulate analogue: casting away a <code>*const T</code> qualifier via <code>as</code> and writing through it. Recommend as the first concrete test once <code>*const T</code> enforcement is complete — does <code>opt</code> ever get told a pointer points to immutable data in a way that lets <code>-O2</code>/<code>-O3</code> cache a read across a cast-away write?</p></div>
+            <p class="src">Source: <a href="https://internals.rust-lang.org/t/the-special-warning-against-transmute-t-mut-t/3178/3">internals.rust-lang.org</a></p>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- ============ MANAGED ============ -->
+      <section class="block" id="lang-managed">
+        <div class="section-head">
+          <h2>C# · Java · Python · JavaScript · PHP</h2>
+          <span class="lang-tag" style="background:var(--lang-managed)">surveyed</span>
+        </div>
+        <p class="section-intro">Aggressively filtered: no GC, no exceptions, no dynamic typing, no reflection, no closures, no OOP inheritance in Postulate, so most of what these five languages are famous for simply doesn't transfer. What's left is genuinely portable — numeric representation, value-type copy semantics, text encoding, and operator-consistency rules.</p>
+
+        <div class="findings">
+
+          <div class="finding managed">
+            <h3>0.1 + 0.2 ≠ 0.3, everywhere, by construction</h3>
+            <p class="desc">Every IEEE-754 language hits this identically — decimal fractions have no exact binary representation. Pure consequence of base-2 mantissas, not a runtime quirk of any one language.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Postulate's float32/64 inherit this exactly. Low actionable risk — worth one "this is not a bug" regression test, and a documented epsilon-comparison idiom before someone files it as one.</p></div>
+            <p class="src">Source: <a href="https://0.30000000000000004.com/">0.30000000000000004.com</a></p>
+          </div>
+
+          <div class="finding managed">
+            <h3>Every mainstream language guarantees <code>NaN != NaN</code> — Postulate doesn't</h3>
+            <p class="desc">IEEE-754 mandates NaN compares unordered everywhere from C to Python to JavaScript. Postulate's ordered-<code>fcmp</code> lowering makes both <code>==</code> <em>and</em> <code>!=</code> read <code>false</code> for NaN — not an obscure IEEE detail, a deviation from the one NaN property every other language relies on.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Highest-priority float finding in this survey. Anyone porting intuition (or code) from any other language will get this backwards. Needs a prominent test case and a documented rationale — or reconsidering unordered predicates for <code>!=</code> specifically.</p></div>
+            <p class="src">Sources: <a href="https://grouper.ieee.org/groups/msc/ANSI_IEEE-Std-754-2019/background/predicates.txt">IEEE 754 predicates</a> · <a href="https://doc.rust-lang.org/std/cmp/trait.Eq.html">Rust's Eq trait</a> (excludes floats for exactly this reason)</p>
+          </div>
+
+          <div class="finding managed">
+            <h3>Truncating vs. flooring division/modulo — a real, named split</h3>
+            <p class="desc">C, Java, JS, C#, Go, and hardware division all truncate toward zero; Python floors toward −∞. Java 8 added <code>Math.floorMod</code>/<code>floorDiv</code> alongside <code>%</code>/<code>/</code> specifically because truncation surprised developers doing cyclic-index arithmetic.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Pick and document one convention (truncating matches LLVM's native <code>sdiv</code>/<code>srem</code> and C's hardware reality) and test the boundary cases explicitly: negative dividend, negative divisor, and the <code>INT_MIN</code> edge case above.</p></div>
+            <p class="src">Sources: <a href="https://www.evanjones.ca/integer-division.html">evanjones.ca</a> · <a href="https://www.geeksforgeeks.org/java/java-math-floormod-method/">Java Math.floorMod rationale</a></p>
+          </div>
+
+          <div class="finding managed">
+            <h3>Fixed-width overflow: a five-language taxonomy, and Rust's model is the closest fit</h3>
+            <p class="desc">The spectrum: C — UB, exploitable by the optimizer; Java/C# — always silent wraparound; Swift — traps by default, with explicit <code>&amp;+</code>/<code>&amp;-</code>/<code>&amp;*</code> for intended wrapping; Rust — panics in debug, wraps in release, plus a discoverable <code>checked_*</code>/<code>wrapping_*</code>/<code>saturating_*</code>/<code>overflowing_*</code> family for explicit intent.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Since Postulate has no exceptions/panics as an escape hatch, "trap" is weaker here than in Swift/Rust. The Rust named-function-family pattern is the best-fit portable lesson: pick one default (wrap, matching native hardware <code>add</code>/<code>sub</code>/<code>mul</code>) and offer explicit named alternatives instead of silent, undocumented behavior.</p></div>
+            <p class="src">Sources: <a href="https://numerics.diploid.ca/integers-part-2.html">Swift overflow operators</a> · <a href="https://blog.regehr.org/archives/642">regehr.org: How Integers Should Work</a></p>
+          </div>
+
+          <div class="finding managed">
+            <h3>Float→int cast truncates toward zero; rounding is always a separate, named operation</h3>
+            <p class="desc">C, Java, and Python's narrowing float→int casts all truncate toward zero, not floor and not round. Round-to-nearest is always explicit (<code>Math.round</code>, Python's <code>round()</code>), and several use round-half-to-even rather than the grade-school half-up rule.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Confirm Postulate's float→int <code>as</code> cast truncates toward zero (matching LLVM's <code>fptosi</code>/<code>fptoui</code>). Flag as a near-term gap: users will want an explicit round-to-nearest distinct from the truncating cast, with a deliberately chosen tie-break rule.</p></div>
+            <p class="src">Source: <a href="https://www.cs.cmu.edu/~rbd/papers/cmj-float-to-int.html">CMU: Danger in Floating-Point-to-Integer Conversion</a></p>
+          </div>
+
+          <div class="finding managed">
+            <h3>UTF-16 surrogate pairs, and the UTF-8 analog Postulate should actually worry about</h3>
+            <p class="desc">JS/Java/C# count UTF-16 code units, not codepoints — <code>"😀".length === 2</code> in JavaScript — and naive slicing can split a surrogate pair, a real, documented input-sanitization-bypass bug class.</p>
+            <pre>"😀".length  // 2 in JavaScript: one astral character, two UTF-16 code units</pre>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Postulate's <code>rune[N]</code> (UTF-8 codepoints) has no surrogate pairs — but <code>char[N]</code> (raw bytes) is exactly the structural equivalent of a "code unit," and slicing it at an arbitrary byte offset can just as easily split a 2–4-byte UTF-8 sequence mid-character. Test slicing/indexing <code>char[N]</code> at a non-boundary offset, and decoding a truncated multi-byte sequence into <code>rune[N]</code> — does it error, produce a replacement character, or read out of bounds?</p></div>
+            <p class="src">Sources: <a href="https://mathiasbynens.be/notes/javascript-unicode">Mathias Bynens: JS Unicode problem</a> · <a href="https://herolab.usd.de/en/the-security-risks-of-overlong-utf-8-encodings/">usd HeroLab: overlong UTF-8 encodings</a></p>
+          </div>
+
+          <div class="finding managed">
+            <h3>C#'s <code>==</code>/<code>!=</code>/<code>GetHashCode</code> consistency contract has no compiler enforcement</h3>
+            <p class="desc">C# lets <code>operator==</code> be overloaded independent of <code>!=</code>, <code>Equals</code>, and <code>GetHashCode</code> — the compiler only warns (CS0660/CS0661). The most common real bug: define <code>==</code> for value semantics, forget <code>GetHashCode</code>, and every <code>Dictionary</code>/<code>HashSet</code> silently treats equal values as different keys.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Postulate's documented gap exactly: <code>==</code> can be defined without <code>!=</code>, with zero enforced consistency. Consider a Rust-style split (a marker trait/convention gating which types can be hash keys) or simply require the pair to be defined together — cheap, and closes the single most common instance of this bug class.</p></div>
+            <p class="src">Sources: <a href="https://learn.microsoft.com/en-us/dotnet/csharp/misc/cs0661">C# CS0661</a> · <a href="https://algomaster.io/learn/csharp/equals-gethashcode">Equals/GetHashCode pitfalls</a></p>
+          </div>
+
+          <div class="finding managed">
+            <h3>Struct-in-collection and mutate-through-a-copy footguns</h3>
+            <p class="desc">C#'s classic value-type traps: mutating a struct reached through a property getter silently mutates a temporary copy and the write vanishes; <code>foreach</code> over structs had to be special-cased to forbid mutating the iteration variable, because it's a copy.</p>
+            <div class="verdict hot"><span class="vlabel">Verdict</span><p>Postulate structs are value types too, copied on pass/return with no reference-type escape hatch except explicit pointers. Test that mutating a struct field reached through a function call that returns a struct by value is provably impossible (never silently "looks like" it worked) — and that struct-in-struct field chains hold the same guarantee. Postulate's requirement for explicit <code>ref</code> to get by-reference semantics should already make this lower-risk than C# by design; the test is confirming that explicitness actually holds everywhere.</p></div>
+            <p class="src">Source: <a href="https://steven-giesel.com/blogPost/7b896127-41a4-4008-87cb-d2fbdd5a0d5b">Steven Giesel: mutable value types are evil</a></p>
+          </div>
+
+          <div class="finding managed skip">
+            <h3>PHP/JS coercion as a design cautionary tale — culturally real, weakly documented</h3>
+            <p class="desc">"PHP: A Fractal of Bad Design" is widely credited with helping shift language-design culture toward explicit typing, but no primary Rust/Go/Swift design doc directly cites it as a stated rationale — the influence is cultural, not a documented engineering citation.</p>
+            <div class="verdict"><span class="vlabel">Verdict</span><p>Directionally confirms what's already obvious: Postulate's literal-anchoring-instead-of-coercion design avoids this bug class entirely. Not worth a dedicated test beyond what "no implicit coercion" already covers — a design-philosophy confirmation, not an action item.</p></div>
+            <p class="src">Source: <a href="https://eev.ee/blog/2012/04/09/php-a-fractal-of-bad-design/">eev.ee: PHP, a fractal of bad design</a></p>
+          </div>
+
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <footer class="colophon">
+    <span>Compiled from five parallel research passes, each briefed on Postulate's actual current feature set before searching — not generic language trivia filtered after the fact.</span>
+    <span>Next: turn the priority board into <code>Edsger_v1/tests/blackbox_cases/</code> fixtures.</span>
+  </footer>
+
+</div>
+
+</body></html>

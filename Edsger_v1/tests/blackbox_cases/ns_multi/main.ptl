@@ -1,0 +1,11 @@
+namespace \Main;
+
+use \Vendor\Math::Add as Plus;
+use \Vendor\Math::Sub;
+
+function main() : int32 {
+  mut r1 : int32 := Plus(3, 4);
+  mut r2 : int32 := Sub(10, 3);
+  if (r1 == 7 && r2 == 7) { return 0; }
+  return 1;
+}

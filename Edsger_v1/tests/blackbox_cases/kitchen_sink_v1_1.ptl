@@ -1,0 +1,356 @@
+namespace \KitchenSink;
+
+/* Nested block comment check (v1.1.13): /* this inner comment must not
+   close the outer one early, end-inner-here */ -- if the lexer still
+   used C's first-close-wins rule instead of real nesting, this whole
+   region would already have ended one line up. */
+
+extern function sys_write(fd: int64, buf: *uint8, count: uint64) : int64;
+extern function sys_mmap(addr: uint64, length: uint64, prot: int64, flags: int64, fd: int64, offset: int64) : *void;
+extern function sys_mremap(old_addr: uint64, old_length: uint64, new_length: uint64, flags: int64) : *void;
+extern function sys_munmap(addr: uint64, length: uint64) : int64;
+extern function sys_gettid() : int64;
+extern function sys_openat(dirfd: int64, path: *char, flags: int64, mode: int64) : int64;
+extern function sys_close(fd: int64) : int64;
+
+struct Point {
+  x: int32;
+  y: int32;
+}
+
+struct Line {
+  a: Point;
+  b: Point;
+}
+
+struct Padded {
+  a: uint8;
+  b: int32;
+}
+
+operator ==(a: Point, b: Point) : bool {
+  return a.x == b.x && a.y == b.y;
+}
+
+// -- control flow: if/elseif/else, while, break, continue --------------
+
+function classify(x: int32) : int32 {
+  if (x < 0) {
+    return -1;
+  } elseif (x == 0) {
+    return 0;
+  } else {
+    return 1;
+  }
+}
+
+function loopDemo() : int32 {
+  mut sum : int32 := 0;
+  mut i : int32 := 0;
+  while (i < 10) {
+    if (i == 3) { i := i + 1; continue; }
+    if (i == 8) { break; }
+    sum := sum + i;
+    i := i + 1;
+  }
+  return sum;
+}
+
+function demoControlFlow() : bool {
+  return classify(-5) == -1 && classify(0) == 0 && classify(5) == 1 && loopDemo() == 25;
+}
+
+// -- compound assignment, ++/-- -----------------------------------------
+
+function demoCompoundIncDec() : bool {
+  mut x : int32 := 10;
+  mut f : float64 := 2.0;
+  x :+ 5;
+  x :- 3;
+  x :* 2;
+  x :/ 4;
+  x++;
+  x--;
+  f :* 3.0;
+  return x == 6 && f == 6.0;
+}
+
+// -- ref parameters -------------------------------------------------------
+
+function refBump(ref x: int32) : void {
+  x :+ 1;
+}
+
+function demoRef() : bool {
+  mut counter : int32 := 41;
+  refBump(counter);
+  return counter == 42;
+}
+
+// -- operator overloading --------------------------------------------------
+
+function demoOperatorOverload() : bool {
+  mut p1 : Point := Point { x := 1, y := 2 };
+  mut p2 : Point := Point { x := 1, y := 2 };
+  mut p3 : Point := Point { x := 9, y := 9 };
+  return (p1 == p2) && !(p1 == p3);
+}
+
+// -- array broadcast-init / broadcast-assign -------------------------------
+
+function demoBroadcast() : bool {
+  mut arrs : int32[4] := 7;
+  mut pts : Point[3] := Point { x := 1, y := 2 };
+  mut arr2 : int32[3];
+  arr2 := 9;
+  return arrs[0] == 7 && arrs[3] == 7 && pts[1].x == 1 && pts[2].y == 2 && arr2[0] == 9 && arr2[2] == 9;
+}
+
+// -- pointer arithmetic, *void, uintptr ------------------------------------
+
+function ptrArith(base: *int32) : *int32 {
+  return (base + 3) - 1;
+}
+
+function ptrDiff(a: *int32, b: *int32) : int64 {
+  return a - b;
+}
+
+function demoPointers() : bool {
+  mut arr : int32[5] := {1, 2, 3, 4, 5};
+  mut base : *int32 := &arr[0];
+  mut p2 : *int32 := ptrArith(base);
+  mut diff : int64 := ptrDiff(p2, base);
+  mut u : uintptr := base as uintptr;
+  mut backp : *int32 := u as *int32;
+  mut vp : *void := base as *void;
+  return (*p2) == 3 && diff == 2 && (*backp) == 1 && vp != null;
+}
+
+// -- arbitrary-depth pointer types and dereference -------------------------
+
+function demoDeepPtr() : bool {
+  mut x : int32 := 5;
+  mut p1 : *int32 := &x;
+  mut p2 : **int32 := &p1;
+  mut p3 : ***int32 := &p2;
+  mut p4 : ****int32 := &p3;
+  return (****p4) == 5;
+}
+
+// -- struct layout (natural/ABI alignment, not packed) ---------------------
+
+function demoStructLayout() : bool {
+  return (sizeof(Padded) as int32) == 8;
+}
+
+// -- rune / multi-byte char literal / char[N] & rune[N] strings ------------
+
+function demoText() : bool {
+  mut greeting : char[5] := "hello";
+  mut r : rune := 'é';
+  mut word : rune[4] := "café";
+  mut ok1 : bool := (greeting[0] as int32) == 104;
+  mut ok2 : bool := (lengthof(greeting) as int32) == 5;
+  mut ok3 : bool := (lengthof(word) as int32) == 4;
+  mut ok4 : bool := (word[3] as int32) == 233;
+  mut ok5 : bool := (r as int32) == 233;
+  return ok1 && ok2 && ok3 && ok4 && ok5;
+}
+
+// -- function types ---------------------------------------------------------
+
+function pureAdd(a: int32, b: int32) : int32 {
+  return a + b;
+}
+
+function applyOp(f: (a: int32, b: int32) -> int32, x: int32, y: int32) : int32 {
+  return f(x, y);
+}
+
+function demoFuncType() : bool {
+  mut fnptr : (a: int32, b: int32) -> int32 := pureAdd;
+  return applyOp(fnptr, 3, 4) == 7 && applyOp(pureAdd, 10, 20) == 30;
+}
+
+// -- `->` deref-sugar vs. auto-deref `.`, nested struct literals -----------
+
+function demoArrowDeref() : bool {
+  mut p : Point := Point { x := 5, y := 6 };
+  mut pp : *Point := &p;
+  pp->x := pp->x + 1;
+  return pp.x == 6 && p.x == 6;
+}
+
+function demoStructNested() : bool {
+  mut p : Point := Point { x := 3, y := 4 };
+  mut l : Line := Line { a := Point { x := 1, y := 2 }, b := p };
+  mut px : *int32 := &p.x;
+  *px := *px + 10;
+  return l.a.x == 1 && l.a.y == 2 && l.b.x == 3 && l.b.y == 4 && p.x == 13;
+}
+
+// -- casts: widen/narrow/same-width/bool/pointer<->uintptr/pointer<->pointer
+
+function demoCasts() : bool {
+  mut a8 : int8 := -5;
+  mut w : int64 := a8 as int64;
+  mut ub : uint8 := 250;
+  mut uw : int64 := ub as int64;
+  mut big : int64 := 300;
+  mut n32 : int32 := big as int32;
+  mut same : int32 := 7;
+  mut u32 : uint32 := same as uint32;
+  mut flag : bool := (5 as bool);
+  mut back : int32 := flag as int32;
+  mut px : int32 := 9;
+  mut pptr : *int32 := &px;
+  mut up : uintptr := pptr as uintptr;
+  mut pptr2 : *int32 := up as *int32;
+  mut pptr3 : *int64 := pptr as *int64;
+  return w == -5 && uw == 250 && n32 == 300 && u32 == 7 && back == 1 && (*pptr2) == 9 && pptr3 != null;
+}
+
+// -- numeric types, based-form int literals, negative-literal anchoring ---
+
+function demoNumeric() : bool {
+  mut hexv : int32 := 16nFF as int32;
+  mut binv : int32 := 2n1010 as int32;
+  mut negw : int64 := -1;
+  mut allones : uint64 := -1 as uint64;
+  mut one_u64 : uint64 := 1;
+  mut zero_u64 : uint64 := 0;
+  return hexv == 255 && binv == 10 && negw == -1 && (allones + one_u64) == zero_u64;
+}
+
+// -- floating point: types, based-form literals, **, _/ --------------------
+
+function absf(x: float64) : float64 {
+  if (x < 0.0) { return -x; }
+  return x;
+}
+
+function nearlyEqual(a: float64, b: float64) : bool {
+  return absf(a - b) < 0.0001;
+}
+
+function demoFloat() : bool {
+  mut powRes : float64 := 2.0 ** 0.5;
+  mut rootRes : float64 := 2.0 _/ 8.0;
+  mut b10 : float64 := 10n9.5e2;
+  mut b16 : float64 := 16nF.8p3;
+  mut base : int32 := 3;
+  mut ipow : int32 := base ** (2 as uint32);
+  return nearlyEqual(powRes, 1.4142135623730951) && nearlyEqual(rootRes, 2.8284271247461903) && b10 == 950.0 && b16 == 63488.0 && ipow == 9;
+}
+
+// -- NaN comparison quirk (documented: ordered fcmp, NaN != NaN reads false)
+
+function demoNaN() : bool {
+  mut zero : float64 := 0.0;
+  mut nanv : float64 := zero / zero;
+  return (nanv != nanv) == false;
+}
+
+// -- externs/syscalls: write, mmap/mremap/munmap round trip, gettid, --------
+// -- openat/close on a path guaranteed to exist -----------------------------
+
+function demoSyscalls() : bool {
+  mut msg : uint8[3];
+  mut n : int64;
+  mut raw : *void;
+  mut ok_mmap : bool;
+  mut raw2 : *void;
+  mut ok_mremap : bool;
+  mut tid : int64;
+  // Raw sys_openat is the bare Linux syscall: it expects a NUL-
+  // terminated C string. A `char[N] := "..."` literal deliberately
+  // does NOT add a trailing NUL (its length must exactly match the
+  // literal's own decoded byte count, postulate_v1_language_reference
+  // .md's own string-literal rule) -- passing that buffer straight to
+  // a raw syscall would read whatever garbage follows it on the stack
+  // looking for a terminator. Build the path by hand instead, with an
+  // explicit trailing 0 byte, exactly as a real `std` io wrapper would
+  // have to.
+  mut path : uint8[10];
+  mut fd : int64;
+  mut ok_open : bool;
+  mut close_res : int64 := 0;
+
+  msg[0] := 79;
+  msg[1] := 75;
+  msg[2] := 10;
+  n := sys_write(1, &msg[0], 3);
+
+  raw := sys_mmap(0, 4096, 3, 34, 0, 0);
+  ok_mmap := raw != null;
+  raw2 := sys_mremap(raw as uintptr, 4096, 8192, 1);
+  ok_mremap := raw2 != null;
+  sys_munmap(raw2 as uintptr, 8192);
+
+  tid := sys_gettid();
+
+  path[0] := 47;
+  path[1] := 100;
+  path[2] := 101;
+  path[3] := 118;
+  path[4] := 47;
+  path[5] := 110;
+  path[6] := 117;
+  path[7] := 108;
+  path[8] := 108;
+  path[9] := 0;
+  fd := sys_openat(0, &path[0] as *char, 0, 0);
+  ok_open := fd >= 0;
+  if (ok_open) { close_res := sys_close(fd); }
+
+  return n == 3 && ok_mmap && ok_mremap && tid > 0 && ok_open && close_res == 0;
+}
+
+// -- main(argv, argc), two-parameter form -----------------------------------
+
+function demoArgv(argc: uint16) : bool {
+  return (argc as int32) >= 1;
+}
+
+function main(argv: **char, argc: uint16) : int32 {
+  mut results : bool[18];
+  mut status : uint8[19];
+  mut i : int32 := 0;
+  mut allPass : bool := true;
+  mut exitCode : int32 := 0;
+
+  results[0] := demoControlFlow();
+  results[1] := demoCompoundIncDec();
+  results[2] := demoRef();
+  results[3] := demoOperatorOverload();
+  results[4] := demoBroadcast();
+  results[5] := demoPointers();
+  results[6] := demoDeepPtr();
+  results[7] := demoStructLayout();
+  results[8] := demoText();
+  results[9] := demoFuncType();
+  results[10] := demoArrowDeref();
+  results[11] := demoStructNested();
+  results[12] := demoCasts();
+  results[13] := demoNumeric();
+  results[14] := demoFloat();
+  results[15] := demoNaN();
+  results[16] := demoSyscalls();
+  results[17] := demoArgv(argc);
+
+  while (i < 18) {
+    if (results[i]) {
+      status[i] := 49;
+    } else {
+      status[i] := 48;
+      allPass := false;
+    }
+    i := i + 1;
+  }
+  status[18] := 10;
+  sys_write(1, &status[0], 19);
+
+  if (!allPass) { exitCode := 1; }
+  return exitCode;
+}

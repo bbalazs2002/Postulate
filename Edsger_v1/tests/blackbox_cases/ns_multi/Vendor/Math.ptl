@@ -1,0 +1,9 @@
+namespace \Vendor\Math;
+
+function Add(a: int32, b: int32) : int32 {
+  return a + b;
+}
+
+function Sub(a: int32, b: int32) : int32 {
+  return a - b;
+}

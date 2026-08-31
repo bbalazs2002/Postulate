@@ -1,0 +1,25 @@
+namespace \Main;
+
+// Three independent, unrelated semantic errors of different flavors,
+// each in its own function, all syntactically clean so the parser
+// never objects. Originally written to PROVE Sema stopped at the
+// first semantic error (it did, until 2026-08-31); now it's the
+// regression test confirming all three are reported together.
+
+function bad1() : int32 {
+  mut x : *int32 := 5;
+  return 0;
+}
+
+function bad2() : bool {
+  mut y : int32 := true;
+  return y;
+}
+
+function bad3() : int32 {
+  return 5 + true;
+}
+
+function main() : int32 {
+  return 0;
+}

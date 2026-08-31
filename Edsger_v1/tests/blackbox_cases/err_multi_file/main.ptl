@@ -1,0 +1,18 @@
+namespace \Main;
+
+// Confirms multi-error accumulation crosses FILE boundaries, not just
+// declaration boundaries within one file: this file has its own
+// semantic error, AND compiles a second, wholly independent file
+// (Helper.ptl) that has a different one -- both should be reported
+// together in one run.
+
+use \Helper::broken;
+
+function bad_here() : int32 {
+  mut x : *int32 := 5;
+  return 0;
+}
+
+function main() : int32 {
+  return broken();
+}

@@ -1,0 +1,11 @@
+namespace \Main;
+
+struct Point {
+  x: int32;
+  y: int32;
+}
+
+function main() : int32 {
+  mut p : Point := Point { x := 1 };
+  return p.x;
+}
